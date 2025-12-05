@@ -1,3 +1,4 @@
+mod arrow_convert;
 mod duckdb;
 mod parquet_writer;
 mod postgres;
@@ -45,7 +46,9 @@ impl DataFetcher for NativeFetcher {
             "duckdb" | "motherduck" => {
                 duckdb::fetch_table(config, catalog, schema, table, storage, connection_id).await
             }
-            "postgres" => todo!("PostgreSQL fetch"),
+            "postgres" => {
+                postgres::fetch_table(config, catalog, schema, table, storage, connection_id).await
+            }
             other => Err(DataFetchError::UnsupportedDriver(other.to_string())),
         }
     }
