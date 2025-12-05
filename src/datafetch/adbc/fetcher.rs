@@ -245,6 +245,12 @@ impl Default for AdbcFetcher {
     }
 }
 
+/// Quote a SQL identifier to prevent injection
+/// Wraps the identifier in double quotes and escapes any internal double quotes
+fn quote_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
 #[async_trait]
 impl DataFetcher for AdbcFetcher {
     async fn discover_tables(
@@ -282,10 +288,15 @@ impl DataFetcher for AdbcFetcher {
         let buffer = {
             let mut connection = self.connect(config)?;
 
-            // Build fully-qualified table name
+            // Build fully-qualified table name with properly quoted identifiers
             let table_ref = match catalog {
-                Some(cat) => format!("{}.{}.{}", cat, schema, table),
-                None => format!("{}.{}", schema, table),
+                Some(cat) => format!(
+                    "{}.{}.{}",
+                    quote_identifier(cat),
+                    quote_identifier(schema),
+                    quote_identifier(table)
+                ),
+                None => format!("{}.{}", quote_identifier(schema), quote_identifier(table)),
             };
 
             // Create statement and execute query
