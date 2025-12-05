@@ -1,5 +1,7 @@
 mod parquet_writer;
 
+pub use parquet_writer::StreamingParquetWriter;
+
 use async_trait::async_trait;
 
 use crate::datafetch::{ConnectionConfig, DataFetchError, DataFetcher, TableMetadata};
