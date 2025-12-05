@@ -1,5 +1,6 @@
 use super::schema_provider::HotDataSchemaProvider;
 use crate::catalog::CatalogManager;
+use crate::datafetch::{AdbcFetcher, DataFetcher};
 use crate::storage::StorageManager;
 use async_trait::async_trait;
 use datafusion::catalog::{CatalogProvider, SchemaProvider};
@@ -16,6 +17,7 @@ pub struct HotDataCatalogProvider {
     catalog: Arc<dyn CatalogManager>,
     schemas: Arc<RwLock<HashMap<String, Arc<dyn SchemaProvider>>>>,
     storage: Arc<dyn StorageManager>,
+    fetcher: Arc<dyn DataFetcher>,
 }
 
 impl HotDataCatalogProvider {
@@ -33,6 +35,7 @@ impl HotDataCatalogProvider {
             catalog,
             schemas: Arc::new(RwLock::new(HashMap::new())),
             storage,
+            fetcher: Arc::new(AdbcFetcher::new()),
         }
     }
 
@@ -62,6 +65,7 @@ impl HotDataCatalogProvider {
             (*self.connection_config).clone(),
             self.catalog.clone(),
             self.storage.clone(),
+            self.fetcher.clone(),
         )) as Arc<dyn SchemaProvider>;
 
         schemas.insert(schema_name.to_string(), schema_provider.clone());

@@ -5,6 +5,7 @@ use datafusion::datasource::TableProvider;
 use std::sync::Arc;
 
 use crate::catalog::CatalogManager;
+use crate::datafetch::{ConnectionConfig, DataFetcher};
 use crate::storage::StorageManager;
 
 /// A schema provider that syncs tables on-demand from remote sources.
@@ -15,10 +16,11 @@ pub struct HotDataSchemaProvider {
     #[allow(dead_code)]
     connection_name: String,
     schema_name: String,
-    _connection_config: Arc<serde_json::Value>,
+    connection_config: Arc<serde_json::Value>,
     catalog: Arc<dyn CatalogManager>,
     inner: Arc<MemorySchemaProvider>,
     storage: Arc<dyn StorageManager>,
+    fetcher: Arc<dyn DataFetcher>,
 }
 
 impl HotDataSchemaProvider {
@@ -30,15 +32,17 @@ impl HotDataSchemaProvider {
         connection_config: serde_json::Value,
         catalog: Arc<dyn CatalogManager>,
         storage: Arc<dyn StorageManager>,
+        fetcher: Arc<dyn DataFetcher>,
     ) -> Self {
         Self {
             connection_id,
             connection_name,
             schema_name,
-            _connection_config: Arc::new(connection_config),
+            connection_config: Arc::new(connection_config),
             catalog,
             inner: Arc::new(MemorySchemaProvider::new()),
             storage,
+            fetcher,
         }
     }
 
@@ -138,8 +142,43 @@ impl SchemaProvider for HotDataSchemaProvider {
                 format!("file://{}", path)
             }
         } else {
-            // Need to sync first
-            todo!("need to implement sync!")
+            // Need to sync first - build connection config and fetch
+            let source_type = self.connection_config
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("postgres");
+
+            let connection_string = self.connection_config
+                .get("connection_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let config = ConnectionConfig {
+                source_type: source_type.to_string(),
+                connection_string: connection_string.to_string(),
+            };
+
+            // Fetch the table data
+            let parquet_url = self.fetcher
+                .fetch_table(
+                    &config,
+                    None, // catalog
+                    &self.schema_name,
+                    name,
+                    self.storage.as_ref(),
+                    self.connection_id,
+                )
+                .await
+                .map_err(|e| datafusion::common::DataFusionError::External(
+                    format!("Failed to fetch table: {}", e).into(),
+                ))?;
+
+            // Update catalog with new path
+            if let Ok(Some(info)) = self.catalog.get_table(self.connection_id, &self.schema_name, name) {
+                let _ = self.catalog.update_table_sync(info.id, &parquet_url, "");
+            }
+
+            parquet_url
         };
 
         // Load the parquet file
