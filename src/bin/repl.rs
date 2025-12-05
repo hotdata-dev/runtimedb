@@ -405,7 +405,7 @@ async fn handle_command(state: &mut ReplState, line: &str) -> Result<()> {
             print_help();
         }
         _ if line.starts_with("connect ") => {
-            handle_connect(state, line)?;
+            handle_connect(state, line).await?;
         }
         "list-connections" => {
             handle_list_connections(state)?;
@@ -462,7 +462,7 @@ fn print_duration_sec(d: Duration) {
     println!("execution time {}", time);
 }
 
-fn handle_connect(state: &mut ReplState, line: &str) -> Result<()> {
+async fn handle_connect(state: &mut ReplState, line: &str) -> Result<()> {
     // Parse: connect <type> <name> <key=value> ...
     let parts: Vec<&str> = line.split_whitespace().collect();
 
@@ -535,7 +535,7 @@ fn handle_connect(state: &mut ReplState, line: &str) -> Result<()> {
     let config_value = serde_json::Value::Object(config);
 
     // Connect through the engine
-    state.engine.connect(source_type, name, config_value)?;
+    state.engine.connect(source_type, name, config_value).await?;
 
     Ok(())
 }

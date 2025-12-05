@@ -161,9 +161,9 @@ pub async fn create_connection_handler(
     }
 
     // Attempt to connect (discovers tables and registers catalog)
-    // todo: we should do the discover tables work async
     engine
         .connect(&request.source_type, &request.name, request.config)
+        .await
         .map_err(|e| {
             // Extract root cause message only - don't expose full stack trace to clients
             let root_cause = e.root_cause().to_string();

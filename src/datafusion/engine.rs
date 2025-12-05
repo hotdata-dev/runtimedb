@@ -1,5 +1,6 @@
 use super::catalog_provider::HotDataCatalogProvider;
 use crate::catalog::{CatalogManager, ConnectionInfo, DuckdbCatalogManager, TableInfo};
+use crate::datafetch::DataFetcher;
 use crate::storage::{FilesystemStorage, StorageManager};
 use anyhow::Result;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -133,38 +134,88 @@ impl HotDataEngine {
     }
 
     /// Connect to a new external data source and register it as a catalog.
-    pub fn connect(&self, source_type: &str, _name: &str, _config: serde_json::Value) -> Result<()> {
-
-        // Validate source type - must match one of the supported types
-        if !["postgres", "snowflake", "motherduck"].contains(&source_type) {
+    pub async fn connect(&self, source_type: &str, name: &str, config: serde_json::Value) -> Result<()> {
+        // Validate source type
+        if !["postgres", "snowflake", "motherduck", "duckdb"].contains(&source_type) {
             anyhow::bail!(
-                "Unsupported source type '{}'. Supported types: postgres, snowflake, motherduck",
+                "Unsupported source type '{}'. Supported types: postgres, snowflake, motherduck, duckdb",
                 source_type
             );
         }
 
-        // Inject the type field into config for serde tagged enum parsing
-        // The API sends source_type separately, but Source enum needs it in the JSON
-        // let config_with_type = {
-        //     let mut obj = match config {
-        //         serde_json::Value::Object(m) => m,
-        //         _ => anyhow::bail!("Configuration must be a JSON object"),
-        //     };
-        //     obj.insert(
-        //         "type".to_string(),
-        //         serde_json::Value::String(source_type.to_string()),
-        //     );
-        //     serde_json::Value::Object(obj)
-        // };
+        // Build connection config
+        let connection_string = config
+            .get("connection_string")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("connection_string required in config"))?
+            .to_string();
 
-        // // Parse config into Source enum 
-        // let source: crate::Source = serde_json::from_value(config_with_type)
-        //     .map_err(|e| anyhow::anyhow!("Invalid configuration for {}: {}", source_type, e))?;
-
+        let fetch_config = crate::datafetch::ConnectionConfig {
+            source_type: source_type.to_string(),
+            connection_string,
+        };
 
         // Discover tables
         info!("Discovering tables for {} source...", source_type);
-        todo!("Implement table discovery");
+        let fetcher = crate::datafetch::AdbcFetcher::new();
+        let tables = fetcher.discover_tables(&fetch_config).await
+            .map_err(|e| anyhow::anyhow!("Discovery failed: {}", e))?;
+
+        info!("Discovered {} tables", tables.len());
+
+        // Add connection to catalog
+        let config_with_type = {
+            let mut obj = match config {
+                serde_json::Value::Object(m) => m,
+                _ => anyhow::bail!("Configuration must be a JSON object"),
+            };
+            obj.insert(
+                "type".to_string(),
+                serde_json::Value::String(source_type.to_string()),
+            );
+            serde_json::Value::Object(obj)
+        };
+
+        let config_json = serde_json::to_string(&config_with_type)?;
+        let conn_id = self.catalog.add_connection(name, source_type, &config_json)?;
+
+        // Add discovered tables to catalog
+        for table in &tables {
+            let table_id = self.catalog.add_table(conn_id, &table.schema_name, &table.table_name)?;
+
+            // Store Arrow schema as JSON
+            // Convert schema fields to a serializable format
+            let schema = table.to_arrow_schema();
+            let schema_fields: Vec<serde_json::Value> = schema
+                .fields()
+                .iter()
+                .map(|field| {
+                    serde_json::json!({
+                        "name": field.name(),
+                        "data_type": format!("{:?}", field.data_type()),
+                        "nullable": field.is_nullable(),
+                    })
+                })
+                .collect();
+            let schema_json = serde_json::to_string(&schema_fields)
+                .map_err(|e| anyhow::anyhow!("Failed to serialize schema: {}", e))?;
+            self.catalog.update_table_schema(table_id, &schema_json)?;
+        }
+
+        // Register with DataFusion
+        let catalog_provider = Arc::new(HotDataCatalogProvider::new(
+            conn_id,
+            name.to_string(),
+            config_with_type,
+            self.catalog.clone(),
+            self.storage.clone(),
+        )) as Arc<dyn CatalogProvider>;
+
+        self.df_ctx.register_catalog(name, catalog_provider);
+
+        info!("Connection '{}' registered with {} tables", name, tables.len());
+
+        Ok(())
     }
 
     /// Get a cloned catalog manager that shares the same underlying connection.
