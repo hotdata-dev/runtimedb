@@ -1,3 +1,4 @@
+use anyhow::Result;
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
 use std::sync::Arc;
 
@@ -30,4 +31,10 @@ impl TableMetadata {
             .collect();
         Arc::new(Schema::new(fields))
     }
+}
+
+/// Deserialize an Arrow Schema from JSON string
+pub fn deserialize_arrow_schema(json: &str) -> Result<Arc<Schema>> {
+    let schema: Schema = serde_json::from_str(json)?;
+    Ok(Arc::new(schema))
 }

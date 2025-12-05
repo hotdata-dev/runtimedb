@@ -28,6 +28,7 @@ env_logger = "0.11"
 clap = { version = "4.5", features = ["derive"] }
 arrow-csv = "56.2"
 arrow-json = "56.2"
+arrow-schema = { version = "56.2", features = ["serde"] }
 tokio-postgres = "0.7"
 postgres-native-tls = "0.5"
 native-tls = "0.2"

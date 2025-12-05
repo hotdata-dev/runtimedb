@@ -184,20 +184,8 @@ impl HotDataEngine {
             let table_id = self.catalog.add_table(conn_id, &table.schema_name, &table.table_name)?;
 
             // Store Arrow schema as JSON
-            // Convert schema fields to a serializable format
             let schema = table.to_arrow_schema();
-            let schema_fields: Vec<serde_json::Value> = schema
-                .fields()
-                .iter()
-                .map(|field| {
-                    serde_json::json!({
-                        "name": field.name(),
-                        "data_type": format!("{:?}", field.data_type()),
-                        "nullable": field.is_nullable(),
-                    })
-                })
-                .collect();
-            let schema_json = serde_json::to_string(&schema_fields)
+            let schema_json = serde_json::to_string(schema.as_ref())
                 .map_err(|e| anyhow::anyhow!("Failed to serialize schema: {}", e))?;
             self.catalog.update_table_schema(table_id, &schema_json)?;
         }
