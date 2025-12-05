@@ -1,0 +1,157 @@
+//! DuckDB/MotherDuck native driver implementation
+
+use duckdb::Connection;
+
+use crate::datafetch::{ColumnMetadata, ConnectionConfig, DataFetchError, TableMetadata};
+use crate::storage::StorageManager;
+
+/// Discover tables and columns from DuckDB/MotherDuck
+pub async fn discover_tables(config: &ConnectionConfig) -> Result<Vec<TableMetadata>, DataFetchError> {
+    let connection_string = config.connection_string.clone();
+
+    tokio::task::spawn_blocking(move || discover_tables_sync(&connection_string))
+        .await
+        .map_err(|e| DataFetchError::Connection(e.to_string()))?
+}
+
+fn discover_tables_sync(connection_string: &str) -> Result<Vec<TableMetadata>, DataFetchError> {
+    let conn = Connection::open(connection_string)
+        .map_err(|e| DataFetchError::Connection(e.to_string()))?;
+
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT
+                t.table_catalog,
+                t.table_schema,
+                t.table_name,
+                t.table_type,
+                c.column_name,
+                c.data_type,
+                c.is_nullable,
+                c.ordinal_position
+            FROM information_schema.tables t
+            JOIN information_schema.columns c
+                ON t.table_catalog = c.table_catalog
+                AND t.table_schema = c.table_schema
+                AND t.table_name = c.table_name
+            WHERE t.table_schema NOT IN ('information_schema', 'pg_catalog')
+            ORDER BY t.table_schema, t.table_name, c.ordinal_position
+            "#,
+        )
+        .map_err(|e| DataFetchError::Discovery(e.to_string()))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?, // catalog
+                row.get::<_, String>(1)?,         // schema
+                row.get::<_, String>(2)?,         // table
+                row.get::<_, String>(3)?,         // table_type
+                row.get::<_, String>(4)?,         // column_name
+                row.get::<_, String>(5)?,         // data_type
+                row.get::<_, String>(6)?,         // is_nullable
+                row.get::<_, i32>(7)?,            // ordinal_position
+            ))
+        })
+        .map_err(|e| DataFetchError::Discovery(e.to_string()))?;
+
+    let mut tables: Vec<TableMetadata> = Vec::new();
+
+    for row_result in rows {
+        let (catalog, schema, table, table_type, col_name, data_type, is_nullable, ordinal) =
+            row_result.map_err(|e| DataFetchError::Discovery(e.to_string()))?;
+
+        let column = ColumnMetadata {
+            name: col_name,
+            data_type: duckdb_type_to_arrow(&data_type),
+            nullable: is_nullable.to_uppercase() == "YES",
+            ordinal_position: ordinal as i16,
+        };
+
+        // Find or create table entry
+        if let Some(existing) = tables.iter_mut().find(|t| {
+            t.catalog_name == catalog && t.schema_name == schema && t.table_name == table
+        }) {
+            existing.columns.push(column);
+        } else {
+            tables.push(TableMetadata {
+                catalog_name: catalog,
+                schema_name: schema,
+                table_name: table,
+                table_type,
+                columns: vec![column],
+            });
+        }
+    }
+
+    Ok(tables)
+}
+
+/// Fetch table data and write to Parquet
+pub async fn fetch_table(
+    config: &ConnectionConfig,
+    _catalog: Option<&str>,
+    schema: &str,
+    table: &str,
+    storage: &dyn StorageManager,
+    connection_id: i32,
+) -> Result<String, DataFetchError> {
+    todo!("DuckDB fetch_table")
+}
+
+/// Convert DuckDB type name to Arrow DataType
+fn duckdb_type_to_arrow(duckdb_type: &str) -> datafusion::arrow::datatypes::DataType {
+    use datafusion::arrow::datatypes::{DataType, TimeUnit};
+
+    let type_upper = duckdb_type.to_uppercase();
+
+    // Handle parameterized types by extracting base type
+    let base_type = type_upper.split('(').next().unwrap_or(&type_upper).trim();
+
+    match base_type {
+        "BOOLEAN" | "BOOL" => DataType::Boolean,
+        "TINYINT" | "INT1" => DataType::Int8,
+        "SMALLINT" | "INT2" => DataType::Int16,
+        "INTEGER" | "INT" | "INT4" => DataType::Int32,
+        "BIGINT" | "INT8" => DataType::Int64,
+        "UTINYINT" => DataType::UInt8,
+        "USMALLINT" => DataType::UInt16,
+        "UINTEGER" => DataType::UInt32,
+        "UBIGINT" => DataType::UInt64,
+        "REAL" | "FLOAT4" | "FLOAT" => DataType::Float32,
+        "DOUBLE" | "FLOAT8" => DataType::Float64,
+        "DECIMAL" | "NUMERIC" => DataType::Decimal128(38, 10),
+        "VARCHAR" | "TEXT" | "STRING" | "CHAR" | "BPCHAR" => DataType::Utf8,
+        "BLOB" | "BYTEA" | "BINARY" | "VARBINARY" => DataType::Binary,
+        "DATE" => DataType::Date32,
+        "TIME" => DataType::Time64(TimeUnit::Microsecond),
+        "TIMESTAMP" | "DATETIME" => DataType::Timestamp(TimeUnit::Microsecond, None),
+        "TIMESTAMPTZ" | "TIMESTAMP WITH TIME ZONE" => {
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+        }
+        "UUID" => DataType::Utf8,
+        "JSON" => DataType::Utf8,
+        "INTERVAL" => DataType::Interval(datafusion::arrow::datatypes::IntervalUnit::MonthDayNano),
+        _ => DataType::Utf8, // Default fallback
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_duckdb_type_mapping() {
+        use datafusion::arrow::datatypes::DataType;
+
+        assert!(matches!(duckdb_type_to_arrow("INTEGER"), DataType::Int32));
+        assert!(matches!(duckdb_type_to_arrow("VARCHAR"), DataType::Utf8));
+        assert!(matches!(
+            duckdb_type_to_arrow("VARCHAR(255)"),
+            DataType::Utf8
+        ));
+        assert!(matches!(duckdb_type_to_arrow("BOOLEAN"), DataType::Boolean));
+        assert!(matches!(duckdb_type_to_arrow("BIGINT"), DataType::Int64));
+    }
+}

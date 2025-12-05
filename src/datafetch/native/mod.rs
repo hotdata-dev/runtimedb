@@ -1,3 +1,4 @@
+mod duckdb;
 mod parquet_writer;
 
 pub use parquet_writer::StreamingParquetWriter;
@@ -24,7 +25,7 @@ impl DataFetcher for NativeFetcher {
         config: &ConnectionConfig,
     ) -> Result<Vec<TableMetadata>, DataFetchError> {
         match config.source_type.as_str() {
-            "duckdb" | "motherduck" => todo!("DuckDB discovery"),
+            "duckdb" | "motherduck" => duckdb::discover_tables(config).await,
             "postgres" => todo!("PostgreSQL discovery"),
             other => Err(DataFetchError::UnsupportedDriver(other.to_string())),
         }
