@@ -9,6 +9,7 @@ pub struct DriverManager {
 }
 
 impl DriverManager {
+    /// Create a new DriverManager and discover available drivers
     pub fn new() -> Self {
         Self {
             driver_paths: Self::discover_driver_paths(),

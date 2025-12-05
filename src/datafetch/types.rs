@@ -22,7 +22,7 @@ pub struct ColumnMetadata {
 }
 
 impl TableMetadata {
-    /// Convert column metadata to Arrow Schema
+    /// Convert column metadata to an Arrow Schema
     pub fn to_arrow_schema(&self) -> Arc<Schema> {
         let fields: Vec<Field> = self
             .columns

@@ -1,3 +1,5 @@
+//! ADBC-based implementation of data fetching
+
 use adbc_core::options::{AdbcVersion, OptionDatabase, OptionValue};
 use adbc_core::{Connection, Database, Driver, Statement};
 use adbc_driver_manager::ManagedDriver;
@@ -20,6 +22,7 @@ pub struct AdbcFetcher {
 }
 
 impl AdbcFetcher {
+    /// Create a new AdbcFetcher with a fresh DriverManager
     pub fn new() -> Self {
         Self {
             driver_manager: DriverManager::new(),

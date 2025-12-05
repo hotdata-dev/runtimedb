@@ -1,25 +1,35 @@
+//! Error types for data fetching operations
+
 use thiserror::Error;
 
+/// Errors that can occur during data fetching operations
 #[derive(Debug, Error)]
 pub enum DataFetchError {
+    /// Failed to load ADBC driver library
     #[error("driver load failed: {0}")]
     DriverLoad(String),
 
+    /// Failed to establish connection to remote database
     #[error("connection failed: {0}")]
     Connection(String),
 
+    /// Query execution failed
     #[error("query failed: {0}")]
     Query(String),
 
+    /// Failed to write data to storage
     #[error("storage write failed: {0}")]
     Storage(String),
 
+    /// Requested driver is not supported or not available
     #[error("unsupported driver: {0}")]
     UnsupportedDriver(String),
 
+    /// Failed to discover tables or metadata
     #[error("discovery failed: {0}")]
     Discovery(String),
 
+    /// Failed to serialize or deserialize Arrow schema
     #[error("schema serialization failed: {0}")]
     SchemaSerialization(String),
 }
