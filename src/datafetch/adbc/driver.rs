@@ -31,7 +31,41 @@ impl DriverManager {
     fn discover_driver_paths() -> HashMap<String, PathBuf> {
         let mut paths = HashMap::new();
 
-        // Check environment variables first
+        // First, check for vendored drivers in OUT_DIR
+        if let Ok(driver_dir) = std::env::var("RIVETDB_DRIVER_DIR") {
+            let driver_path = PathBuf::from(&driver_dir);
+
+            // Platform-specific driver filenames
+            #[cfg(target_os = "macos")]
+            let driver_specs = [
+                ("duckdb", "libduckdb.dylib"),
+                ("postgres", "libadbc_driver_postgresql.dylib"),
+                ("snowflake", "libadbc_driver_snowflake.dylib"),
+            ];
+
+            #[cfg(target_os = "linux")]
+            let driver_specs = [
+                ("duckdb", "libduckdb.so"),
+                ("postgres", "libadbc_driver_postgresql.so"),
+                ("snowflake", "libadbc_driver_snowflake.so"),
+            ];
+
+            #[cfg(target_os = "windows")]
+            let driver_specs = [
+                ("duckdb", "duckdb.dll"),
+                ("postgres", "adbc_driver_postgresql.dll"),
+                ("snowflake", "adbc_driver_snowflake.dll"),
+            ];
+
+            for (driver_name, filename) in driver_specs {
+                let full_path = driver_path.join(filename);
+                if full_path.exists() {
+                    paths.insert(driver_name.to_string(), full_path);
+                }
+            }
+        }
+
+        // Environment variables override vendored drivers
         if let Ok(path) = std::env::var("RIVETDB_DRIVER_DUCKDB") {
             paths.insert("duckdb".to_string(), PathBuf::from(path));
         }
@@ -41,8 +75,6 @@ impl DriverManager {
         if let Ok(path) = std::env::var("RIVETDB_DRIVER_SNOWFLAKE") {
             paths.insert("snowflake".to_string(), PathBuf::from(path));
         }
-
-        // TODO: Add vendored driver paths from OUT_DIR
 
         paths
     }
