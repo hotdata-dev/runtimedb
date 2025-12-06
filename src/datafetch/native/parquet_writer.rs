@@ -130,4 +130,92 @@ mod tests {
         let result_path = writer.close().unwrap();
         assert!(result_path.exists());
     }
+
+    #[test]
+    fn test_write_batch_before_init_fails() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.parquet");
+
+        let schema = Schema::new(vec![Field::new("id", DataType::Int32, false)]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
+        )
+        .unwrap();
+
+        let mut writer = StreamingParquetWriter::new(path);
+
+        // Attempt to write without calling init() first
+        let result = writer.write_batch(&batch);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not initialized"));
+    }
+
+    #[test]
+    fn test_close_before_init_fails() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.parquet");
+
+        let writer = StreamingParquetWriter::new(path);
+
+        // Attempt to close without calling init() first
+        let result = writer.close();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not initialized"));
+    }
+
+    #[test]
+    fn test_compression_applied() {
+        use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
+        use std::fs::File;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("compressed.parquet");
+
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, true),
+        ]);
+
+        let mut writer = StreamingParquetWriter::new(path.clone());
+        writer.init(&schema).unwrap();
+
+        // Write some data
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
+                Arc::new(datafusion::arrow::array::StringArray::from(vec![
+                    Some("Alice"),
+                    Some("Bob"),
+                    Some("Charlie"),
+                    Some("David"),
+                    Some("Eve"),
+                ])),
+            ],
+        )
+        .unwrap();
+
+        writer.write_batch(&batch).unwrap();
+        writer.close().unwrap();
+
+        // Read back and verify compression
+        let file = File::open(&path).unwrap();
+        let reader = SerializedFileReader::new(file).unwrap();
+        let metadata = reader.metadata();
+
+        // Check that ZSTD compression is applied to column chunks
+        for row_group in metadata.row_groups() {
+            for column in row_group.columns() {
+                let compression = column.compression();
+                // Verify ZSTD compression is used (level may vary based on implementation)
+                match compression {
+                    datafusion::parquet::basic::Compression::ZSTD(_) => {
+                        // Success - ZSTD compression is applied
+                    }
+                    other => panic!("Expected ZSTD compression, got {:?}", other),
+                }
+            }
+        }
+    }
 }

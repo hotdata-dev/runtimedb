@@ -167,3 +167,103 @@ fn append_value(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pg_type_to_arrow_basic_types() {
+        assert!(matches!(pg_type_to_arrow("bool"), DataType::Boolean));
+        assert!(matches!(pg_type_to_arrow("boolean"), DataType::Boolean));
+        assert!(matches!(pg_type_to_arrow("int2"), DataType::Int16));
+        assert!(matches!(pg_type_to_arrow("smallint"), DataType::Int16));
+        assert!(matches!(pg_type_to_arrow("int4"), DataType::Int32));
+        assert!(matches!(pg_type_to_arrow("integer"), DataType::Int32));
+        assert!(matches!(pg_type_to_arrow("int8"), DataType::Int64));
+        assert!(matches!(pg_type_to_arrow("bigint"), DataType::Int64));
+        assert!(matches!(pg_type_to_arrow("float4"), DataType::Float32));
+        assert!(matches!(pg_type_to_arrow("real"), DataType::Float32));
+        assert!(matches!(pg_type_to_arrow("float8"), DataType::Float64));
+        assert!(matches!(
+            pg_type_to_arrow("double precision"),
+            DataType::Float64
+        ));
+    }
+
+    #[test]
+    fn test_pg_type_to_arrow_string_types() {
+        assert!(matches!(pg_type_to_arrow("varchar"), DataType::Utf8));
+        assert!(matches!(pg_type_to_arrow("text"), DataType::Utf8));
+        assert!(matches!(pg_type_to_arrow("char"), DataType::Utf8));
+        assert!(matches!(pg_type_to_arrow("bpchar"), DataType::Utf8));
+        assert!(matches!(
+            pg_type_to_arrow("character varying"),
+            DataType::Utf8
+        ));
+        assert!(matches!(pg_type_to_arrow("uuid"), DataType::Utf8));
+        assert!(matches!(pg_type_to_arrow("json"), DataType::Utf8));
+        assert!(matches!(pg_type_to_arrow("jsonb"), DataType::Utf8));
+    }
+
+    #[test]
+    fn test_pg_type_to_arrow_date_time_types() {
+        assert!(matches!(pg_type_to_arrow("date"), DataType::Date32));
+        assert!(matches!(pg_type_to_arrow("time"), DataType::Utf8));
+
+        match pg_type_to_arrow("timestamp") {
+            DataType::Timestamp(unit, tz) => {
+                assert!(matches!(unit, datafusion::arrow::datatypes::TimeUnit::Microsecond));
+                assert!(tz.is_none());
+            }
+            _ => panic!("Expected Timestamp type"),
+        }
+
+        match pg_type_to_arrow("timestamptz") {
+            DataType::Timestamp(unit, tz) => {
+                assert!(matches!(unit, datafusion::arrow::datatypes::TimeUnit::Microsecond));
+                assert_eq!(tz.as_deref(), Some("UTC"));
+            }
+            _ => panic!("Expected Timestamp type with timezone"),
+        }
+    }
+
+    #[test]
+    fn test_pg_type_to_arrow_binary_types() {
+        assert!(matches!(pg_type_to_arrow("bytea"), DataType::Binary));
+    }
+
+    #[test]
+    fn test_pg_type_to_arrow_complex_types_fallback() {
+        // Complex types should fall back to Utf8 to avoid runtime panics
+        assert!(matches!(pg_type_to_arrow("numeric"), DataType::Utf8));
+        assert!(matches!(pg_type_to_arrow("decimal"), DataType::Utf8));
+        assert!(matches!(pg_type_to_arrow("interval"), DataType::Utf8));
+    }
+
+    #[test]
+    fn test_pg_type_to_arrow_unknown_type_fallback() {
+        // Unknown types should default to Utf8
+        assert!(matches!(
+            pg_type_to_arrow("unknown_type"),
+            DataType::Utf8
+        ));
+        assert!(matches!(
+            pg_type_to_arrow("custom_type"),
+            DataType::Utf8
+        ));
+    }
+
+    #[test]
+    fn test_pg_type_to_arrow_case_insensitive() {
+        assert!(matches!(pg_type_to_arrow("BOOLEAN"), DataType::Boolean));
+        assert!(matches!(pg_type_to_arrow("Boolean"), DataType::Boolean));
+        assert!(matches!(pg_type_to_arrow("INTEGER"), DataType::Int32));
+        assert!(matches!(pg_type_to_arrow("VarChar"), DataType::Utf8));
+    }
+
+    // Note: Testing schema_from_columns and rows_to_batch would require creating
+    // mock PgColumn and PgRow objects, which is complex without a real PostgreSQL
+    // connection. These functions are tested indirectly through integration tests
+    // that use actual database connections.
+}

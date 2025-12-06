@@ -134,3 +134,82 @@ async fn filesystem_delete_prefix_works() {
     assert!(!storage.exists(&url1).await.unwrap());
     assert!(!storage.exists(&url2).await.unwrap());
 }
+
+#[test]
+fn test_filesystem_prepare_cache_write_path() {
+    let temp = TempDir::new().unwrap();
+    let cache_base = temp.path().join("cache");
+    let state_base = temp.path().join("state");
+
+    let storage =
+        FilesystemStorage::new(cache_base.to_str().unwrap(), state_base.to_str().unwrap());
+
+    let path = storage.prepare_cache_write(1, "public", "users");
+
+    // Verify path structure: {cache_base}/{conn_id}/{schema}/{table}/{table}.parquet
+    let path_str = path.to_str().unwrap();
+    assert!(path_str.contains("/cache/1/public/users/users.parquet"));
+    assert!(path_str.ends_with("users.parquet"));
+}
+
+#[tokio::test]
+async fn test_filesystem_finalize_cache_write_returns_url() {
+    use std::fs;
+
+    let temp = TempDir::new().unwrap();
+    let cache_base = temp.path().join("cache");
+    let state_base = temp.path().join("state");
+
+    let storage =
+        FilesystemStorage::new(cache_base.to_str().unwrap(), state_base.to_str().unwrap());
+
+    // Prepare write path
+    let write_path = storage.prepare_cache_write(1, "public", "users");
+
+    // Create parent directories and write a test file
+    fs::create_dir_all(write_path.parent().unwrap()).unwrap();
+    fs::write(&write_path, b"test data").unwrap();
+
+    // Finalize should return the cache_url
+    let url = storage
+        .finalize_cache_write(&write_path, 1, "public", "users")
+        .await
+        .unwrap();
+
+    // Should return directory URL (for ListingTable compatibility)
+    assert!(url.starts_with("file://"));
+    assert!(url.contains("/cache/1/public/users"));
+    assert!(!url.ends_with(".parquet")); // Should be directory, not file
+}
+
+#[tokio::test]
+async fn test_filesystem_prepare_and_finalize_path_consistency() {
+    use std::fs;
+
+    let temp = TempDir::new().unwrap();
+    let cache_base = temp.path().join("cache");
+    let state_base = temp.path().join("state");
+
+    let storage =
+        FilesystemStorage::new(cache_base.to_str().unwrap(), state_base.to_str().unwrap());
+
+    // Prepare write path
+    let write_path = storage.prepare_cache_write(1, "public", "orders");
+
+    // Create parent directories and write a test file
+    fs::create_dir_all(write_path.parent().unwrap()).unwrap();
+    fs::write(&write_path, b"test data").unwrap();
+
+    // Finalize and get URL
+    let url = storage
+        .finalize_cache_write(&write_path, 1, "public", "orders")
+        .await
+        .unwrap();
+
+    // The file should be inside the directory pointed to by the URL
+    let url_path = url.strip_prefix("file://").unwrap();
+    let file_parent = write_path.parent().unwrap();
+
+    assert_eq!(url_path, file_parent.to_str().unwrap());
+    assert!(write_path.exists());
+}
