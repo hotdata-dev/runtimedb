@@ -43,4 +43,20 @@ pub trait StorageManager: Debug + Send + Sync {
     fn get_s3_credentials(&self) -> Option<S3Credentials> {
         None
     }
+
+    /// Returns a local path to write Parquet data to.
+    /// For local storage: returns final destination path.
+    /// For remote storage: returns a temp file path.
+    fn prepare_cache_write(&self, connection_id: i32, schema: &str, table: &str) -> std::path::PathBuf;
+
+    /// Finalizes the cache write after Parquet file is written.
+    /// For local storage: no-op (file already in place), returns URL.
+    /// For remote storage: uploads temp file to storage, cleans up temp, returns URL.
+    async fn finalize_cache_write(
+        &self,
+        written_path: &std::path::Path,
+        connection_id: i32,
+        schema: &str,
+        table: &str,
+    ) -> Result<String>;
 }

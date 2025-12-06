@@ -100,6 +100,8 @@ impl LazyTableProvider {
 
     /// Fetch the table data and update catalog
     async fn fetch_and_cache(&self) -> Result<String, DataFusionError> {
+        use crate::datafetch::native::StreamingParquetWriter;
+
         let source_type = self
             .connection_config
             .get("type")
@@ -117,20 +119,47 @@ impl LazyTableProvider {
             connection_string: connection_string.to_string(),
         };
 
-        // Fetch the table data
-        let parquet_url = self
-            .fetcher
+        // Prepare cache write location
+        let write_path = self.storage.prepare_cache_write(
+            self.connection_id,
+            &self.schema_name,
+            &self.table_name,
+        );
+
+        // Create writer
+        let mut writer = StreamingParquetWriter::new(write_path.clone());
+
+        // Fetch the table data into writer
+        self.fetcher
             .fetch_table(
                 &config,
                 None, // catalog
                 &self.schema_name,
                 &self.table_name,
-                self.storage.as_ref(),
-                self.connection_id,
+                &mut writer,
             )
             .await
             .map_err(|e| {
                 DataFusionError::External(format!("Failed to fetch table: {}", e).into())
+            })?;
+
+        // Close writer
+        writer.close().map_err(|e| {
+            DataFusionError::External(format!("Failed to close writer: {}", e).into())
+        })?;
+
+        // Finalize cache write (uploads to S3 if needed, returns URL)
+        let parquet_url = self
+            .storage
+            .finalize_cache_write(
+                &write_path,
+                self.connection_id,
+                &self.schema_name,
+                &self.table_name,
+            )
+            .await
+            .map_err(|e| {
+                DataFusionError::External(format!("Failed to finalize cache write: {}", e).into())
             })?;
 
         // Update catalog with new path
@@ -176,7 +205,7 @@ impl TableProvider for LazyTableProvider {
                 DataFusionError::External(format!("Failed to get table info: {}", e).into())
             })?
             .ok_or_else(|| {
-                DataFusionError::External(format!("Table not found in catalog").into())
+                DataFusionError::External("Table not found in catalog".to_string().into())
             })?;
 
         let parquet_url = if let Some(path) = table_info.parquet_path {

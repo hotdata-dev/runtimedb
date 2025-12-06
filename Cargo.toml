@@ -39,6 +39,7 @@ config = "0.15.19"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2.0.17"
+uuid = { version = "1.11", features = ["v4"] }
 
 [dev-dependencies]
 testcontainers = "0.23"

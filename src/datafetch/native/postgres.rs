@@ -4,9 +4,9 @@ use sqlx::postgres::PgConnection;
 use sqlx::{Connection, Row};
 
 use crate::datafetch::{ColumnMetadata, ConnectionConfig, DataFetchError, TableMetadata};
-use crate::storage::StorageManager;
 
 use super::arrow_convert::pg_type_to_arrow;
+use super::StreamingParquetWriter;
 
 /// Discover tables and columns from PostgreSQL
 pub async fn discover_tables(
@@ -81,11 +81,11 @@ pub async fn fetch_table(
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
-    storage: &dyn StorageManager,
-    connection_id: i32,
-) -> Result<String, DataFetchError> {
-    use datafusion::arrow::datatypes::Schema;
-    use datafusion::parquet::arrow::ArrowWriter;
+    writer: &mut StreamingParquetWriter,
+) -> Result<(), DataFetchError> {
+    use datafusion::arrow::datatypes::{Field, Schema};
+    use datafusion::arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
 
     use super::arrow_convert::{rows_to_batch, schema_from_columns};
 
@@ -109,7 +109,7 @@ pub async fn fetch_table(
         // Empty table: query information_schema for schema
         let schema_rows = sqlx::query(
             r#"
-            SELECT column_name, data_type
+            SELECT column_name, data_type, is_nullable
             FROM information_schema.columns
             WHERE table_schema = $1 AND table_name = $2
             ORDER BY ordinal_position
@@ -127,15 +127,16 @@ pub async fn fetch_table(
             )));
         }
 
-        let fields: Vec<datafusion::arrow::datatypes::Field> = schema_rows
+        let fields: Vec<Field> = schema_rows
             .iter()
             .map(|row| {
                 let col_name: String = row.get(0);
                 let data_type: String = row.get(1);
-                datafusion::arrow::datatypes::Field::new(
+                let is_nullable: String = row.get(2);
+                Field::new(
                     col_name,
                     pg_type_to_arrow(&data_type),
-                    true,
+                    is_nullable.to_uppercase() == "YES",
                 )
             })
             .collect();
@@ -143,32 +144,22 @@ pub async fn fetch_table(
         Schema::new(fields)
     };
 
-    // Convert rows to RecordBatch
-    let batch = rows_to_batch(&rows, &arrow_schema)?;
+    // Initialize writer with schema
+    writer.init(&arrow_schema)?;
 
-    // Write to Parquet buffer
-    let mut buffer = Vec::new();
-    {
-        let mut writer = ArrowWriter::try_new(&mut buffer, std::sync::Arc::new(arrow_schema), None)
-            .map_err(|e| DataFetchError::Storage(e.to_string()))?;
-
-        writer
-            .write(&batch)
-            .map_err(|e| DataFetchError::Storage(e.to_string()))?;
-
-        writer
-            .close()
-            .map_err(|e| DataFetchError::Storage(e.to_string()))?;
+    // Write batches
+    if rows.is_empty() {
+        let empty_batch = RecordBatch::new_empty(Arc::new(arrow_schema));
+        writer.write_batch(&empty_batch)?;
+    } else {
+        const BATCH_SIZE: usize = 10_000;
+        for chunk in rows.chunks(BATCH_SIZE) {
+            let batch = rows_to_batch(chunk, &arrow_schema)?;
+            writer.write_batch(&batch)?;
+        }
     }
 
-    // Write to storage
-    let parquet_url = storage.cache_url(connection_id, schema, table);
-    storage
-        .write(&parquet_url, &buffer)
-        .await
-        .map_err(|e| DataFetchError::Storage(e.to_string()))?;
-
-    Ok(parquet_url)
+    Ok(())
 }
 
 #[cfg(test)]

@@ -8,7 +8,6 @@ pub use parquet_writer::StreamingParquetWriter;
 use async_trait::async_trait;
 
 use crate::datafetch::{ConnectionConfig, DataFetchError, DataFetcher, TableMetadata};
-use crate::storage::StorageManager;
 
 /// Native Rust driver-based data fetcher
 #[derive(Debug, Default)]
@@ -39,15 +38,14 @@ impl DataFetcher for NativeFetcher {
         catalog: Option<&str>,
         schema: &str,
         table: &str,
-        storage: &dyn StorageManager,
-        connection_id: i32,
-    ) -> Result<String, DataFetchError> {
+        writer: &mut StreamingParquetWriter,
+    ) -> Result<(), DataFetchError> {
         match config.source_type.as_str() {
             "duckdb" | "motherduck" => {
-                duckdb::fetch_table(config, catalog, schema, table, storage, connection_id).await
+                duckdb::fetch_table(config, catalog, schema, table, writer).await
             }
             "postgres" => {
-                postgres::fetch_table(config, catalog, schema, table, storage, connection_id).await
+                postgres::fetch_table(config, catalog, schema, table, writer).await
             }
             other => Err(DataFetchError::UnsupportedDriver(other.to_string())),
         }

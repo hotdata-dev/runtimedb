@@ -158,4 +158,30 @@ impl StorageManager for S3Storage {
             endpoint_url: c.endpoint.clone(),
         })
     }
+
+    fn prepare_cache_write(&self, _connection_id: i32, _schema: &str, table: &str) -> std::path::PathBuf {
+        // Temp file path - will be uploaded to correct S3 location
+        std::env::temp_dir().join(format!("{}-{}.parquet", table, uuid::Uuid::new_v4()))
+    }
+
+    async fn finalize_cache_write(
+        &self,
+        written_path: &std::path::Path,
+        connection_id: i32,
+        schema: &str,
+        table: &str,
+    ) -> Result<String> {
+        let data = std::fs::read(written_path)?;
+
+        // Get the directory URL (s3://bucket/cache/conn_id/schema/table)
+        let dir_url = self.cache_url(connection_id, schema, table);
+
+        // Write file INSIDE the directory
+        let file_url = format!("{}/{}.parquet", dir_url, table);
+        self.write(&file_url, &data).await?;
+
+        std::fs::remove_file(written_path)?;
+
+        Ok(dir_url)  // Return directory URL for ListingTable
+    }
 }

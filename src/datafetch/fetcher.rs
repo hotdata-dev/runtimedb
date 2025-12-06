@@ -1,6 +1,6 @@
-use crate::storage::StorageManager;
 use async_trait::async_trait;
 
+use super::native::StreamingParquetWriter;
 use super::{DataFetchError, TableMetadata};
 
 /// Configuration for connecting to a remote data source
@@ -19,14 +19,15 @@ pub trait DataFetcher: Send + Sync + std::fmt::Debug {
         config: &ConnectionConfig,
     ) -> Result<Vec<TableMetadata>, DataFetchError>;
 
-    /// Fetch full table data, write to storage, return parquet URL
+    /// Fetch table data and write to the provided Parquet writer.
+    /// The writer is pre-initialized with the destination path.
+    /// Driver must call: writer.init(schema) -> writer.write_batch()* (but NOT close())
     async fn fetch_table(
         &self,
         config: &ConnectionConfig,
         catalog: Option<&str>,
         schema: &str,
         table: &str,
-        storage: &dyn StorageManager,
-        connection_id: i32,
-    ) -> Result<String, DataFetchError>;
+        writer: &mut StreamingParquetWriter,
+    ) -> Result<(), DataFetchError>;
 }

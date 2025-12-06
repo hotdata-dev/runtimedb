@@ -115,4 +115,24 @@ impl StorageManager for FilesystemStorage {
         // No-op for filesystem - DataFusion handles file:// by default
         Ok(())
     }
+
+    fn prepare_cache_write(&self, connection_id: i32, schema: &str, table: &str) -> PathBuf {
+        // Write file INSIDE the table directory (for ListingTable compatibility)
+        self.cache_base
+            .join(connection_id.to_string())
+            .join(schema)
+            .join(table)                           // table directory
+            .join(format!("{}.parquet", table))    // file inside directory
+    }
+
+    async fn finalize_cache_write(
+        &self,
+        _written_path: &Path,
+        connection_id: i32,
+        schema: &str,
+        table: &str,
+    ) -> Result<String> {
+        // No-op for local storage - file is already in place
+        Ok(self.cache_url(connection_id, schema, table))
+    }
 }

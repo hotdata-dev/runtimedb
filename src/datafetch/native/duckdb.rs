@@ -3,7 +3,8 @@
 use duckdb::Connection;
 
 use crate::datafetch::{ColumnMetadata, ConnectionConfig, DataFetchError, TableMetadata};
-use crate::storage::StorageManager;
+
+use super::StreamingParquetWriter;
 
 /// Discover tables and columns from DuckDB/MotherDuck
 pub async fn discover_tables(config: &ConnectionConfig) -> Result<Vec<TableMetadata>, DataFetchError> {
@@ -94,40 +95,43 @@ pub async fn fetch_table(
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
-    storage: &dyn StorageManager,
-    connection_id: i32,
-) -> Result<String, DataFetchError> {
+    writer: &mut StreamingParquetWriter,
+) -> Result<(), DataFetchError> {
+    use datafusion::arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
     let connection_string = config.connection_string.clone();
     let schema = schema.to_string();
     let table = table.to_string();
 
-    // Get the storage URL first (async)
-    let parquet_url = storage.cache_url(connection_id, &schema, &table);
-
     // DuckDB is sync, so spawn_blocking
-    let buffer = tokio::task::spawn_blocking(move || {
+    let (arrow_schema, batches) = tokio::task::spawn_blocking(move || {
         fetch_table_sync(&connection_string, &schema, &table)
     })
     .await
     .map_err(|e| DataFetchError::Query(e.to_string()))??;
 
-    // Write to storage (async)
-    storage
-        .write(&parquet_url, &buffer)
-        .await
-        .map_err(|e| DataFetchError::Storage(e.to_string()))?;
+    // Initialize writer with schema
+    writer.init(&arrow_schema)?;
 
-    Ok(parquet_url)
+    // Write batches (or empty batch for empty tables)
+    if batches.is_empty() {
+        let empty_batch = RecordBatch::new_empty(Arc::new(arrow_schema));
+        writer.write_batch(&empty_batch)?;
+    } else {
+        for batch in batches {
+            writer.write_batch(&batch)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn fetch_table_sync(
     connection_string: &str,
     schema: &str,
     table: &str,
-) -> Result<Vec<u8>, DataFetchError> {
-    use datafusion::arrow::record_batch::RecordBatch;
-    use datafusion::parquet::arrow::ArrowWriter;
-
+) -> Result<(datafusion::arrow::datatypes::Schema, Vec<datafusion::arrow::record_batch::RecordBatch>), DataFetchError> {
     let conn = Connection::open(connection_string)
         .map_err(|e| DataFetchError::Connection(e.to_string()))?;
 
@@ -137,40 +141,16 @@ fn fetch_table_sync(
         table.replace('"', "\"\"")
     );
 
-    let mut stmt = conn
-        .prepare(&query)
+    let mut stmt = conn.prepare(&query)
         .map_err(|e| DataFetchError::Query(e.to_string()))?;
 
-    // DuckDB returns Arrow natively
-    let arrow_result = stmt
-        .query_arrow([])
+    let arrow_result = stmt.query_arrow([])
         .map_err(|e| DataFetchError::Query(e.to_string()))?;
 
-    // Get schema before collecting batches
     let arrow_schema = arrow_result.get_schema();
+    let batches: Vec<_> = arrow_result.collect();
 
-    // Collect batches
-    let batches: Vec<RecordBatch> = arrow_result.collect();
-
-    // Write to buffer
-    let mut buffer = Vec::new();
-
-    {
-        let mut writer = ArrowWriter::try_new(&mut buffer, arrow_schema.clone(), None)
-            .map_err(|e| DataFetchError::Storage(e.to_string()))?;
-
-        for batch in batches {
-            writer
-                .write(&batch)
-                .map_err(|e| DataFetchError::Storage(e.to_string()))?;
-        }
-
-        writer
-            .close()
-            .map_err(|e| DataFetchError::Storage(e.to_string()))?;
-    }
-
-    Ok(buffer)
+    Ok(((*arrow_schema).clone(), batches))
 }
 
 /// Convert DuckDB type name to Arrow DataType

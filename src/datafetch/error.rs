@@ -5,7 +5,7 @@ use thiserror::Error;
 /// Errors that can occur during data fetching operations
 #[derive(Debug, Error)]
 pub enum DataFetchError {
-    /// Failed to load ADBC driver library
+    /// Failed to load driver library
     #[error("driver load failed: {0}")]
     DriverLoad(String),
 
