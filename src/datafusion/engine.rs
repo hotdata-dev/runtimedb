@@ -16,6 +16,92 @@ pub struct QueryResponse {
     pub execution_time: Duration,
 }
 
+/// Build a connection string from individual config parameters based on source type.
+/// Supports both explicit `connection_string` field or building from components.
+fn build_connection_string(source_type: &str, config: &serde_json::Value) -> Result<String> {
+    // If connection_string is provided directly, use it
+    if let Some(conn_str) = config.get("connection_string").and_then(|v| v.as_str()) {
+        return Ok(conn_str.to_string());
+    }
+
+    // Build from individual parameters based on source type
+    match source_type {
+        "postgres" => {
+            let user = config
+                .get("user")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("postgres config requires 'user' field"))?;
+            let password = config
+                .get("password")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let host = config
+                .get("host")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("postgres config requires 'host' field"))?;
+            let port = config
+                .get("port")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(5432);
+            let database = config
+                .get("database")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("postgres config requires 'database' field"))?;
+
+            Ok(format!(
+                "postgresql://{}:{}@{}:{}/{}",
+                user, password, host, port, database
+            ))
+        }
+        "duckdb" => {
+            let path = config
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("duckdb config requires 'path' field"))?;
+            Ok(path.to_string())
+        }
+        "motherduck" => {
+            let token = config
+                .get("token")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("motherduck config requires 'token' field"))?;
+            let database = config
+                .get("database")
+                .and_then(|v| v.as_str())
+                .unwrap_or("my_db");
+            Ok(format!("md:{}?motherduck_token={}", database, token))
+        }
+        "snowflake" => {
+            let account = config
+                .get("account")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("snowflake config requires 'account' field"))?;
+            let user = config
+                .get("user")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("snowflake config requires 'user' field"))?;
+            let password = config
+                .get("password")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("snowflake config requires 'password' field"))?;
+            let database = config
+                .get("database")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("snowflake config requires 'database' field"))?;
+            let warehouse = config
+                .get("warehouse")
+                .and_then(|v| v.as_str())
+                .unwrap_or("COMPUTE_WH");
+
+            Ok(format!(
+                "{}:{}@{}/{}/{}",
+                user, password, account, database, warehouse
+            ))
+        }
+        _ => anyhow::bail!("Unknown source type: {}", source_type),
+    }
+}
+
 /// The main query engine that manages connections, catalogs, and query execution.
 pub struct HotDataEngine {
     catalog: Arc<dyn CatalogManager>,
@@ -144,11 +230,7 @@ impl HotDataEngine {
         }
 
         // Build connection config
-        let connection_string = config
-            .get("connection_string")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("connection_string required in config"))?
-            .to_string();
+        let connection_string = build_connection_string(source_type, &config)?;
 
         let fetch_config = crate::datafetch::ConnectionConfig {
             source_type: source_type.to_string(),
