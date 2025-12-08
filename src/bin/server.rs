@@ -40,6 +40,7 @@ async fn main() -> Result<()> {
 
     // Create router
     let app = AppServer::new(engine);
+    let engine = app.engine.clone();
 
     // Create server address
     let addr = format!("{}:{}", config.server.host, config.server.port);
@@ -49,7 +50,43 @@ async fn main() -> Result<()> {
     tracing::info!("Server listening on {}", addr);
 
     // Start server
-    axum::serve(listener, app.router).await?;
+    let server = axum::serve(listener, app.router)
+        .with_graceful_shutdown(shutdown());
+
+    server.await?;
+
+    // Explicitly shutdown engine to close catalog connection
+    if let Err(e) = engine.shutdown() {
+        tracing::error!("Error during engine shutdown: {}", e);
+    }
+
+    tracing::info!("Server shutdown complete");
 
     Ok(())
+}
+
+async fn shutdown() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    tracing::info!("Shutdown signal received, stopping server...");
 }

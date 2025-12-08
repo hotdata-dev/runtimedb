@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 pub struct AppServer {
     pub router: Router,
+    pub engine: Arc<HotDataEngine>,
 }
 
 pub const PATH_QUERY: &str = "/query";
@@ -18,6 +19,7 @@ pub const PATH_CONNECTIONS: &str = "/connections";
 
 impl AppServer {
     pub fn new(engine: HotDataEngine) -> Self {
+        let engine = Arc::new(engine);
         AppServer {
             router: Router::new()
                 .route(PATH_QUERY, post(query_handler))
@@ -27,7 +29,8 @@ impl AppServer {
                     PATH_CONNECTIONS,
                     post(create_connection_handler).get(list_connections_handler),
                 )
-                .with_state(Arc::new(engine)),
+                .with_state(engine.clone()),
+            engine,
         }
     }
 }
