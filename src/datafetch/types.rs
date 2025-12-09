@@ -18,7 +18,7 @@ pub struct ColumnMetadata {
     pub name: String,
     pub data_type: ArrowDataType,
     pub nullable: bool,
-    pub ordinal_position: i16,
+    pub ordinal_position: i32,
 }
 
 impl TableMetadata {

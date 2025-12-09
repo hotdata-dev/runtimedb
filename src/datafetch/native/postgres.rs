@@ -78,7 +78,7 @@ pub async fn discover_tables(source: &Source) -> Result<Vec<TableMetadata>, Data
             name: col_name,
             data_type: pg_type_to_arrow(&data_type),
             nullable: is_nullable.to_uppercase() == "YES",
-            ordinal_position: ordinal as i16,
+            ordinal_position: ordinal,
         };
 
         // Find or create table entry
