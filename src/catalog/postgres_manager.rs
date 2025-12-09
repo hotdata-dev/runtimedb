@@ -61,11 +61,9 @@ impl PostgresCatalogManager {
 
         // Add arrow_schema_json column if it doesn't exist (migration for older schemas)
         // This is safe to run even if column exists due to IF NOT EXISTS
-        let _ = sqlx::query(
-            "ALTER TABLE tables ADD COLUMN IF NOT EXISTS arrow_schema_json TEXT",
-        )
-        .execute(pool)
-        .await;
+        let _ = sqlx::query("ALTER TABLE tables ADD COLUMN IF NOT EXISTS arrow_schema_json TEXT")
+            .execute(pool)
+            .await;
 
         Ok(())
     }
@@ -139,7 +137,13 @@ impl CatalogManager for PostgresCatalogManager {
         })
     }
 
-    fn add_table(&self, connection_id: i32, schema_name: &str, table_name: &str, arrow_schema_json: &str) -> Result<i32> {
+    fn add_table(
+        &self,
+        connection_id: i32,
+        schema_name: &str,
+        table_name: &str,
+        arrow_schema_json: &str,
+    ) -> Result<i32> {
         self.block_on(async {
             // Insert or update table with schema
             sqlx::query(

@@ -142,21 +142,26 @@ impl HotDataEngine {
         // Discover tables
         info!("Discovering tables for {} source...", source_type);
         let fetcher = crate::datafetch::NativeFetcher::new();
-        let tables = fetcher.discover_tables(&source).await
+        let tables = fetcher
+            .discover_tables(&source)
+            .await
             .map_err(|e| anyhow::anyhow!("Discovery failed: {}", e))?;
 
         info!("Discovered {} tables", tables.len());
 
         // Store config as JSON (includes "type" from serde tag)
         let config_json = serde_json::to_string(&source)?;
-        let conn_id = self.catalog.add_connection(name, source_type, &config_json)?;
+        let conn_id = self
+            .catalog
+            .add_connection(name, source_type, &config_json)?;
 
         // Add discovered tables to catalog with schema in one call
         for table in &tables {
             let schema = table.to_arrow_schema();
             let schema_json = serde_json::to_string(schema.as_ref())
                 .map_err(|e| anyhow::anyhow!("Failed to serialize schema: {}", e))?;
-            self.catalog.add_table(conn_id, &table.schema_name, &table.table_name, &schema_json)?;
+            self.catalog
+                .add_table(conn_id, &table.schema_name, &table.table_name, &schema_json)?;
         }
 
         // Register with DataFusion
@@ -170,7 +175,11 @@ impl HotDataEngine {
 
         self.df_ctx.register_catalog(name, catalog_provider);
 
-        info!("Connection '{}' registered with {} tables", name, tables.len());
+        info!(
+            "Connection '{}' registered with {} tables",
+            name,
+            tables.len()
+        );
 
         Ok(())
     }
@@ -203,20 +212,15 @@ impl HotDataEngine {
     pub async fn execute_query(&self, sql: &str) -> Result<QueryResponse> {
         info!("Executing query: {}", sql);
         let start = Instant::now();
-        let df = self.df_ctx
-            .sql(sql)
-            .await
-            .map_err(|e| {
-                error!("Error executing query: {}", e);
-                e
-            })?;
+        let df = self.df_ctx.sql(sql).await.map_err(|e| {
+            error!("Error executing query: {}", e);
+            e
+        })?;
         info!("Execution completed in {:?}", start.elapsed());
-        let results = df.collect()
-            .await
-            .map_err(|e| {
-                error!("Error getting query result: {}", e);
-                e
-            })?;
+        let results = df.collect().await.map_err(|e| {
+            error!("Error getting query result: {}", e);
+            e
+        })?;
         info!("Results available");
 
         Ok(QueryResponse {

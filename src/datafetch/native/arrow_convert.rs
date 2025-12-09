@@ -45,8 +45,12 @@ pub fn pg_type_to_arrow(pg_type: &str) -> DataType {
         "bytea" => DataType::Binary,
         "date" => DataType::Date32,
         "time" | "time without time zone" => DataType::Utf8,
-        "timestamp" | "timestamp without time zone" => DataType::Timestamp(TimeUnit::Microsecond, None),
-        "timestamptz" | "timestamp with time zone" => DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+        "timestamp" | "timestamp without time zone" => {
+            DataType::Timestamp(TimeUnit::Microsecond, None)
+        }
+        "timestamptz" | "timestamp with time zone" => {
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+        }
         "uuid" => DataType::Utf8,
         "json" | "jsonb" => DataType::Utf8,
         "interval" => DataType::Utf8,
@@ -69,10 +73,8 @@ pub fn rows_to_batch(rows: &[PgRow], schema: &Schema) -> Result<RecordBatch, Dat
         }
     }
 
-    let arrays: Vec<Arc<dyn datafusion::arrow::array::Array>> = builders
-        .iter_mut()
-        .map(|b| b.finish())
-        .collect();
+    let arrays: Vec<Arc<dyn datafusion::arrow::array::Array>> =
+        builders.iter_mut().map(|b| b.finish()).collect();
 
     RecordBatch::try_new(Arc::new(schema.clone()), arrays)
         .map_err(|e| DataFetchError::Query(e.to_string()))
@@ -89,9 +91,7 @@ fn make_builder(data_type: &DataType, capacity: usize) -> Box<dyn ArrayBuilder> 
         DataType::Utf8 => Box::new(StringBuilder::with_capacity(capacity, capacity * 32)),
         DataType::Binary => Box::new(BinaryBuilder::with_capacity(capacity, capacity * 32)),
         DataType::Date32 => Box::new(Date32Builder::with_capacity(capacity)),
-        DataType::Timestamp(_, _) => {
-            Box::new(TimestampMicrosecondBuilder::with_capacity(capacity))
-        }
+        DataType::Timestamp(_, _) => Box::new(TimestampMicrosecondBuilder::with_capacity(capacity)),
         _ => Box::new(StringBuilder::with_capacity(capacity, capacity * 32)), // Fallback to string
     }
 }
@@ -104,7 +104,10 @@ fn append_value(
 ) -> Result<(), DataFetchError> {
     match data_type {
         DataType::Boolean => {
-            let b = builder.as_any_mut().downcast_mut::<BooleanBuilder>().unwrap();
+            let b = builder
+                .as_any_mut()
+                .downcast_mut::<BooleanBuilder>()
+                .unwrap();
             b.append_option(row.try_get::<bool, _>(idx).ok());
         }
         DataType::Int16 => {
@@ -120,23 +123,38 @@ fn append_value(
             b.append_option(row.try_get::<i64, _>(idx).ok());
         }
         DataType::Float32 => {
-            let b = builder.as_any_mut().downcast_mut::<Float32Builder>().unwrap();
+            let b = builder
+                .as_any_mut()
+                .downcast_mut::<Float32Builder>()
+                .unwrap();
             b.append_option(row.try_get::<f32, _>(idx).ok());
         }
         DataType::Float64 => {
-            let b = builder.as_any_mut().downcast_mut::<Float64Builder>().unwrap();
+            let b = builder
+                .as_any_mut()
+                .downcast_mut::<Float64Builder>()
+                .unwrap();
             b.append_option(row.try_get::<f64, _>(idx).ok());
         }
         DataType::Utf8 => {
-            let b = builder.as_any_mut().downcast_mut::<StringBuilder>().unwrap();
+            let b = builder
+                .as_any_mut()
+                .downcast_mut::<StringBuilder>()
+                .unwrap();
             b.append_option(row.try_get::<String, _>(idx).ok());
         }
         DataType::Binary => {
-            let b = builder.as_any_mut().downcast_mut::<BinaryBuilder>().unwrap();
+            let b = builder
+                .as_any_mut()
+                .downcast_mut::<BinaryBuilder>()
+                .unwrap();
             b.append_option(row.try_get::<Vec<u8>, _>(idx).ok());
         }
         DataType::Date32 => {
-            let b = builder.as_any_mut().downcast_mut::<Date32Builder>().unwrap();
+            let b = builder
+                .as_any_mut()
+                .downcast_mut::<Date32Builder>()
+                .unwrap();
             // chrono::NaiveDate -> days since epoch
             if let Ok(date) = row.try_get::<chrono::NaiveDate, _>(idx) {
                 let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
@@ -161,7 +179,10 @@ fn append_value(
         }
         _ => {
             // Fallback: try to get as string
-            let b = builder.as_any_mut().downcast_mut::<StringBuilder>().unwrap();
+            let b = builder
+                .as_any_mut()
+                .downcast_mut::<StringBuilder>()
+                .unwrap();
             b.append_option(row.try_get::<String, _>(idx).ok());
         }
     }
@@ -213,7 +234,10 @@ mod tests {
 
         match pg_type_to_arrow("timestamp") {
             DataType::Timestamp(unit, tz) => {
-                assert!(matches!(unit, datafusion::arrow::datatypes::TimeUnit::Microsecond));
+                assert!(matches!(
+                    unit,
+                    datafusion::arrow::datatypes::TimeUnit::Microsecond
+                ));
                 assert!(tz.is_none());
             }
             _ => panic!("Expected Timestamp type"),
@@ -221,7 +245,10 @@ mod tests {
 
         match pg_type_to_arrow("timestamptz") {
             DataType::Timestamp(unit, tz) => {
-                assert!(matches!(unit, datafusion::arrow::datatypes::TimeUnit::Microsecond));
+                assert!(matches!(
+                    unit,
+                    datafusion::arrow::datatypes::TimeUnit::Microsecond
+                ));
                 assert_eq!(tz.as_deref(), Some("UTC"));
             }
             _ => panic!("Expected Timestamp type with timezone"),
@@ -244,14 +271,8 @@ mod tests {
     #[test]
     fn test_pg_type_to_arrow_unknown_type_fallback() {
         // Unknown types should default to Utf8
-        assert!(matches!(
-            pg_type_to_arrow("unknown_type"),
-            DataType::Utf8
-        ));
-        assert!(matches!(
-            pg_type_to_arrow("custom_type"),
-            DataType::Utf8
-        ));
+        assert!(matches!(pg_type_to_arrow("unknown_type"), DataType::Utf8));
+        assert!(matches!(pg_type_to_arrow("custom_type"), DataType::Utf8));
     }
 
     #[test]

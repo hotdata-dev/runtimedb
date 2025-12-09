@@ -34,7 +34,12 @@ impl QueryResult {
 
         let (columns, row_count) = match batch {
             Some(b) => {
-                let cols: Vec<String> = b.schema().fields().iter().map(|f| f.name().clone()).collect();
+                let cols: Vec<String> = b
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().clone())
+                    .collect();
                 (cols, b.num_rows())
             }
             None => (vec![], 0),
@@ -46,7 +51,11 @@ impl QueryResult {
     fn from_api(json: &serde_json::Value) -> Self {
         let columns = json["columns"]
             .as_array()
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let row_count = json["row_count"].as_u64().unwrap_or(0) as usize;
@@ -55,7 +64,11 @@ impl QueryResult {
     }
 
     fn assert_row_count(&self, expected: usize) {
-        assert_eq!(self.row_count, expected, "Expected {} rows, got {}", expected, self.row_count);
+        assert_eq!(
+            self.row_count, expected,
+            "Expected {} rows, got {}",
+            expected, self.row_count
+        );
     }
 
     fn assert_columns(&self, expected: &[&str]) {
@@ -83,13 +96,22 @@ impl ConnectionResult {
         Self {
             count: arr.map(|a| a.len()).unwrap_or(0),
             names: arr
-                .map(|a| a.iter().filter_map(|c| c["name"].as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|c| c["name"].as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default(),
         }
     }
 
     fn assert_has_connection(&self, name: &str) {
-        assert!(self.names.contains(&name.to_string()), "Connection '{}' not found in {:?}", name, self.names);
+        assert!(
+            self.names.contains(&name.to_string()),
+            "Connection '{}' not found in {:?}",
+            name,
+            self.names
+        );
     }
 
     fn assert_count(&self, expected: usize) {
@@ -105,7 +127,10 @@ struct TablesResult {
 impl TablesResult {
     fn from_engine(tables: &[rivetdb::catalog::TableInfo]) -> Self {
         Self {
-            tables: tables.iter().map(|t| (t.schema_name.clone(), t.table_name.clone())).collect(),
+            tables: tables
+                .iter()
+                .map(|t| (t.schema_name.clone(), t.table_name.clone()))
+                .collect(),
         }
     }
 
@@ -129,7 +154,9 @@ impl TablesResult {
         assert!(
             self.tables.iter().any(|(s, t)| s == schema && t == table),
             "Table '{}.{}' not found. Available: {:?}",
-            schema, table, self.tables
+            schema,
+            table,
+            self.tables
         );
     }
 
@@ -155,7 +182,10 @@ struct EngineExecutor {
 #[async_trait::async_trait]
 impl TestExecutor for EngineExecutor {
     async fn connect(&self, name: &str, source: &Source) {
-        self.engine.connect(name, source.clone()).await.expect("Engine connect failed");
+        self.engine
+            .connect(name, source.clone())
+            .await
+            .expect("Engine connect failed");
     }
 
     async fn list_connections(&self) -> ConnectionResult {
@@ -181,24 +211,35 @@ impl TestExecutor for ApiExecutor {
     async fn connect(&self, name: &str, source: &Source) {
         let (source_type, config) = match source {
             Source::Duckdb { path } => ("duckdb", json!({ "path": path })),
-            Source::Postgres { host, port, user, password, database } => (
+            Source::Postgres {
+                host,
+                port,
+                user,
+                password,
+                database,
+            } => (
                 "postgres",
                 json!({ "host": host, "port": port, "user": user, "password": password, "database": database }),
             ),
             _ => panic!("Unsupported source type"),
         };
 
-        let response = self.router.clone()
+        let response = self
+            .router
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri(PATH_CONNECTIONS)
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_string(&json!({
-                        "name": name,
-                        "source_type": source_type,
-                        "config": config,
-                    })).unwrap()))
+                    .body(Body::from(
+                        serde_json::to_string(&json!({
+                            "name": name,
+                            "source_type": source_type,
+                            "config": config,
+                        }))
+                        .unwrap(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -208,38 +249,64 @@ impl TestExecutor for ApiExecutor {
     }
 
     async fn list_connections(&self) -> ConnectionResult {
-        let response = self.router.clone()
-            .oneshot(Request::builder().method("GET").uri(PATH_CONNECTIONS).body(Body::empty()).unwrap())
+        let response = self
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(PATH_CONNECTIONS)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         ConnectionResult::from_api(&serde_json::from_slice(&body).unwrap())
     }
 
     async fn list_tables(&self, connection: &str) -> TablesResult {
         let uri = format!("{}?connection={}", PATH_TABLES, connection);
-        let response = self.router.clone()
-            .oneshot(Request::builder().method("GET").uri(&uri).body(Body::empty()).unwrap())
+        let response = self
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         TablesResult::from_api(&serde_json::from_slice(&body).unwrap())
     }
 
     async fn query(&self, sql: &str) -> QueryResult {
-        let response = self.router.clone()
+        let response = self
+            .router
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri(PATH_QUERY)
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_string(&json!({ "sql": sql })).unwrap()))
+                    .body(Body::from(
+                        serde_json::to_string(&json!({ "sql": sql })).unwrap(),
+                    ))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK, "Query failed: {}", sql);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         QueryResult::from_api(&serde_json::from_slice(&body).unwrap())
     }
 }
@@ -295,7 +362,10 @@ impl TestHarness {
 /// SQL queries used across all tests.
 mod queries {
     pub fn select_orders(conn: &str) -> String {
-        format!("SELECT order_id, customer_name, amount FROM {}.sales.orders ORDER BY order_id", conn)
+        format!(
+            "SELECT order_id, customer_name, amount FROM {}.sales.orders ORDER BY order_id",
+            conn
+        )
     }
 
     pub fn count_paid_orders(conn: &str) -> String {
@@ -340,10 +410,14 @@ async fn run_multi_schema_test(executor: &dyn TestExecutor, source: &Source, con
     tables.assert_has_table("sales", "orders");
     tables.assert_has_table("inventory", "products");
 
-    let orders = executor.query(&queries::select_all(conn_name, "sales", "orders")).await;
+    let orders = executor
+        .query(&queries::select_all(conn_name, "sales", "orders"))
+        .await;
     orders.assert_row_count(1);
 
-    let products = executor.query(&queries::select_all(conn_name, "inventory", "products")).await;
+    let products = executor
+        .query(&queries::select_all(conn_name, "inventory", "products"))
+        .await;
     products.assert_row_count(1);
 }
 
@@ -370,7 +444,12 @@ mod fixtures {
             [],
         ).unwrap();
 
-        (temp_dir, Source::Duckdb { path: db_path.to_str().unwrap().to_string() })
+        (
+            temp_dir,
+            Source::Duckdb {
+                path: db_path.to_str().unwrap().to_string(),
+            },
+        )
     }
 
     /// Creates a DuckDB with multiple schemas.
@@ -381,12 +460,24 @@ mod fixtures {
 
         conn.execute("CREATE SCHEMA sales", []).unwrap();
         conn.execute("CREATE SCHEMA inventory", []).unwrap();
-        conn.execute("CREATE TABLE sales.orders (id INTEGER, total DOUBLE)", []).unwrap();
-        conn.execute("CREATE TABLE inventory.products (id INTEGER, name VARCHAR)", []).unwrap();
-        conn.execute("INSERT INTO sales.orders VALUES (1, 99.99)", []).unwrap();
-        conn.execute("INSERT INTO inventory.products VALUES (1, 'Widget')", []).unwrap();
+        conn.execute("CREATE TABLE sales.orders (id INTEGER, total DOUBLE)", [])
+            .unwrap();
+        conn.execute(
+            "CREATE TABLE inventory.products (id INTEGER, name VARCHAR)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO sales.orders VALUES (1, 99.99)", [])
+            .unwrap();
+        conn.execute("INSERT INTO inventory.products VALUES (1, 'Widget')", [])
+            .unwrap();
 
-        (temp_dir, Source::Duckdb { path: db_path.to_str().unwrap().to_string() })
+        (
+            temp_dir,
+            Source::Duckdb {
+                path: db_path.to_str().unwrap().to_string(),
+            },
+        )
     }
 }
 
@@ -416,7 +507,10 @@ mod postgres_fixtures {
         let (container, conn_str) = start_container().await;
         let pool = sqlx::PgPool::connect(&conn_str).await.unwrap();
 
-        sqlx::query("CREATE SCHEMA sales").execute(&pool).await.unwrap();
+        sqlx::query("CREATE SCHEMA sales")
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query(
             "CREATE TABLE sales.orders (order_id INTEGER, customer_name VARCHAR(100), amount DOUBLE PRECISION, is_paid BOOLEAN)"
         ).execute(&pool).await.unwrap();
@@ -442,12 +536,30 @@ mod postgres_fixtures {
         let (container, conn_str) = start_container().await;
         let pool = sqlx::PgPool::connect(&conn_str).await.unwrap();
 
-        sqlx::query("CREATE SCHEMA sales").execute(&pool).await.unwrap();
-        sqlx::query("CREATE SCHEMA inventory").execute(&pool).await.unwrap();
-        sqlx::query("CREATE TABLE sales.orders (id INTEGER, total DOUBLE PRECISION)").execute(&pool).await.unwrap();
-        sqlx::query("CREATE TABLE inventory.products (id INTEGER, name VARCHAR(100))").execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO sales.orders VALUES (1, 99.99)").execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO inventory.products VALUES (1, 'Widget')").execute(&pool).await.unwrap();
+        sqlx::query("CREATE SCHEMA sales")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE SCHEMA inventory")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE sales.orders (id INTEGER, total DOUBLE PRECISION)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE inventory.products (id INTEGER, name VARCHAR(100))")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sales.orders VALUES (1, 99.99)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO inventory.products VALUES (1, 'Widget')")
+            .execute(&pool)
+            .await
+            .unwrap();
         pool.close().await;
 
         let port = container.get_host_port_ipv4(5432).await.unwrap();

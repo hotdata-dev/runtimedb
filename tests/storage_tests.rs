@@ -1,5 +1,5 @@
-use tempfile::TempDir;
 use rivetdb::storage::{FilesystemStorage, StorageManager};
+use tempfile::TempDir;
 
 #[test]
 fn filesystem_cache_url_constructs_correct_path() {

@@ -31,8 +31,9 @@ impl StreamingParquetWriter {
     pub fn init(&mut self, schema: &Schema) -> Result<(), DataFetchError> {
         // Create parent directories if needed
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| DataFetchError::Storage(format!("Failed to create directory: {}", e)))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                DataFetchError::Storage(format!("Failed to create directory: {}", e))
+            })?;
         }
 
         let file = File::create(&self.path)
@@ -53,19 +54,24 @@ impl StreamingParquetWriter {
 
     /// Write a batch to the Parquet file.
     pub fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), DataFetchError> {
-        let writer = self.writer.as_mut()
-            .ok_or_else(|| DataFetchError::Storage("Writer not initialized - call init() first".into()))?;
+        let writer = self.writer.as_mut().ok_or_else(|| {
+            DataFetchError::Storage("Writer not initialized - call init() first".into())
+        })?;
 
-        writer.write(batch)
+        writer
+            .write(batch)
             .map_err(|e| DataFetchError::Storage(e.to_string()))
     }
 
     /// Close the writer and return the path to the written file.
     pub fn close(mut self) -> Result<PathBuf, DataFetchError> {
-        let writer = self.writer.take()
+        let writer = self
+            .writer
+            .take()
             .ok_or_else(|| DataFetchError::Storage("Writer not initialized".into()))?;
 
-        writer.close()
+        writer
+            .close()
             .map_err(|e| DataFetchError::Storage(e.to_string()))?;
 
         Ok(self.path)
@@ -98,12 +104,14 @@ mod tests {
         let batch1 = RecordBatch::try_new(
             Arc::new(schema.clone()),
             vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
-        ).unwrap();
+        )
+        .unwrap();
 
         let batch2 = RecordBatch::try_new(
             Arc::new(schema.clone()),
             vec![Arc::new(Int32Array::from(vec![4, 5, 6]))],
-        ).unwrap();
+        )
+        .unwrap();
 
         writer.write_batch(&batch1).unwrap();
         writer.write_batch(&batch2).unwrap();

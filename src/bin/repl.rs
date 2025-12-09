@@ -1,5 +1,8 @@
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
+use rivetdb::catalog::CatalogManager;
+use rivetdb::datafusion::{HotDataEngine, QueryResponse};
+use rivetdb::source::Source;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
@@ -9,9 +12,6 @@ use rustyline::{Context, Editor, Helper};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use rivetdb::catalog::CatalogManager;
-use rivetdb::datafusion::{HotDataEngine, QueryResponse};
-use rivetdb::source::Source;
 
 #[derive(Parser)]
 #[command(name = "hotdata", about = "HotData Query Engine", version)]

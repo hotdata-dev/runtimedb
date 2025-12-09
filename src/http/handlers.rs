@@ -1,16 +1,16 @@
-use axum::{extract::Query as QueryParams, extract::State, http::StatusCode, Json};
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Instant;
-use tracing::error;
 use crate::datafusion::HotDataEngine;
 use crate::http::error::ApiError;
-use crate::source::Source;
 use crate::http::models::{
     ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse, ListConnectionsResponse,
     QueryRequest, QueryResponse, TableInfo, TablesResponse,
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
+use crate::source::Source;
+use axum::{extract::Query as QueryParams, extract::State, http::StatusCode, Json};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
+use tracing::error;
 
 /// Handler for POST /query
 pub async fn query_handler(
@@ -175,32 +175,26 @@ pub async fn create_connection_handler(
     };
 
     // Deserialize to Source enum
-    let source: Source = serde_json::from_value(config_with_type).map_err(|e| {
-        ApiError::bad_request(format!("Invalid source configuration: {}", e))
-    })?;
+    let source: Source = serde_json::from_value(config_with_type)
+        .map_err(|e| ApiError::bad_request(format!("Invalid source configuration: {}", e)))?;
 
     let source_type = source.source_type().to_string();
 
     // Attempt to connect (discovers tables and registers catalog)
-    engine
-        .connect(&request.name, source)
-        .await
-        .map_err(|e| {
-            error!("Failed to connect to database: {}", e);
-            // Extract root cause message only - don't expose full stack trace to clients
-            let root_cause = e.root_cause().to_string();
-            let msg = root_cause.lines().next().unwrap_or("Unknown error");
+    engine.connect(&request.name, source).await.map_err(|e| {
+        error!("Failed to connect to database: {}", e);
+        // Extract root cause message only - don't expose full stack trace to clients
+        let root_cause = e.root_cause().to_string();
+        let msg = root_cause.lines().next().unwrap_or("Unknown error");
 
-            if msg.contains("Failed to connect") || msg.contains("connection refused") {
-                ApiError::bad_gateway(format!("Failed to connect to database: {}", msg))
-            } else if msg.contains("Unsupported source type")
-                || msg.contains("Invalid configuration")
-            {
-                ApiError::bad_request(msg.to_string())
-            } else {
-                ApiError::bad_gateway(format!("Failed to connect to database: {}", msg))
-            }
-        })?;
+        if msg.contains("Failed to connect") || msg.contains("connection refused") {
+            ApiError::bad_gateway(format!("Failed to connect to database: {}", msg))
+        } else if msg.contains("Unsupported source type") || msg.contains("Invalid configuration") {
+            ApiError::bad_request(msg.to_string())
+        } else {
+            ApiError::bad_gateway(format!("Failed to connect to database: {}", msg))
+        }
+    })?;
 
     // Count discovered tables
     let tables_discovered = engine

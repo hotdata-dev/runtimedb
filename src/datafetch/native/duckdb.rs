@@ -1,7 +1,7 @@
 //! DuckDB/MotherDuck native driver implementation
 
-use std::collections::HashMap;
 use duckdb::Connection;
+use std::collections::HashMap;
 
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::source::Source;
@@ -13,9 +13,11 @@ pub async fn discover_tables(source: &Source) -> Result<Vec<TableMetadata>, Data
     let connection_string = source.connection_string();
     let catalog = source.catalog().map(|s| s.to_string());
 
-    tokio::task::spawn_blocking(move || discover_tables_sync(&connection_string, catalog.as_deref()))
-        .await
-        .map_err(|e| DataFetchError::Connection(e.to_string()))?
+    tokio::task::spawn_blocking(move || {
+        discover_tables_sync(&connection_string, catalog.as_deref())
+    })
+    .await
+    .map_err(|e| DataFetchError::Connection(e.to_string()))?
 }
 
 fn discover_tables_sync(
@@ -124,11 +126,10 @@ pub async fn fetch_table(
     let table = table.to_string();
 
     // DuckDB is sync, so spawn_blocking
-    let (arrow_schema, batches) = tokio::task::spawn_blocking(move || {
-        fetch_table_sync(&connection_string, &schema, &table)
-    })
-    .await
-    .map_err(|e| DataFetchError::Query(e.to_string()))??;
+    let (arrow_schema, batches) =
+        tokio::task::spawn_blocking(move || fetch_table_sync(&connection_string, &schema, &table))
+            .await
+            .map_err(|e| DataFetchError::Query(e.to_string()))??;
 
     // Initialize writer with schema
     writer.init(&arrow_schema)?;
@@ -150,7 +151,13 @@ fn fetch_table_sync(
     connection_string: &str,
     schema: &str,
     table: &str,
-) -> Result<(datafusion::arrow::datatypes::Schema, Vec<datafusion::arrow::record_batch::RecordBatch>), DataFetchError> {
+) -> Result<
+    (
+        datafusion::arrow::datatypes::Schema,
+        Vec<datafusion::arrow::record_batch::RecordBatch>,
+    ),
+    DataFetchError,
+> {
     let conn = Connection::open(connection_string)
         .map_err(|e| DataFetchError::Connection(e.to_string()))?;
 
@@ -160,10 +167,12 @@ fn fetch_table_sync(
         table.replace('"', "\"\"")
     );
 
-    let mut stmt = conn.prepare(&query)
+    let mut stmt = conn
+        .prepare(&query)
         .map_err(|e| DataFetchError::Query(e.to_string()))?;
 
-    let arrow_result = stmt.query_arrow([])
+    let arrow_result = stmt
+        .query_arrow([])
         .map_err(|e| DataFetchError::Query(e.to_string()))?;
 
     let arrow_schema = arrow_result.get_schema();

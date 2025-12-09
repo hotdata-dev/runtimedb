@@ -11,7 +11,11 @@ async fn test_duckdb_discovery_empty() {
     };
 
     let result = fetcher.discover_tables(&source).await;
-    assert!(result.is_ok(), "Discovery should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Discovery should succeed: {:?}",
+        result.err()
+    );
 
     let tables = result.unwrap();
     assert!(tables.is_empty(), "Empty DuckDB should have no tables");
@@ -40,7 +44,11 @@ async fn test_duckdb_discovery_with_table() {
     };
 
     let result = fetcher.discover_tables(&source).await;
-    assert!(result.is_ok(), "Discovery should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Discovery should succeed: {:?}",
+        result.err()
+    );
 
     let tables = result.unwrap();
     assert!(!tables.is_empty(), "Should find the test table");

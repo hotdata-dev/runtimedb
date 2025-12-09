@@ -231,7 +231,13 @@ impl CatalogManager for DuckdbCatalogManager {
         }
     }
 
-    fn add_table(&self, connection_id: i32, schema_name: &str, table_name: &str, arrow_schema_json: &str) -> Result<i32> {
+    fn add_table(
+        &self,
+        connection_id: i32,
+        schema_name: &str,
+        table_name: &str,
+        arrow_schema_json: &str,
+    ) -> Result<i32> {
         if self.readonly {
             anyhow::bail!("Cannot add table in readonly mode");
         }

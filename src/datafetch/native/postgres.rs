@@ -18,8 +18,7 @@ async fn connect_with_ssl_retry(connection_string: &str) -> Result<PgConnection,
         Err(e) => {
             let error_msg = e.to_string();
             // Check if the error indicates SSL is required
-            if error_msg.contains("connection is insecure")
-                || error_msg.contains("sslmode=require")
+            if error_msg.contains("connection is insecure") || error_msg.contains("sslmode=require")
             {
                 // Append sslmode=require and retry
                 let ssl_connection_string = if connection_string.contains('?') {
@@ -82,9 +81,10 @@ pub async fn discover_tables(source: &Source) -> Result<Vec<TableMetadata>, Data
         };
 
         // Find or create table entry
-        if let Some(existing) = tables.iter_mut().find(|t| {
-            t.catalog_name == catalog && t.schema_name == schema && t.table_name == table
-        }) {
+        if let Some(existing) = tables
+            .iter_mut()
+            .find(|t| t.catalog_name == catalog && t.schema_name == schema && t.table_name == table)
+        {
             existing.columns.push(column);
         } else {
             tables.push(TableMetadata {

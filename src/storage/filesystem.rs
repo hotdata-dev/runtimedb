@@ -121,8 +121,8 @@ impl StorageManager for FilesystemStorage {
         self.cache_base
             .join(connection_id.to_string())
             .join(schema)
-            .join(table)                           // table directory
-            .join(format!("{}.parquet", table))    // file inside directory
+            .join(table) // table directory
+            .join(format!("{}.parquet", table)) // file inside directory
     }
 
     async fn finalize_cache_write(

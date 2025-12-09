@@ -47,7 +47,12 @@ pub trait StorageManager: Debug + Send + Sync {
     /// Returns a local path to write Parquet data to.
     /// For local storage: returns final destination path.
     /// For remote storage: returns a temp file path.
-    fn prepare_cache_write(&self, connection_id: i32, schema: &str, table: &str) -> std::path::PathBuf;
+    fn prepare_cache_write(
+        &self,
+        connection_id: i32,
+        schema: &str,
+        table: &str,
+    ) -> std::path::PathBuf;
 
     /// Finalizes the cache write after Parquet file is written.
     /// For local storage: no-op (file already in place), returns URL.

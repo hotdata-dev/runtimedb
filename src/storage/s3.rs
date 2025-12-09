@@ -159,7 +159,12 @@ impl StorageManager for S3Storage {
         })
     }
 
-    fn prepare_cache_write(&self, _connection_id: i32, _schema: &str, table: &str) -> std::path::PathBuf {
+    fn prepare_cache_write(
+        &self,
+        _connection_id: i32,
+        _schema: &str,
+        table: &str,
+    ) -> std::path::PathBuf {
         // Temp file path - will be uploaded to correct S3 location
         std::env::temp_dir().join(format!("{}-{}.parquet", table, uuid::Uuid::new_v4()))
     }
@@ -182,6 +187,6 @@ impl StorageManager for S3Storage {
 
         std::fs::remove_file(written_path)?;
 
-        Ok(dir_url)  // Return directory URL for ListingTable
+        Ok(dir_url) // Return directory URL for ListingTable
     }
 }

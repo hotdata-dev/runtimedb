@@ -86,8 +86,9 @@ impl LazyTableProvider {
             .with_listing_options(listing_options)
             .with_schema(self.schema.clone());
 
-        let table = ListingTable::try_new(config)
-            .map_err(|e| DataFusionError::External(format!("Failed to create ListingTable: {}", e).into()))?;
+        let table = ListingTable::try_new(config).map_err(|e| {
+            DataFusionError::External(format!("Failed to create ListingTable: {}", e).into())
+        })?;
 
         // Create the scan execution plan with projection, filter, and limit pushdown
         table.scan(state, projection, filters, limit).await
@@ -141,11 +142,10 @@ impl LazyTableProvider {
             })?;
 
         // Update catalog with new path
-        if let Ok(Some(info)) = self.catalog.get_table(
-            self.connection_id,
-            &self.schema_name,
-            &self.table_name,
-        ) {
+        if let Ok(Some(info)) =
+            self.catalog
+                .get_table(self.connection_id, &self.schema_name, &self.table_name)
+        {
             let _ = self.catalog.update_table_sync(info.id, &parquet_url, "");
         }
 
@@ -199,7 +199,8 @@ impl TableProvider for LazyTableProvider {
         };
 
         // Load the parquet file and create execution plan with projection, filter, and limit pushdown
-        self.load_parquet_exec(&parquet_url, state, projection, filters, limit).await
+        self.load_parquet_exec(&parquet_url, state, projection, filters, limit)
+            .await
     }
 
     fn supports_filters_pushdown(

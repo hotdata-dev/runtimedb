@@ -1,7 +1,7 @@
-use testcontainers::{runners::AsyncRunner, ImageExt};
-use testcontainers_modules::postgres::Postgres;
 use rivetdb::catalog::CatalogManager;
 use rivetdb::catalog::PostgresCatalogManager;
+use testcontainers::{runners::AsyncRunner, ImageExt};
+use testcontainers_modules::postgres::Postgres;
 
 async fn create_test_manager() -> (
     PostgresCatalogManager,
@@ -234,15 +234,21 @@ async fn test_list_tables_multiple_connections() {
         .add_connection("neon_east", "postgres", config1)
         .unwrap();
     catalog.add_table(conn1_id, "public", "cities", "").unwrap();
-    catalog.add_table(conn1_id, "public", "locations", "").unwrap();
-    catalog.add_table(conn1_id, "public", "table_1", "").unwrap();
+    catalog
+        .add_table(conn1_id, "public", "locations", "")
+        .unwrap();
+    catalog
+        .add_table(conn1_id, "public", "table_1", "")
+        .unwrap();
 
     // Add second connection with tables
     let config2 = r#"{"host": "localhost", "port": 5433, "database": "db2"}"#;
     let conn2_id = catalog
         .add_connection("connection2", "postgres", config2)
         .unwrap();
-    catalog.add_table(conn2_id, "public", "table_1", "").unwrap();
+    catalog
+        .add_table(conn2_id, "public", "table_1", "")
+        .unwrap();
 
     // List all tables (no filter)
     let all_tables = catalog.list_tables(None).unwrap();
