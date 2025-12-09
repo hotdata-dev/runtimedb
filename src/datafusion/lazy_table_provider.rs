@@ -55,13 +55,15 @@ impl LazyTableProvider {
         }
     }
 
-    /// Load a parquet file and return an ExecutionPlan, filtering out dlt metadata columns.
+    /// Load a parquet file and return an ExecutionPlan.
+    /// Uses the catalog schema (self.schema) to ensure consistency with schema()
+    /// and proper projection index alignment.
     async fn load_parquet_exec(
         &self,
         parquet_url: &str,
         state: &dyn Session,
+        projection: Option<&Vec<usize>>,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
-        use datafusion::arrow::datatypes::Schema;
         use datafusion::datasource::file_format::parquet::ParquetFormat;
         use datafusion::datasource::listing::{
             ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
@@ -74,29 +76,19 @@ impl LazyTableProvider {
         let file_format = ParquetFormat::default();
         let listing_options = ListingOptions::new(Arc::new(file_format));
 
-        let resolved_schema = listing_options
-            .infer_schema(state, &table_path)
-            .await?;
-
-        // Filter out _dlt metadata columns
-        const DLT_COLUMNS: &[&str] = &["_dlt_id", "_dlt_load_id"];
-        let filtered_fields: Vec<_> = resolved_schema
-            .fields()
-            .iter()
-            .filter(|field| !DLT_COLUMNS.contains(&field.name().as_str()))
-            .cloned()
-            .collect();
-        let filtered_schema = Arc::new(Schema::new(filtered_fields));
-
+        // Use the catalog schema (self.schema) to ensure consistency.
+        // This ensures projection indices from DataFusion align correctly since
+        // they're based on the schema returned by schema().
+        // The Parquet reader will match columns by name.
         let config = ListingTableConfig::new(table_path)
             .with_listing_options(listing_options)
-            .with_schema(filtered_schema);
+            .with_schema(self.schema.clone());
 
         let table = ListingTable::try_new(config)
             .map_err(|e| DataFusionError::External(format!("Failed to create ListingTable: {}", e).into()))?;
 
-        // Create the scan execution plan
-        table.scan(state, None, &[], None).await
+        // Create the scan execution plan with projection pushdown
+        table.scan(state, projection, &[], None).await
     }
 
     /// Fetch the table data and update catalog
@@ -177,7 +169,7 @@ impl TableProvider for LazyTableProvider {
     async fn scan(
         &self,
         state: &dyn Session,
-        _projection: Option<&Vec<usize>>,
+        projection: Option<&Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
@@ -204,17 +196,8 @@ impl TableProvider for LazyTableProvider {
             self.fetch_and_cache().await?
         };
 
-        // Load the parquet file and create execution plan
-        let exec_plan = self
-            .load_parquet_exec(&parquet_url, state)
-            .await
-            .map_err(|e| {
-                DataFusionError::External(format!("Failed to load parquet: {}", e).into())
-            })?;
-
-        // Apply projection and filters if needed
-        // Note: The underlying ParquetExec already handles these optimizations
-        Ok(exec_plan)
+        // Load the parquet file and create execution plan with projection pushdown
+        self.load_parquet_exec(&parquet_url, state, projection).await
     }
 
     fn supports_filters_pushdown(
