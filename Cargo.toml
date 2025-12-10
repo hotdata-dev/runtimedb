@@ -4,10 +4,6 @@ version = "0.0.0"
 edition = "2021"
 
 [[bin]]
-name = "cli"
-path = "src/bin/repl.rs"
-
-[[bin]]
 name = "server"
 path = "src/bin/server.rs"
 
