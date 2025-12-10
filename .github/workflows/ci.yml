@@ -102,7 +102,7 @@ jobs:
   build:
     name: Build & Docker
     runs-on: ubuntu-latest
-    needs: [fmt, check, clippy, test]
+    needs: [test]
     steps:
       - uses: actions/checkout@v4
       - uses: mozilla-actions/sccache-action@v0.0.5
@@ -122,5 +122,37 @@ jobs:
             ${{ runner.os }}-cargo-registry-
       - name: Build release binary
         run: cargo build --release --bin server
-      - name: Build Docker image
-        run: docker build -t rivetdb:${{ github.sha }} .
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-binary
+          path: target/release/server
+
+  push:
+    name: Push to GHCR
+    runs-on: ubuntu-latest
+    needs: [check, clippy, build]
+#    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: server-binary
+          path: target/release
+      - name: Make binary executable
+        run: chmod +x target/release/server
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push Docker image
+        run: |
+          docker build -t ghcr.io/${{ github.repository }}:${{ github.sha }} -t ghcr.io/${{ github.repository }}:latest .
+          docker push ghcr.io/${{ github.repository }}:${{ github.sha }}
+          docker push ghcr.io/${{ github.repository }}:latest
