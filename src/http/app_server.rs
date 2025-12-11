@@ -17,9 +17,9 @@ pub const PATH_QUERY: &str = "/query";
 pub const PATH_TABLES: &str = "/tables";
 pub const PATH_HEALTH: &str = "/health";
 pub const PATH_CONNECTIONS: &str = "/connections";
-pub const PATH_CONNECTION: &str = "/connections/:name";
-pub const PATH_CONNECTION_CACHE: &str = "/connections/:name/cache";
-pub const PATH_TABLE_CACHE: &str = "/connections/:name/tables/:schema/:table/cache";
+pub const PATH_CONNECTION: &str = "/connections/{name}";
+pub const PATH_CONNECTION_CACHE: &str = "/connections/{name}/cache";
+pub const PATH_TABLE_CACHE: &str = "/connections/{name}/tables/{schema}/{table}/cache";
 
 impl AppServer {
     pub fn new(engine: HotDataEngine) -> Self {
