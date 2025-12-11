@@ -1,0 +1,13 @@
+[server]
+host = "0.0.0.0"
+port = 3000
+
+[catalog]
+type = "duckdb"
+
+[storage]
+type = "filesystem"
+
+[paths]
+cache_dir = "/app/cache"
+state_dir = "/app/state"

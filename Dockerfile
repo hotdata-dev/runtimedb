@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y \
 
 # Copy pre-built binary and default config
 COPY target/release/server ./server
-COPY config-local.toml ./config.toml
+COPY config-docker.toml ./config.toml
 
 # Create directories for cache and state
 RUN mkdir -p ./cache ./state
