@@ -1,12 +1,17 @@
 use crate::datafusion::HotDataEngine;
 use crate::http::error::ApiError;
 use crate::http::models::{
-    ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse, ListConnectionsResponse,
-    QueryRequest, QueryResponse, TableInfo, TablesResponse,
+    ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse, GetConnectionResponse,
+    ListConnectionsResponse, QueryRequest, QueryResponse, TableInfo, TablesResponse,
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
 use crate::source::Source;
-use axum::{extract::Query as QueryParams, extract::State, http::StatusCode, Json};
+use axum::{
+    extract::{Path, Query as QueryParams, State},
+    http::StatusCode,
+    Json,
+};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -230,4 +235,89 @@ pub async fn list_connections_handler(
     Ok(Json(ListConnectionsResponse {
         connections: connection_infos,
     }))
+}
+
+/// Handler for GET /connections/{name}
+pub async fn get_connection_handler(
+    State(engine): State<Arc<HotDataEngine>>,
+    Path(name): Path<String>,
+) -> Result<Json<GetConnectionResponse>, ApiError> {
+    // Get connection info
+    let conn = engine
+        .catalog()
+        .get_connection(&name)?
+        .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", name)))?;
+
+    // Get table counts
+    let tables = engine.list_tables(Some(&name))?;
+    let table_count = tables.len();
+    let synced_table_count = tables.iter().filter(|t| t.parquet_path.is_some()).count();
+
+    Ok(Json(GetConnectionResponse {
+        id: conn.id,
+        name: conn.name,
+        source_type: conn.source_type,
+        table_count,
+        synced_table_count,
+    }))
+}
+
+/// Handler for DELETE /connections/{name}
+pub async fn delete_connection_handler(
+    State(engine): State<Arc<HotDataEngine>>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    engine.remove_connection(&name).await.map_err(|e| {
+        if e.to_string().contains("not found") {
+            ApiError::not_found(format!("Connection '{}' not found", name))
+        } else {
+            ApiError::internal_error(e.to_string())
+        }
+    })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Handler for DELETE /connections/{name}/cache
+pub async fn purge_connection_cache_handler(
+    State(engine): State<Arc<HotDataEngine>>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    engine.purge_connection(&name).await.map_err(|e| {
+        if e.to_string().contains("not found") {
+            ApiError::not_found(format!("Connection '{}' not found", name))
+        } else {
+            ApiError::internal_error(e.to_string())
+        }
+    })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Path parameters for table cache operations
+#[derive(Deserialize)]
+pub struct TableCachePath {
+    name: String,
+    schema: String,
+    table: String,
+}
+
+/// Handler for DELETE /connections/{name}/tables/{schema}/{table}/cache
+pub async fn purge_table_cache_handler(
+    State(engine): State<Arc<HotDataEngine>>,
+    Path(params): Path<TableCachePath>,
+) -> Result<StatusCode, ApiError> {
+    engine
+        .purge_table(&params.name, &params.schema, &params.table)
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                ApiError::not_found(msg)
+            } else {
+                ApiError::internal_error(msg)
+            }
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
 }

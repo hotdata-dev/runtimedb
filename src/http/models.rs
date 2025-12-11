@@ -60,3 +60,13 @@ pub struct ConnectionInfo {
 pub struct ListConnectionsResponse {
     pub connections: Vec<ConnectionInfo>,
 }
+
+/// Response body for GET /connections/{name}
+#[derive(Debug, Serialize)]
+pub struct GetConnectionResponse {
+    pub id: i32,
+    pub name: String,
+    pub source_type: String,
+    pub table_count: usize,
+    pub synced_table_count: usize,
+}

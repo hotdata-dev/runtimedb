@@ -230,7 +230,7 @@ impl HotDataEngine {
     }
 
     /// Purge all cached data for a connection (clears parquet files and resets sync state).
-    pub async fn purge_connection(&mut self, name: &str) -> Result<()> {
+    pub async fn purge_connection(&self, name: &str) -> Result<()> {
         // Get connection info (validates it exists and gives us the ID)
         let conn = self
             .catalog
@@ -263,7 +263,7 @@ impl HotDataEngine {
 
     /// Purge cached data for a single table (clears parquet file and resets sync state).
     pub async fn purge_table(
-        &mut self,
+        &self,
         connection_name: &str,
         schema_name: &str,
         table_name: &str,
@@ -303,7 +303,7 @@ impl HotDataEngine {
     }
 
     /// Remove a connection entirely (removes from catalog and deletes all data).
-    pub async fn remove_connection(&mut self, name: &str) -> Result<()> {
+    pub async fn remove_connection(&self, name: &str) -> Result<()> {
         // Get connection info (validates it exists and gives us the ID)
         let conn = self
             .catalog
