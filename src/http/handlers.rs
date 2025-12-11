@@ -276,3 +276,19 @@ pub async fn delete_connection_handler(
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+/// Handler for DELETE /connections/{name}/cache
+pub async fn purge_connection_cache_handler(
+    State(engine): State<Arc<HotDataEngine>>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    engine.purge_connection(&name).await.map_err(|e| {
+        if e.to_string().contains("not found") {
+            ApiError::not_found(format!("Connection '{}' not found", name))
+        } else {
+            ApiError::internal_error(e.to_string())
+        }
+    })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
