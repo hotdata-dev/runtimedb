@@ -1,12 +1,16 @@
 use crate::datafusion::HotDataEngine;
 use crate::http::error::ApiError;
 use crate::http::models::{
-    ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse, ListConnectionsResponse,
-    QueryRequest, QueryResponse, TableInfo, TablesResponse,
+    ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse, GetConnectionResponse,
+    ListConnectionsResponse, QueryRequest, QueryResponse, TableInfo, TablesResponse,
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
 use crate::source::Source;
-use axum::{extract::Query as QueryParams, extract::State, http::StatusCode, Json};
+use axum::{
+    extract::{Path, Query as QueryParams, State},
+    http::StatusCode,
+    Json,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -229,5 +233,30 @@ pub async fn list_connections_handler(
 
     Ok(Json(ListConnectionsResponse {
         connections: connection_infos,
+    }))
+}
+
+/// Handler for GET /connections/{name}
+pub async fn get_connection_handler(
+    State(engine): State<Arc<HotDataEngine>>,
+    Path(name): Path<String>,
+) -> Result<Json<GetConnectionResponse>, ApiError> {
+    // Get connection info
+    let conn = engine
+        .catalog()
+        .get_connection(&name)?
+        .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", name)))?;
+
+    // Get table counts
+    let tables = engine.list_tables(Some(&name))?;
+    let table_count = tables.len();
+    let synced_table_count = tables.iter().filter(|t| t.parquet_path.is_some()).count();
+
+    Ok(Json(GetConnectionResponse {
+        id: conn.id,
+        name: conn.name,
+        source_type: conn.source_type,
+        table_count,
+        synced_table_count,
     }))
 }
