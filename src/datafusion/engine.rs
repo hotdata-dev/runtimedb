@@ -468,13 +468,13 @@ impl HotDataEngine {
             .paths
             .cache_dir
             .as_ref()
-            .map(|p| PathBuf::from(p))
+            .map(PathBuf::from)
             .unwrap_or_else(|| metadata_dir.join("cache"));
         let state_dir_path = config
             .paths
             .state_dir
             .as_ref()
-            .map(|p| PathBuf::from(p))
+            .map(PathBuf::from)
             .unwrap_or_else(|| metadata_dir.join("state"));
 
         // Ensure directories exist before using them
