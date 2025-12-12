@@ -34,65 +34,45 @@ impl SqliteCatalogManager {
     }
 
     async fn run_migrations_async(pool: &SqlitePool) -> Result<()> {
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS connections (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT UNIQUE NOT NULL,
-                source_type TEXT NOT NULL,
-                config_json TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        "#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS tables (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                connection_id INTEGER NOT NULL,
-                schema_name TEXT NOT NULL,
-                table_name TEXT NOT NULL,
-                parquet_path TEXT,
-                state_path TEXT,
-                last_sync TIMESTAMP,
-                arrow_schema_json TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (connection_id) REFERENCES connections(id),
-                UNIQUE (connection_id, schema_name, table_name)
-            )
-        "#,
-        )
-        .execute(pool)
-        .await?;
-
         run_migrations::<SqliteMigrationBackend>(pool).await
     }
 
-    fn sqlite_migration_inject_source_type(pool: &SqlitePool) -> BoxFuture<'_, Result<()>> {
+    fn sqlite_initialize_schema(pool: &SqlitePool) -> BoxFuture<'_, Result<()>> {
         async move {
             sqlx::query(
                 r#"
-                UPDATE connections
-                SET config_json = json_patch(config_json, '{"type":"postgres"}')
-                WHERE json_extract(config_json, '$.type') IS NULL
+                CREATE TABLE IF NOT EXISTS connections (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    source_type TEXT NOT NULL,
+                    config_json TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
             "#,
             )
             .execute(pool)
             .await?;
-            Ok(())
-        }
-        .boxed()
-    }
 
-    fn sqlite_migration_add_arrow_schema(pool: &SqlitePool) -> BoxFuture<'_, Result<()>> {
-        async move {
-            sqlx::query(r#"ALTER TABLE tables ADD COLUMN arrow_schema_json TEXT"#)
-                .execute(pool)
-                .await
-                .ok(); // ignore if already exists
+            sqlx::query(
+                r#"
+                CREATE TABLE IF NOT EXISTS tables (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    connection_id INTEGER NOT NULL,
+                    schema_name TEXT NOT NULL,
+                    table_name TEXT NOT NULL,
+                    parquet_path TEXT,
+                    state_path TEXT,
+                    last_sync TIMESTAMP,
+                    arrow_schema_json TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (connection_id) REFERENCES connections(id),
+                    UNIQUE (connection_id, schema_name, table_name)
+                )
+            "#,
+            )
+            .execute(pool)
+            .await?;
+
             Ok(())
         }
         .boxed()
@@ -233,10 +213,6 @@ impl CatalogMigrations for SqliteMigrationBackend {
         .boxed()
     }
     fn migrate_v1(pool: &Self::Pool) -> BoxFuture<'_, Result<()>> {
-        SqliteCatalogManager::sqlite_migration_inject_source_type(pool)
-    }
-
-    fn migrate_v2(pool: &Self::Pool) -> BoxFuture<'_, Result<()>> {
-        SqliteCatalogManager::sqlite_migration_add_arrow_schema(pool)
+        SqliteCatalogManager::sqlite_initialize_schema(pool)
     }
 }

@@ -41,7 +41,7 @@ impl PostgresCatalogManager {
         run_migrations::<PostgresMigrationBackend>(pool).await
     }
 
-    fn postgres_migration_create_core_tables(pool: &PgPool) -> BoxFuture<'_, Result<()>> {
+    fn postgres_initialize_schema(pool: &PgPool) -> BoxFuture<'_, Result<()>> {
         async move {
             sqlx::query(
                 "CREATE TABLE IF NOT EXISTS connections (
@@ -73,17 +73,6 @@ impl PostgresCatalogManager {
             .execute(pool)
             .await?;
 
-            Ok(())
-        }
-        .boxed()
-    }
-
-    fn postgres_migration_add_arrow_schema(pool: &PgPool) -> BoxFuture<'_, Result<()>> {
-        async move {
-            let _ =
-                sqlx::query("ALTER TABLE tables ADD COLUMN IF NOT EXISTS arrow_schema_json TEXT")
-                    .execute(pool)
-                    .await;
             Ok(())
         }
         .boxed()
@@ -131,11 +120,7 @@ impl CatalogMigrations for PostgresMigrationBackend {
         .boxed()
     }
     fn migrate_v1(pool: &Self::Pool) -> BoxFuture<'_, Result<()>> {
-        PostgresCatalogManager::postgres_migration_create_core_tables(pool)
-    }
-
-    fn migrate_v2(pool: &Self::Pool) -> BoxFuture<'_, Result<()>> {
-        PostgresCatalogManager::postgres_migration_add_arrow_schema(pool)
+        PostgresCatalogManager::postgres_initialize_schema(pool)
     }
 }
 
