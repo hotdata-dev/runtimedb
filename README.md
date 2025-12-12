@@ -16,7 +16,7 @@ It provides a Trino-style SQL interface for querying remote data sources without
 
 RivetDB takes inspiration from [DuckDB](https://duckdb.org/) and the Small Data community, which has shown how much you can get out of a single machine when you pair simplicity, vectorized execution, and efficient columnar formats. RivetDB applies that same thinking to federated data, using Arrow-native execution to make remote sources feel local. We think this is going to be especially important as agents query disparate systems and want to avoid scattering data fetching logic.
 
-Under the hood, RivetDB is built in Rust and powered by [Apache DataFusion](https://datafusion.apache.org/). The combination gives us strong safety guarantees, solid performance, and a proven execution engine that plays well with Arrow.
+Under the hood, RivetDB is built in Rust and powered by [Apache DataFusion](https://datafusion.apache.org/), providing strong safety guarantees, great performance, and a solid execution engine that plays well with Arrow.
 
 RivetDB is under active development, and the APIs will continue to shift as we move toward a stable 1.0 release.
 
@@ -64,9 +64,9 @@ This foundation supports the larger roadmap described below.
 RivetDB aims to become a unified query engine that eliminates challenges working with between disparate data systems. The project emphasizes:
 
 - A consistent SQL interface for structured, semi-structured, and remote data sources
+- Millisecond startup times for on-demand ephemeral compute 
 - Intelligent caching that adapts to query patterns and reduces data movement
 - Tooling that gives developers introspection into data, metadata, and performance
-- Millisecond startup times for on-demand ephemeral compute 
 - Developer-friendly documentation and APIs
 
 The long-term goal includes distributed caching, additional connectors, real-time introspection, and seamless orchestration integration.
@@ -90,9 +90,6 @@ These features define the first stable preview of RivetDB:
 
 - **Query Metadata API**  
   Expose information about query execution: planning, caching, durations, and more.
-
-- **Optional Session IDs**  
-  Support optional sessions for multi-query workflows.
 
 - **Table Caching Support**  
   Enable caching of entire remote tables for repeated or incremental queries.
