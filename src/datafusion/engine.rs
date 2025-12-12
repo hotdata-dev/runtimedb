@@ -52,6 +52,7 @@ impl HotDataEngine {
         readonly: bool,
     ) -> Result<Self> {
         let catalog = DuckdbCatalogManager::new_readonly(catalog_path, readonly)?;
+        catalog.run_migrations()?;
 
         let df_ctx = SessionContext::new();
 
@@ -413,6 +414,8 @@ impl HotDataEngineBuilder {
         let storage = self
             .storage
             .ok_or_else(|| anyhow::anyhow!("Storage manager not set"))?;
+
+        catalog.run_migrations()?;
 
         // Create DataFusion session context
         let df_ctx = SessionContext::new();

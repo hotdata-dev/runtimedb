@@ -1,6 +1,9 @@
 use crate::catalog::manager::{CatalogManager, ConnectionInfo, TableInfo};
+use crate::catalog::migrations::{run_migrations, CatalogMigrations};
 use crate::catalog::store::CatalogStore;
 use anyhow::Result;
+use futures::future::BoxFuture;
+use futures::FutureExt;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres};
 use std::fmt::{self, Debug, Formatter};
@@ -19,7 +22,6 @@ impl PostgresCatalogManager {
                     .connect(connection_string)
                     .await?;
 
-                Self::initialize_schema_async(&pool).await?;
                 Ok::<_, anyhow::Error>(pool)
             })
         })?;
@@ -28,53 +30,112 @@ impl PostgresCatalogManager {
         Ok(Self { store })
     }
 
-    async fn initialize_schema_async(pool: &PgPool) -> Result<()> {
-        // Create connections table
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS connections (
-                id SERIAL PRIMARY KEY,
-                name TEXT UNIQUE NOT NULL,
-                source_type TEXT NOT NULL,
-                config_json TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )",
-        )
-        .execute(pool)
-        .await?;
-
-        // Create tables table
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS tables (
-                id SERIAL PRIMARY KEY,
-                connection_id INTEGER NOT NULL,
-                schema_name TEXT NOT NULL,
-                table_name TEXT NOT NULL,
-                parquet_path TEXT,
-                state_path TEXT,
-                last_sync TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                arrow_schema_json TEXT,
-                FOREIGN KEY (connection_id) REFERENCES connections(id),
-                UNIQUE (connection_id, schema_name, table_name)
-            )",
-        )
-        .execute(pool)
-        .await?;
-
-        // Add arrow_schema_json column if it doesn't exist (migration for older schemas)
-        // This is safe to run even if column exists due to IF NOT EXISTS
-        let _ = sqlx::query("ALTER TABLE tables ADD COLUMN IF NOT EXISTS arrow_schema_json TEXT")
-            .execute(pool)
-            .await;
-
-        Ok(())
-    }
-
     fn block_on<F, T>(&self, f: F) -> Result<T>
     where
         F: std::future::Future<Output = Result<T>>,
     {
         block_in_place(|| tokio::runtime::Handle::current().block_on(f))
+    }
+
+    async fn run_migrations_async(pool: &PgPool) -> Result<()> {
+        run_migrations::<PostgresMigrationBackend>(pool).await
+    }
+
+    fn postgres_migration_create_core_tables(pool: &PgPool) -> BoxFuture<'_, Result<()>> {
+        async move {
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS connections (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT UNIQUE NOT NULL,
+                    source_type TEXT NOT NULL,
+                    config_json TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )",
+            )
+            .execute(pool)
+            .await?;
+
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS tables (
+                    id SERIAL PRIMARY KEY,
+                    connection_id INTEGER NOT NULL,
+                    schema_name TEXT NOT NULL,
+                    table_name TEXT NOT NULL,
+                    parquet_path TEXT,
+                    state_path TEXT,
+                    last_sync TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    arrow_schema_json TEXT,
+                    FOREIGN KEY (connection_id) REFERENCES connections(id),
+                    UNIQUE (connection_id, schema_name, table_name)
+                )",
+            )
+            .execute(pool)
+            .await?;
+
+            Ok(())
+        }
+        .boxed()
+    }
+
+    fn postgres_migration_add_arrow_schema(pool: &PgPool) -> BoxFuture<'_, Result<()>> {
+        async move {
+            let _ =
+                sqlx::query("ALTER TABLE tables ADD COLUMN IF NOT EXISTS arrow_schema_json TEXT")
+                    .execute(pool)
+                    .await;
+            Ok(())
+        }
+        .boxed()
+    }
+}
+
+struct PostgresMigrationBackend;
+
+impl CatalogMigrations for PostgresMigrationBackend {
+    type Pool = PgPool;
+
+    fn ensure_migrations_table(pool: &Self::Pool) -> BoxFuture<'_, Result<()>> {
+        async move {
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version BIGINT PRIMARY KEY,
+                    applied_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                )",
+            )
+            .execute(pool)
+            .await?;
+            Ok(())
+        }
+        .boxed()
+    }
+
+    fn current_version(pool: &Self::Pool) -> BoxFuture<'_, Result<i64>> {
+        async move {
+            sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
+                .fetch_one(pool)
+                .await
+                .map_err(Into::into)
+        }
+        .boxed()
+    }
+
+    fn record_version(pool: &Self::Pool, version: i64) -> BoxFuture<'_, Result<()>> {
+        async move {
+            sqlx::query("INSERT INTO schema_migrations (version) VALUES ($1)")
+                .bind(version)
+                .execute(pool)
+                .await?;
+            Ok(())
+        }
+        .boxed()
+    }
+    fn migrate_v1(pool: &Self::Pool) -> BoxFuture<'_, Result<()>> {
+        PostgresCatalogManager::postgres_migration_create_core_tables(pool)
+    }
+
+    fn migrate_v2(pool: &Self::Pool) -> BoxFuture<'_, Result<()>> {
+        PostgresCatalogManager::postgres_migration_add_arrow_schema(pool)
     }
 }
 
@@ -82,6 +143,10 @@ impl CatalogManager for PostgresCatalogManager {
     fn close(&self) -> Result<()> {
         // sqlx pool handles connection cleanup automatically
         Ok(())
+    }
+
+    fn run_migrations(&self) -> Result<()> {
+        self.block_on(Self::run_migrations_async(self.store.pool()))
     }
 
     fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {

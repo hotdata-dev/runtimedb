@@ -25,12 +25,6 @@ impl DuckdbCatalogManager {
             Connection::open(db_path)?
         };
 
-        // Only initialize schema if not in readonly mode
-        // In readonly mode, we expect the database to already exist with proper schema
-        if !readonly {
-            DuckdbCatalogManager::initialize_schema(&conn)?;
-        }
-
         Ok(Self {
             conn: Arc::new(Mutex::new(Some(conn))),
             catalog_path: db_path.to_string(),
@@ -162,6 +156,16 @@ impl CatalogManager for DuckdbCatalogManager {
             let _ = conn.close();
         }
         Ok(())
+    }
+
+    fn run_migrations(&self) -> Result<()> {
+        if self.readonly {
+            return Ok(());
+        }
+
+        let conn_guard = self.get_connection_guard()?;
+        let conn = conn_guard.as_ref().unwrap();
+        DuckdbCatalogManager::initialize_schema(conn)
     }
 
     fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {

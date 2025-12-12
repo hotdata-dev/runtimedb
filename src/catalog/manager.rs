@@ -28,6 +28,9 @@ pub trait CatalogManager: Debug + Send + Sync {
     /// After closing, all operations on this catalog will return an error.
     fn close(&self) -> Result<()>;
 
+    /// Apply any pending schema migrations. Should be idempotent.
+    fn run_migrations(&self) -> Result<()>;
+
     fn list_connections(&self) -> Result<Vec<ConnectionInfo>>;
     fn add_connection(&self, name: &str, source_type: &str, config_json: &str) -> Result<i32>;
     fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>>;
