@@ -8,6 +8,7 @@ fn test_catalog_initialization() {
     let db_path = dir.path().join("catalog.db");
 
     let catalog = DuckdbCatalogManager::new(db_path.to_str().unwrap()).unwrap();
+    catalog.run_migrations().unwrap();
 
     // Should be able to list connections (empty initially)
     let connections = catalog.list_connections().unwrap();
@@ -20,6 +21,7 @@ fn test_add_connection() {
     let db_path = dir.path().join("catalog.db");
 
     let catalog = DuckdbCatalogManager::new(db_path.to_str().unwrap()).unwrap();
+    catalog.run_migrations().unwrap();
 
     let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
     catalog
@@ -37,6 +39,7 @@ fn test_clear_connection_cache_metadata() {
     let db_path = dir.path().join("catalog.db");
 
     let catalog = DuckdbCatalogManager::new(db_path.to_str().unwrap()).unwrap();
+    catalog.run_migrations().unwrap();
 
     // Add a connection and table
     let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
@@ -80,6 +83,7 @@ fn test_delete_connection() {
     let db_path = dir.path().join("catalog.db");
 
     let catalog = DuckdbCatalogManager::new(db_path.to_str().unwrap()).unwrap();
+    catalog.run_migrations().unwrap();
 
     // Add a connection and table
     let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
@@ -114,6 +118,7 @@ fn test_clear_nonexistent_connection() {
     let db_path = dir.path().join("catalog.db");
 
     let catalog = DuckdbCatalogManager::new(db_path.to_str().unwrap()).unwrap();
+    catalog.run_migrations().unwrap();
 
     // Try to clear cache metadata for a connection that doesn't exist
     let result = catalog.clear_connection_cache_metadata("nonexistent");
@@ -127,6 +132,7 @@ fn test_delete_nonexistent_connection() {
     let db_path = dir.path().join("catalog.db");
 
     let catalog = DuckdbCatalogManager::new(db_path.to_str().unwrap()).unwrap();
+    catalog.run_migrations().unwrap();
 
     // Try to delete a connection that doesn't exist
     let result = catalog.delete_connection("nonexistent");
@@ -140,6 +146,7 @@ fn test_close_catalog() {
     let db_path = dir.path().join("catalog.db");
 
     let catalog = DuckdbCatalogManager::new(db_path.to_str().unwrap()).unwrap();
+    catalog.run_migrations().unwrap();
 
     // Add a connection before closing
     let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
@@ -162,6 +169,7 @@ fn test_close_catalog_idempotent() {
     let db_path = dir.path().join("catalog.db");
 
     let catalog = DuckdbCatalogManager::new(db_path.to_str().unwrap()).unwrap();
+    catalog.run_migrations().unwrap();
 
     // Close should be idempotent (can be called multiple times)
     catalog.close().unwrap();
@@ -176,6 +184,7 @@ fn test_close_releases_file_lock() {
 
     {
         let catalog = DuckdbCatalogManager::new(db_path.to_str().unwrap()).unwrap();
+        catalog.run_migrations().unwrap();
         let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
         catalog
             .add_connection("test_db", "postgres", config)
@@ -198,6 +207,7 @@ fn test_list_tables_multiple_connections() {
     let db_path = dir.path().join("catalog.db");
 
     let catalog = DuckdbCatalogManager::new(db_path.to_str().unwrap()).unwrap();
+    catalog.run_migrations().unwrap();
 
     // Add first connection with tables
     let config1 = r#"{"host": "localhost", "port": 5432, "database": "db1"}"#;
@@ -266,6 +276,7 @@ fn test_list_tables_with_cached_status() {
     let db_path = dir.path().join("catalog.db");
 
     let catalog = DuckdbCatalogManager::new(db_path.to_str().unwrap()).unwrap();
+    catalog.run_migrations().unwrap();
 
     // Add connection with tables
     let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
@@ -330,6 +341,7 @@ fn test_clear_table_cache_metadata() {
     let db_path = dir.path().join("catalog.db");
 
     let catalog = DuckdbCatalogManager::new(db_path.to_str().unwrap()).unwrap();
+    catalog.run_migrations().unwrap();
 
     // Add a connection and two tables
     let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
@@ -395,6 +407,7 @@ fn test_clear_table_cache_metadata_nonexistent() {
     let db_path = dir.path().join("catalog.db");
 
     let catalog = DuckdbCatalogManager::new(db_path.to_str().unwrap()).unwrap();
+    catalog.run_migrations().unwrap();
 
     // Add a connection but no tables
     let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
@@ -414,6 +427,7 @@ fn test_clear_table_without_cache() {
     let db_path = dir.path().join("catalog.db");
 
     let catalog = DuckdbCatalogManager::new(db_path.to_str().unwrap()).unwrap();
+    catalog.run_migrations().unwrap();
 
     // Add a connection and table (without cache paths)
     let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;

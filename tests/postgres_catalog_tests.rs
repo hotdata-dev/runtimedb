@@ -20,6 +20,7 @@ async fn create_test_manager() -> (
     );
 
     let manager = PostgresCatalogManager::new(&connection_string).unwrap();
+    manager.run_migrations().unwrap();
 
     (manager, container)
 }
