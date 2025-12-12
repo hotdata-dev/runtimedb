@@ -1,6 +1,7 @@
 mod duckdb_manager;
 mod postgres_manager;
 mod sqlite_manager;
+mod store;
 
 mod manager;
 

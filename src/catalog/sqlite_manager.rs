@@ -1,12 +1,12 @@
-use super::TableInfo;
-use crate::catalog::manager::{CatalogManager, ConnectionInfo};
+use crate::catalog::manager::{CatalogManager, ConnectionInfo, TableInfo};
+use crate::catalog::store::CatalogStore;
 use anyhow::Result;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Sqlite, SqlitePool};
 use std::fmt::Debug;
 use tokio::task::block_in_place;
 
 pub struct SqliteCatalogManager {
-    pool: SqlitePool,
+    store: CatalogStore<Sqlite>,
     catalog_path: String,
 }
 
@@ -21,8 +21,10 @@ impl SqliteCatalogManager {
             })
         })?;
 
+        let store = CatalogStore::new(pool);
+
         Ok(Self {
-            pool,
+            store,
             catalog_path: db_path.to_string(),
         })
     }
@@ -131,74 +133,15 @@ impl CatalogManager for SqliteCatalogManager {
     }
 
     fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
-        self.block_on(async {
-            let rows = sqlx::query(
-                r#"
-                SELECT id, name, source_type, config_json
-                FROM connections
-                ORDER BY name
-            "#,
-            )
-            .fetch_all(&self.pool)
-            .await?;
-
-            let connections = rows
-                .iter()
-                .map(|row| ConnectionInfo {
-                    id: row.get("id"),
-                    name: row.get("name"),
-                    source_type: row.get("source_type"),
-                    config_json: row.get("config_json"),
-                })
-                .collect();
-
-            Ok(connections)
-        })
+        self.block_on(self.store.list_connections())
     }
 
     fn add_connection(&self, name: &str, source_type: &str, config_json: &str) -> Result<i32> {
-        self.block_on(async {
-            sqlx::query(
-                r#"
-                INSERT INTO connections (name, source_type, config_json)
-                VALUES (?, ?, ?)
-            "#,
-            )
-            .bind(name)
-            .bind(source_type)
-            .bind(config_json)
-            .execute(&self.pool)
-            .await?;
-
-            let id: i32 = sqlx::query_scalar(r#"SELECT id FROM connections WHERE name = ?"#)
-                .bind(name)
-                .fetch_one(&self.pool)
-                .await?;
-
-            Ok(id)
-        })
+        self.block_on(self.store.add_connection(name, source_type, config_json))
     }
 
     fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>> {
-        self.block_on(async {
-            let row = sqlx::query(
-                r#"
-                SELECT id, name, source_type, config_json
-                FROM connections
-                WHERE name = ?
-            "#,
-            )
-            .bind(name)
-            .fetch_optional(&self.pool)
-            .await?;
-
-            Ok(row.map(|r| ConnectionInfo {
-                id: r.get("id"),
-                name: r.get("name"),
-                source_type: r.get("source_type"),
-                config_json: r.get("config_json"),
-            }))
-        })
+        self.block_on(self.store.get_connection(name))
     }
 
     fn add_table(
@@ -208,82 +151,16 @@ impl CatalogManager for SqliteCatalogManager {
         table_name: &str,
         arrow_schema_json: &str,
     ) -> Result<i32> {
-        self.block_on(async {
-            sqlx::query(
-                r#"
-                INSERT INTO tables (connection_id, schema_name, table_name, arrow_schema_json)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT (connection_id, schema_name, table_name)
-                DO UPDATE SET arrow_schema_json = excluded.arrow_schema_json
-            "#,
-            )
-            .bind(connection_id)
-            .bind(schema_name)
-            .bind(table_name)
-            .bind(arrow_schema_json)
-            .execute(&self.pool)
-            .await?;
-
-            let id: i32 = sqlx::query_scalar(
-                r#"
-                SELECT id FROM tables
-                WHERE connection_id = ? AND schema_name = ? AND table_name = ?
-            "#,
-            )
-            .bind(connection_id)
-            .bind(schema_name)
-            .bind(table_name)
-            .fetch_one(&self.pool)
-            .await?;
-
-            Ok(id)
-        })
+        self.block_on(self.store.add_table(
+            connection_id,
+            schema_name,
+            table_name,
+            arrow_schema_json,
+        ))
     }
 
     fn list_tables(&self, connection_id: Option<i32>) -> Result<Vec<TableInfo>> {
-        self.block_on(async {
-            let rows = if let Some(id) = connection_id {
-                sqlx::query(
-                    r#"
-                    SELECT id, connection_id, schema_name, table_name,
-                           parquet_path, state_path, last_sync, arrow_schema_json
-                    FROM tables
-                    WHERE connection_id = ?
-                    ORDER BY schema_name, table_name
-                "#,
-                )
-                .bind(id)
-                .fetch_all(&self.pool)
-                .await?
-            } else {
-                sqlx::query(
-                    r#"
-                    SELECT id, connection_id, schema_name, table_name,
-                           parquet_path, state_path, last_sync, arrow_schema_json
-                    FROM tables
-                    ORDER BY schema_name, table_name
-                "#,
-                )
-                .fetch_all(&self.pool)
-                .await?
-            };
-
-            let tables = rows
-                .iter()
-                .map(|row| TableInfo {
-                    id: row.get("id"),
-                    connection_id: row.get("connection_id"),
-                    schema_name: row.get("schema_name"),
-                    table_name: row.get("table_name"),
-                    parquet_path: row.get("parquet_path"),
-                    state_path: row.get("state_path"),
-                    last_sync: row.get("last_sync"),
-                    arrow_schema_json: row.get("arrow_schema_json"),
-                })
-                .collect();
-
-            Ok(tables)
-        })
+        self.block_on(self.store.list_tables(connection_id))
     }
 
     fn get_table(
@@ -292,51 +169,14 @@ impl CatalogManager for SqliteCatalogManager {
         schema_name: &str,
         table_name: &str,
     ) -> Result<Option<TableInfo>> {
-        self.block_on(async {
-            let row = sqlx::query(
-                r#"
-                SELECT id, connection_id, schema_name, table_name,
-                       parquet_path, state_path, last_sync, arrow_schema_json
-                FROM tables
-                WHERE connection_id = ? AND schema_name = ? AND table_name = ?
-            "#,
-            )
-            .bind(connection_id)
-            .bind(schema_name)
-            .bind(table_name)
-            .fetch_optional(&self.pool)
-            .await?;
-
-            Ok(row.map(|r| TableInfo {
-                id: r.get("id"),
-                connection_id: r.get("connection_id"),
-                schema_name: r.get("schema_name"),
-                table_name: r.get("table_name"),
-                parquet_path: r.get("parquet_path"),
-                state_path: r.get("state_path"),
-                last_sync: r.get("last_sync"),
-                arrow_schema_json: r.get("arrow_schema_json"),
-            }))
-        })
+        self.block_on(self.store.get_table(connection_id, schema_name, table_name))
     }
 
     fn update_table_sync(&self, table_id: i32, parquet_path: &str, state_path: &str) -> Result<()> {
-        self.block_on(async {
-            sqlx::query(
-                r#"
-                UPDATE tables
-                SET parquet_path = ?, state_path = ?, last_sync = CURRENT_TIMESTAMP
-                WHERE id = ?
-            "#,
-            )
-            .bind(parquet_path)
-            .bind(state_path)
-            .bind(table_id)
-            .execute(&self.pool)
-            .await?;
-
-            Ok(())
-        })
+        self.block_on(
+            self.store
+                .update_table_sync(table_id, parquet_path, state_path),
+        )
     }
 
     fn clear_table_cache_metadata(
@@ -345,69 +185,18 @@ impl CatalogManager for SqliteCatalogManager {
         schema_name: &str,
         table_name: &str,
     ) -> Result<TableInfo> {
-        let table = self
-            .get_table(connection_id, schema_name, table_name)?
-            .ok_or_else(|| anyhow::anyhow!("Table not found"))?;
-
-        self.block_on(async {
-            sqlx::query(
-                r#"
-                UPDATE tables
-                SET parquet_path = NULL,
-                    state_path   = NULL,
-                    last_sync    = NULL
-                WHERE id = ?
-            "#,
-            )
-            .bind(table.id)
-            .execute(&self.pool)
-            .await?;
-
-            Ok(table)
-        })
+        self.block_on(
+            self.store
+                .clear_table_cache_metadata(connection_id, schema_name, table_name),
+        )
     }
 
     fn clear_connection_cache_metadata(&self, name: &str) -> Result<()> {
-        let conn = self
-            .get_connection(name)?
-            .ok_or_else(|| anyhow::anyhow!("Connection not found"))?;
-
-        self.block_on(async {
-            sqlx::query(
-                r#"
-                UPDATE tables
-                SET parquet_path = NULL,
-                    state_path = NULL,
-                    last_sync = NULL
-                WHERE connection_id = ?
-            "#,
-            )
-            .bind(conn.id)
-            .execute(&self.pool)
-            .await?;
-
-            Ok(())
-        })
+        self.block_on(self.store.clear_connection_cache_metadata(name))
     }
 
     fn delete_connection(&self, name: &str) -> Result<()> {
-        let conn = self
-            .get_connection(name)?
-            .ok_or_else(|| anyhow::anyhow!("Connection not found"))?;
-
-        self.block_on(async {
-            sqlx::query("DELETE FROM tables WHERE connection_id = ?")
-                .bind(conn.id)
-                .execute(&self.pool)
-                .await?;
-
-            sqlx::query("DELETE FROM connections WHERE id = ?")
-                .bind(conn.id)
-                .execute(&self.pool)
-                .await?;
-
-            Ok(())
-        })
+        self.block_on(self.store.delete_connection(name))
     }
 }
 

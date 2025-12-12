@@ -1,8 +1,9 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
 use std::fmt::Debug;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ConnectionInfo {
     pub id: i32,
     pub name: String,
@@ -10,7 +11,7 @@ pub struct ConnectionInfo {
     pub config_json: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct TableInfo {
     pub id: i32,
     pub connection_id: i32,
