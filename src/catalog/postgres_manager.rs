@@ -99,7 +99,9 @@ impl CatalogMigrations for PostgresMigrationBackend {
 
 impl CatalogManager for PostgresCatalogManager {
     fn run_migrations(&self) -> Result<()> {
-        block_on(run_migrations::<PostgresMigrationBackend>(self.backend.pool()))
+        block_on(run_migrations::<PostgresMigrationBackend>(
+            self.backend.pool(),
+        ))
     }
 
     fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
@@ -137,7 +139,10 @@ impl CatalogManager for PostgresCatalogManager {
         schema_name: &str,
         table_name: &str,
     ) -> Result<Option<TableInfo>> {
-        block_on(self.backend.get_table(connection_id, schema_name, table_name))
+        block_on(
+            self.backend
+                .get_table(connection_id, schema_name, table_name),
+        )
     }
 
     fn update_table_sync(&self, table_id: i32, parquet_path: &str, state_path: &str) -> Result<()> {
