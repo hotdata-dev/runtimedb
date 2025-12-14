@@ -14,7 +14,7 @@ use super::lazy_table_provider::LazyTableProvider;
 /// A schema provider that syncs tables on-demand from remote sources.
 /// Wraps MemorySchemaProvider for caching already-loaded tables.
 #[derive(Debug)]
-pub struct HotDataSchemaProvider {
+pub struct RivetSchemaProvider {
     connection_id: i32,
     #[allow(dead_code)]
     connection_name: String,
@@ -26,7 +26,7 @@ pub struct HotDataSchemaProvider {
     fetcher: Arc<dyn DataFetcher>,
 }
 
-impl HotDataSchemaProvider {
+impl RivetSchemaProvider {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         connection_id: i32,
@@ -51,7 +51,7 @@ impl HotDataSchemaProvider {
 }
 
 #[async_trait]
-impl SchemaProvider for HotDataSchemaProvider {
+impl SchemaProvider for RivetSchemaProvider {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

@@ -1,7 +1,6 @@
-use super::block_on;
-use super::catalog_provider::HotDataCatalogProvider;
 use crate::catalog::{CatalogManager, ConnectionInfo, SqliteCatalogManager, TableInfo};
 use crate::datafetch::DataFetcher;
+use crate::datafusion::{block_on, RivetCatalogProvider};
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
 use anyhow::Result;
@@ -20,13 +19,13 @@ pub struct QueryResponse {
 }
 
 /// The main query engine that manages connections, catalogs, and query execution.
-pub struct HotDataEngine {
+pub struct RivetEngine {
     catalog: Arc<dyn CatalogManager>,
     df_ctx: SessionContext,
     storage: Arc<dyn StorageManager>,
 }
 
-impl HotDataEngine {
+impl RivetEngine {
     /// Create a new engine instance and register all existing connections.
     pub async fn new(catalog_path: &str) -> Result<Self> {
         Self::new_with_paths(catalog_path, "cache", "state", false).await
@@ -123,7 +122,7 @@ impl HotDataEngine {
         for conn in connections {
             let source: Source = serde_json::from_str(&conn.config_json)?;
 
-            let catalog_provider = Arc::new(HotDataCatalogProvider::new(
+            let catalog_provider = Arc::new(RivetCatalogProvider::new(
                 conn.id,
                 conn.name.clone(),
                 Arc::new(source),
@@ -169,7 +168,7 @@ impl HotDataEngine {
         }
 
         // Register with DataFusion
-        let catalog_provider = Arc::new(HotDataCatalogProvider::new(
+        let catalog_provider = Arc::new(RivetCatalogProvider::new(
             conn_id,
             name.to_string(),
             Arc::new(source),
@@ -249,7 +248,7 @@ impl HotDataEngine {
         // This causes DataFusion to drop any open file handles to the cached files
         let source: Source = serde_json::from_str(&conn.config_json)?;
 
-        let catalog_provider = Arc::new(HotDataCatalogProvider::new(
+        let catalog_provider = Arc::new(RivetCatalogProvider::new(
             conn.id,
             conn.name.clone(),
             Arc::new(source),
@@ -291,7 +290,7 @@ impl HotDataEngine {
         // This causes DataFusion to drop any open file handles to the cached files
         let source: Source = serde_json::from_str(&conn.config_json)?;
 
-        let catalog_provider = Arc::new(HotDataCatalogProvider::new(
+        let catalog_provider = Arc::new(RivetCatalogProvider::new(
             conn.id,
             conn.name.clone(),
             Arc::new(source),
@@ -358,39 +357,39 @@ impl HotDataEngine {
     }
 }
 
-impl Drop for HotDataEngine {
+impl Drop for RivetEngine {
     fn drop(&mut self) {
         // Ensure catalog connection is closed when engine is dropped
         let _ = block_on(self.catalog.close());
     }
 }
 
-/// Builder for HotDataEngine
+/// Builder for RivetEngine
 ///
 /// # Example
 ///
 /// ```no_run
-/// use rivetdb::datafusion::HotDataEngine;
+/// use rivetdb::RivetEngine;
 /// use std::path::PathBuf;
 ///
-/// let builder = HotDataEngine::builder()
+/// let builder = RivetEngine::builder()
 ///     .metadata_dir(PathBuf::from("/tmp/rivet"));
 ///
 /// // let engine = builder.build().unwrap();
 /// ```
-pub struct HotDataEngineBuilder {
+pub struct RivetEngineBuilder {
     metadata_dir: Option<PathBuf>,
     catalog: Option<Arc<dyn CatalogManager>>,
     storage: Option<Arc<dyn StorageManager>>,
 }
 
-impl Default for HotDataEngineBuilder {
+impl Default for RivetEngineBuilder {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl HotDataEngineBuilder {
+impl RivetEngineBuilder {
     pub fn new() -> Self {
         Self {
             metadata_dir: None,
@@ -414,7 +413,7 @@ impl HotDataEngineBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<HotDataEngine> {
+    pub async fn build(self) -> Result<RivetEngine> {
         let catalog = self
             .catalog
             .ok_or_else(|| anyhow::anyhow!("Catalog manager not set"))?;
@@ -430,7 +429,7 @@ impl HotDataEngineBuilder {
         // Register storage with DataFusion
         storage.register_with_datafusion(&df_ctx)?;
 
-        let mut engine = HotDataEngine {
+        let mut engine = RivetEngine {
             catalog,
             df_ctx,
             storage,
@@ -443,9 +442,9 @@ impl HotDataEngineBuilder {
     }
 }
 
-impl HotDataEngine {
-    pub fn builder() -> HotDataEngineBuilder {
-        HotDataEngineBuilder::new()
+impl RivetEngine {
+    pub fn builder() -> RivetEngineBuilder {
+        RivetEngineBuilder::new()
     }
 
     /// Create a new engine from application configuration.
@@ -582,7 +581,7 @@ impl HotDataEngine {
         };
 
         // Use builder to construct engine
-        HotDataEngine::builder()
+        RivetEngine::builder()
             .metadata_dir(metadata_dir)
             .catalog(catalog)
             .storage(storage)
@@ -615,7 +614,7 @@ mod tests {
         ));
 
         // Build engine using builder pattern
-        let engine = HotDataEngine::builder()
+        let engine = RivetEngine::builder()
             .metadata_dir(metadata_dir.clone())
             .catalog(catalog)
             .storage(storage)
@@ -640,7 +639,7 @@ mod tests {
     async fn test_builder_pattern_missing_fields() {
         // Test that builder fails when required fields are missing
         let temp_dir = TempDir::new().unwrap();
-        let result = HotDataEngine::builder()
+        let result = RivetEngine::builder()
             .metadata_dir(temp_dir.path().to_path_buf())
             .build()
             .await;
@@ -687,7 +686,7 @@ mod tests {
             },
         };
 
-        let engine = HotDataEngine::from_config(&config).await;
+        let engine = RivetEngine::from_config(&config).await;
         assert!(
             engine.is_ok(),
             "from_config should create engine successfully"

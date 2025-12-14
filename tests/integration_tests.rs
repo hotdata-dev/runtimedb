@@ -10,9 +10,9 @@ use axum::{
     http::{Request, StatusCode},
     Router,
 };
-use rivetdb::datafusion::HotDataEngine;
 use rivetdb::http::app_server::{AppServer, PATH_CONNECTIONS, PATH_QUERY, PATH_TABLES};
 use rivetdb::source::Source;
+use rivetdb::RivetEngine;
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -29,7 +29,7 @@ struct QueryResult {
 }
 
 impl QueryResult {
-    fn from_engine(response: &rivetdb::datafusion::QueryResponse) -> Self {
+    fn from_engine(response: &rivetdb::QueryResponse) -> Self {
         let batch = response.results.first();
 
         let (columns, row_count) = match batch {
@@ -242,7 +242,7 @@ trait TestExecutor: Send + Sync {
 
 /// Engine-based test executor.
 struct EngineExecutor {
-    engine: Arc<HotDataEngine>,
+    engine: Arc<RivetEngine>,
 }
 
 #[async_trait::async_trait]
@@ -491,7 +491,7 @@ impl TestHarness {
         std::fs::create_dir_all(&cache_dir).unwrap();
         std::fs::create_dir_all(&state_dir).unwrap();
 
-        let engine = HotDataEngine::new_with_paths(
+        let engine = RivetEngine::new_with_paths(
             catalog_path.to_str().unwrap(),
             cache_dir.to_str().unwrap(),
             state_dir.to_str().unwrap(),

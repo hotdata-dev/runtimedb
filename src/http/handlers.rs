@@ -1,4 +1,3 @@
-use crate::datafusion::HotDataEngine;
 use crate::http::error::ApiError;
 use crate::http::models::{
     ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse, GetConnectionResponse,
@@ -6,6 +5,7 @@ use crate::http::models::{
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
 use crate::source::Source;
+use crate::RivetEngine;
 use axum::{
     extract::{Path, Query as QueryParams, State},
     http::StatusCode,
@@ -19,7 +19,7 @@ use tracing::error;
 
 /// Handler for POST /query
 pub async fn query_handler(
-    State(engine): State<Arc<HotDataEngine>>,
+    State(engine): State<Arc<RivetEngine>>,
     Json(request): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, ApiError> {
     // Validate SQL is not empty
@@ -83,7 +83,7 @@ pub async fn query_handler(
 
 /// Handler for GET /tables
 pub async fn tables_handler(
-    State(engine): State<Arc<HotDataEngine>>,
+    State(engine): State<Arc<RivetEngine>>,
     QueryParams(params): QueryParams<HashMap<String, String>>,
 ) -> Result<Json<TablesResponse>, ApiError> {
     // Get optional connection filter
@@ -145,7 +145,7 @@ pub async fn health_handler() -> (StatusCode, Json<serde_json::Value>) {
 
 /// Handler for POST /connections
 pub async fn create_connection_handler(
-    State(engine): State<Arc<HotDataEngine>>,
+    State(engine): State<Arc<RivetEngine>>,
     Json(request): Json<CreateConnectionRequest>,
 ) -> Result<(StatusCode, Json<CreateConnectionResponse>), ApiError> {
     // Validate name is not empty
@@ -221,7 +221,7 @@ pub async fn create_connection_handler(
 
 /// Handler for GET /connections
 pub async fn list_connections_handler(
-    State(engine): State<Arc<HotDataEngine>>,
+    State(engine): State<Arc<RivetEngine>>,
 ) -> Result<Json<ListConnectionsResponse>, ApiError> {
     let connections = engine.list_connections().await?;
 
@@ -241,7 +241,7 @@ pub async fn list_connections_handler(
 
 /// Handler for GET /connections/{name}
 pub async fn get_connection_handler(
-    State(engine): State<Arc<HotDataEngine>>,
+    State(engine): State<Arc<RivetEngine>>,
     Path(name): Path<String>,
 ) -> Result<Json<GetConnectionResponse>, ApiError> {
     // Get connection info
@@ -267,7 +267,7 @@ pub async fn get_connection_handler(
 
 /// Handler for DELETE /connections/{name}
 pub async fn delete_connection_handler(
-    State(engine): State<Arc<HotDataEngine>>,
+    State(engine): State<Arc<RivetEngine>>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     engine.remove_connection(&name).await.map_err(|e| {
@@ -283,7 +283,7 @@ pub async fn delete_connection_handler(
 
 /// Handler for DELETE /connections/{name}/cache
 pub async fn purge_connection_cache_handler(
-    State(engine): State<Arc<HotDataEngine>>,
+    State(engine): State<Arc<RivetEngine>>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     engine.purge_connection(&name).await.map_err(|e| {
@@ -307,7 +307,7 @@ pub struct TableCachePath {
 
 /// Handler for DELETE /connections/{name}/tables/{schema}/{table}/cache
 pub async fn purge_table_cache_handler(
-    State(engine): State<Arc<HotDataEngine>>,
+    State(engine): State<Arc<RivetEngine>>,
     Path(params): Path<TableCachePath>,
 ) -> Result<StatusCode, ApiError> {
     engine

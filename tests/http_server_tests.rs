@@ -5,8 +5,8 @@ use axum::{
     http::{Request, StatusCode},
     Router,
 };
-use rivetdb::datafusion::HotDataEngine;
 use rivetdb::http::app_server::{AppServer, PATH_CONNECTIONS, PATH_QUERY, PATH_TABLES};
+use rivetdb::RivetEngine;
 use serde_json::json;
 use tempfile::TempDir;
 use tower::util::ServiceExt;
@@ -19,7 +19,7 @@ async fn setup_test() -> Result<(Router, TempDir)> {
     let cache_path = metadata_dir.join("cache");
     let state_path = metadata_dir.join("state");
 
-    let engine = HotDataEngine::new_with_paths(
+    let engine = RivetEngine::new_with_paths(
         catalog_path.to_str().unwrap(),
         cache_path.to_str().unwrap(),
         state_path.to_str().unwrap(),

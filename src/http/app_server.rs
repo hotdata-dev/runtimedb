@@ -1,16 +1,16 @@
-use crate::datafusion::HotDataEngine;
 use crate::http::handlers::{
     create_connection_handler, delete_connection_handler, get_connection_handler, health_handler,
     list_connections_handler, purge_connection_cache_handler, purge_table_cache_handler,
     query_handler, tables_handler,
 };
+use crate::RivetEngine;
 use axum::routing::{delete, get, post};
 use axum::Router;
 use std::sync::Arc;
 
 pub struct AppServer {
     pub router: Router,
-    pub engine: Arc<HotDataEngine>,
+    pub engine: Arc<RivetEngine>,
 }
 
 pub const PATH_QUERY: &str = "/query";
@@ -22,7 +22,7 @@ pub const PATH_CONNECTION_CACHE: &str = "/connections/{name}/cache";
 pub const PATH_TABLE_CACHE: &str = "/connections/{name}/tables/{schema}/{table}/cache";
 
 impl AppServer {
-    pub fn new(engine: HotDataEngine) -> Self {
+    pub fn new(engine: RivetEngine) -> Self {
         let engine = Arc::new(engine);
         AppServer {
             router: Router::new()

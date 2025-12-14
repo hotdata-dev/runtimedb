@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rivetdb::datafusion::HotDataEngine;
+use rivetdb::RivetEngine;
 use tempfile::tempdir;
 
 /// Test that sync_connection handles non-existent connections correctly
@@ -11,7 +11,7 @@ async fn test_sync_connection_not_found() -> Result<()> {
     let cache_path = dir.path().join("cache");
     let state_path = dir.path().join("state");
 
-    let engine = HotDataEngine::new_with_paths(
+    let engine = RivetEngine::new_with_paths(
         catalog_path.to_str().unwrap(),
         cache_path.to_str().unwrap(),
         state_path.to_str().unwrap(),
@@ -38,7 +38,7 @@ async fn test_sync_connection_no_tables() -> Result<()> {
     let cache_path = dir.path().join("cache");
     let state_path = dir.path().join("state");
 
-    let engine = HotDataEngine::new_with_paths(
+    let engine = RivetEngine::new_with_paths(
         catalog_path.to_str().unwrap(),
         cache_path.to_str().unwrap(),
         state_path.to_str().unwrap(),
