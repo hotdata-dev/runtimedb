@@ -3,7 +3,8 @@ use datafusion::catalog::{MemorySchemaProvider, SchemaProvider};
 use datafusion::datasource::TableProvider;
 use std::sync::Arc;
 
-use crate::catalog::{block_on, CatalogManager};
+use super::block_on;
+use crate::catalog::CatalogManager;
 use crate::datafetch::{deserialize_arrow_schema, DataFetcher};
 use crate::source::Source;
 use crate::storage::StorageManager;

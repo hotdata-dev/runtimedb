@@ -3,19 +3,6 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::fmt::Debug;
-use tokio::task::block_in_place;
-
-/// Blocking helper for async operations.
-///
-/// Uses `block_in_place` to avoid blocking the tokio runtime when calling
-/// async code from a sync context. This is needed when async catalog methods
-/// must be called from sync trait implementations (e.g., DataFusion's CatalogProvider).
-pub fn block_on<F, T>(f: F) -> T
-where
-    F: std::future::Future<Output = T>,
-{
-    block_in_place(|| tokio::runtime::Handle::current().block_on(f))
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ConnectionInfo {

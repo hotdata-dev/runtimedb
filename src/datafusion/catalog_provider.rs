@@ -1,5 +1,6 @@
+use super::block_on;
 use super::schema_provider::HotDataSchemaProvider;
-use crate::catalog::{block_on, CatalogManager};
+use crate::catalog::CatalogManager;
 use crate::datafetch::{DataFetcher, NativeFetcher};
 use crate::source::Source;
 use crate::storage::StorageManager;

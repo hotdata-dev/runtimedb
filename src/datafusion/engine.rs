@@ -1,5 +1,6 @@
+use super::block_on;
 use super::catalog_provider::HotDataCatalogProvider;
-use crate::catalog::{block_on, CatalogManager, ConnectionInfo, SqliteCatalogManager, TableInfo};
+use crate::catalog::{CatalogManager, ConnectionInfo, SqliteCatalogManager, TableInfo};
 use crate::datafetch::DataFetcher;
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
@@ -529,9 +530,7 @@ impl HotDataEngine {
                     user, password, host, port, database
                 );
 
-                Arc::new(
-                    crate::catalog::PostgresCatalogManager::new(&connection_string).await?,
-                )
+                Arc::new(crate::catalog::PostgresCatalogManager::new(&connection_string).await?)
             }
             _ => anyhow::bail!("Unsupported catalog type: {}", config.catalog.catalog_type),
         };
