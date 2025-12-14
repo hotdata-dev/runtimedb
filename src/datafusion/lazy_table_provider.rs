@@ -142,11 +142,15 @@ impl LazyTableProvider {
             })?;
 
         // Update catalog with new path
-        if let Ok(Some(info)) =
-            self.catalog
-                .get_table(self.connection_id, &self.schema_name, &self.table_name)
+        if let Ok(Some(info)) = self
+            .catalog
+            .get_table(self.connection_id, &self.schema_name, &self.table_name)
+            .await
         {
-            let _ = self.catalog.update_table_sync(info.id, &parquet_url, "");
+            let _ = self
+                .catalog
+                .update_table_sync(info.id, &parquet_url, "")
+                .await;
         }
 
         Ok(parquet_url)
@@ -179,6 +183,7 @@ impl TableProvider for LazyTableProvider {
         let table_info = self
             .catalog
             .get_table(self.connection_id, &self.schema_name, &self.table_name)
+            .await
             .map_err(|e| {
                 DataFusionError::External(format!("Failed to get table info: {}", e).into())
             })?

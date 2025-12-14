@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     tracing::info!("Configuration '{}' loaded successfully", &cli.config);
 
     // Initialize engine from config
-    let engine = HotDataEngine::from_config(&config)?;
+    let engine = HotDataEngine::from_config(&config).await?;
 
     tracing::info!("Engine initialized");
 
@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
     server.await?;
 
     // Explicitly shutdown engine to close catalog connection
-    if let Err(e) = engine.shutdown() {
+    if let Err(e) = engine.shutdown().await {
         tracing::error!("Error during engine shutdown: {}", e);
     }
 

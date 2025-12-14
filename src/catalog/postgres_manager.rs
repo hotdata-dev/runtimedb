@@ -1,7 +1,8 @@
 use crate::catalog::backend::CatalogBackend;
-use crate::catalog::manager::{block_on, CatalogManager, ConnectionInfo, TableInfo};
+use crate::catalog::manager::{CatalogManager, ConnectionInfo, TableInfo};
 use crate::catalog::migrations::{run_migrations, CatalogMigrations};
 use anyhow::Result;
+use async_trait::async_trait;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres};
 use std::fmt::{self, Debug, Formatter};
@@ -11,11 +12,7 @@ pub struct PostgresCatalogManager {
 }
 
 impl PostgresCatalogManager {
-    pub fn new(connection_string: &str) -> Result<Self> {
-        block_on(Self::new_async(connection_string))
-    }
-
-    async fn new_async(connection_string: &str) -> Result<Self> {
+    pub async fn new(connection_string: &str) -> Result<Self> {
         let pool = PgPoolOptions::new()
             .max_connections(5)
             .connect(connection_string)
@@ -97,79 +94,86 @@ impl CatalogMigrations for PostgresMigrationBackend {
     }
 }
 
+#[async_trait]
 impl CatalogManager for PostgresCatalogManager {
-    fn run_migrations(&self) -> Result<()> {
-        block_on(run_migrations::<PostgresMigrationBackend>(
-            self.backend.pool(),
-        ))
+    async fn run_migrations(&self) -> Result<()> {
+        run_migrations::<PostgresMigrationBackend>(self.backend.pool()).await
     }
 
-    fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
-        block_on(self.backend.list_connections())
+    async fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
+        self.backend.list_connections().await
     }
 
-    fn add_connection(&self, name: &str, source_type: &str, config_json: &str) -> Result<i32> {
-        block_on(self.backend.add_connection(name, source_type, config_json))
+    async fn add_connection(
+        &self,
+        name: &str,
+        source_type: &str,
+        config_json: &str,
+    ) -> Result<i32> {
+        self.backend
+            .add_connection(name, source_type, config_json)
+            .await
     }
 
-    fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>> {
-        block_on(self.backend.get_connection(name))
+    async fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>> {
+        self.backend.get_connection(name).await
     }
 
-    fn add_table(
+    async fn add_table(
         &self,
         connection_id: i32,
         schema_name: &str,
         table_name: &str,
         arrow_schema_json: &str,
     ) -> Result<i32> {
-        block_on(
-            self.backend
-                .add_table(connection_id, schema_name, table_name, arrow_schema_json),
-        )
+        self.backend
+            .add_table(connection_id, schema_name, table_name, arrow_schema_json)
+            .await
     }
 
-    fn list_tables(&self, connection_id: Option<i32>) -> Result<Vec<TableInfo>> {
-        block_on(self.backend.list_tables(connection_id))
+    async fn list_tables(&self, connection_id: Option<i32>) -> Result<Vec<TableInfo>> {
+        self.backend.list_tables(connection_id).await
     }
 
-    fn get_table(
+    async fn get_table(
         &self,
         connection_id: i32,
         schema_name: &str,
         table_name: &str,
     ) -> Result<Option<TableInfo>> {
-        block_on(
-            self.backend
-                .get_table(connection_id, schema_name, table_name),
-        )
+        self.backend
+            .get_table(connection_id, schema_name, table_name)
+            .await
     }
 
-    fn update_table_sync(&self, table_id: i32, parquet_path: &str, state_path: &str) -> Result<()> {
-        block_on(
-            self.backend
-                .update_table_sync(table_id, parquet_path, state_path),
-        )
+    async fn update_table_sync(
+        &self,
+        table_id: i32,
+        parquet_path: &str,
+        state_path: &str,
+    ) -> Result<()> {
+        self.backend
+            .update_table_sync(table_id, parquet_path, state_path)
+            .await
     }
 
-    fn clear_table_cache_metadata(
+    async fn clear_table_cache_metadata(
         &self,
         connection_id: i32,
         schema_name: &str,
         table_name: &str,
     ) -> Result<TableInfo> {
-        block_on(
-            self.backend
-                .clear_table_cache_metadata(connection_id, schema_name, table_name),
-        )
+        self.backend
+            .clear_table_cache_metadata(connection_id, schema_name, table_name)
+            .await
     }
 
-    fn clear_connection_cache_metadata(&self, name: &str) -> Result<()> {
-        block_on(self.backend.clear_connection_cache_metadata(name))
+    async fn clear_connection_cache_metadata(&self, name: &str) -> Result<()> {
+        self.backend.clear_connection_cache_metadata(name).await
     }
 
-    fn delete_connection(&self, name: &str) -> Result<()> {
-        block_on(self.backend.delete_connection(name))
+    async fn delete_connection(&self, name: &str) -> Result<()> {
+        self.backend.delete_connection(name).await
     }
 }
 

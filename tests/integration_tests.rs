@@ -255,11 +255,11 @@ impl TestExecutor for EngineExecutor {
     }
 
     async fn list_connections(&self) -> ConnectionResult {
-        ConnectionResult::from_engine(&self.engine.list_connections().unwrap())
+        ConnectionResult::from_engine(&self.engine.list_connections().await.unwrap())
     }
 
     async fn list_tables(&self, connection: &str) -> TablesResult {
-        TablesResult::from_engine(&self.engine.list_tables(Some(connection)).unwrap())
+        TablesResult::from_engine(&self.engine.list_tables(Some(connection)).await.unwrap())
     }
 
     async fn query(&self, sql: &str) -> QueryResult {
@@ -267,8 +267,8 @@ impl TestExecutor for EngineExecutor {
     }
 
     async fn get_connection(&self, name: &str) -> Option<ConnectionDetails> {
-        let conn = self.engine.catalog().get_connection(name).ok()??;
-        let tables = self.engine.list_tables(Some(name)).ok()?;
+        let conn = self.engine.catalog().get_connection(name).await.ok()??;
+        let tables = self.engine.list_tables(Some(name)).await.ok()?;
         Some(ConnectionDetails::from_engine(&conn, &tables))
     }
 
@@ -482,7 +482,7 @@ struct TestHarness {
 }
 
 impl TestHarness {
-    fn new() -> Self {
+    async fn new() -> Self {
         let temp_dir = TempDir::new().unwrap();
         let catalog_path = temp_dir.path().join("catalog.db");
         let cache_dir = temp_dir.path().join("cache");
@@ -497,6 +497,7 @@ impl TestHarness {
             state_dir.to_str().unwrap(),
             false,
         )
+        .await
         .unwrap();
 
         let app = AppServer::new(engine);
@@ -838,70 +839,70 @@ mod duckdb_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_golden_path() {
         let (_dir, source) = fixtures::duckdb_standard();
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_golden_path_test(harness.engine(), &source, "duckdb_conn").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api_golden_path() {
         let (_dir, source) = fixtures::duckdb_standard();
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_golden_path_test(harness.api(), &source, "duckdb_conn").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_multi_schema() {
         let (_dir, source) = fixtures::duckdb_multi_schema();
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_multi_schema_test(harness.engine(), &source, "duckdb_conn").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api_multi_schema() {
         let (_dir, source) = fixtures::duckdb_multi_schema();
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_multi_schema_test(harness.api(), &source, "duckdb_conn").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_delete_connection() {
         let (_dir, source) = fixtures::duckdb_standard();
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_delete_connection_test(harness.engine(), &source, "duckdb_conn").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api_delete_connection() {
         let (_dir, source) = fixtures::duckdb_standard();
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_delete_connection_test(harness.api(), &source, "duckdb_conn").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_purge_connection_cache() {
         let (_dir, source) = fixtures::duckdb_standard();
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_purge_connection_cache_test(harness.engine(), &source, "duckdb_conn").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api_purge_connection_cache() {
         let (_dir, source) = fixtures::duckdb_standard();
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_purge_connection_cache_test(harness.api(), &source, "duckdb_conn").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_purge_table_cache() {
         let (_dir, source) = fixtures::duckdb_standard();
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_purge_table_cache_test(harness.engine(), &source, "duckdb_conn").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api_purge_table_cache() {
         let (_dir, source) = fixtures::duckdb_standard();
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_purge_table_cache_test(harness.api(), &source, "duckdb_conn").await;
     }
 }
@@ -916,28 +917,28 @@ mod postgres_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_golden_path() {
         let fixture = postgres_fixtures::standard().await;
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_golden_path_test(harness.engine(), &fixture.source, "pg_conn").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api_golden_path() {
         let fixture = postgres_fixtures::standard().await;
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_golden_path_test(harness.api(), &fixture.source, "pg_conn").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_multi_schema() {
         let fixture = postgres_fixtures::multi_schema().await;
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_multi_schema_test(harness.engine(), &fixture.source, "pg_conn").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api_multi_schema() {
         let fixture = postgres_fixtures::multi_schema().await;
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_multi_schema_test(harness.api(), &fixture.source, "pg_conn").await;
     }
 }
@@ -951,7 +952,7 @@ mod error_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_get_nonexistent_connection() {
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
 
         // Engine
         let conn = harness.engine().get_connection("nonexistent").await;
@@ -964,7 +965,7 @@ mod error_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_delete_nonexistent_connection() {
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
 
         let deleted = harness.api().delete_connection("nonexistent").await;
         assert!(!deleted, "Delete of nonexistent should return false/404");
@@ -972,7 +973,7 @@ mod error_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_purge_nonexistent_connection_cache() {
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
 
         let purged = harness.api().purge_connection_cache("nonexistent").await;
         assert!(!purged, "Purge of nonexistent should return false/404");
@@ -980,7 +981,7 @@ mod error_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_purge_nonexistent_table_cache() {
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
 
         let purged = harness
             .api()

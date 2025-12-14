@@ -3,6 +3,7 @@ use datafusion::catalog::{MemorySchemaProvider, SchemaProvider};
 use datafusion::datasource::TableProvider;
 use std::sync::Arc;
 
+use super::block_on;
 use crate::catalog::CatalogManager;
 use crate::datafetch::{deserialize_arrow_schema, DataFetcher};
 use crate::source::Source;
@@ -57,7 +58,8 @@ impl SchemaProvider for HotDataSchemaProvider {
 
     fn table_names(&self) -> Vec<String> {
         // Return all known tables from the catalog store
-        match self.catalog.list_tables(Some(self.connection_id)) {
+        // Uses block_on since SchemaProvider trait methods are sync
+        match block_on(self.catalog.list_tables(Some(self.connection_id))) {
             Ok(tables) => tables
                 .into_iter()
                 .filter(|t| t.schema_name == self.schema_name)
@@ -80,6 +82,7 @@ impl SchemaProvider for HotDataSchemaProvider {
         let table_info = match self
             .catalog
             .get_table(self.connection_id, &self.schema_name, name)
+            .await
         {
             Ok(Some(info)) => info,
             Ok(None) => return Ok(None), // Table doesn't exist
@@ -125,9 +128,12 @@ impl SchemaProvider for HotDataSchemaProvider {
 
     fn table_exist(&self, name: &str) -> bool {
         // Check the catalog metadata store
+        // Uses block_on since SchemaProvider trait methods are sync
         matches!(
-            self.catalog
-                .get_table(self.connection_id, &self.schema_name, name),
+            block_on(
+                self.catalog
+                    .get_table(self.connection_id, &self.schema_name, name)
+            ),
             Ok(Some(_))
         )
     }

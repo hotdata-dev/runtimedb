@@ -16,7 +16,8 @@ async fn test_sync_connection_not_found() -> Result<()> {
         cache_path.to_str().unwrap(),
         state_path.to_str().unwrap(),
         false,
-    )?;
+    )
+    .await?;
 
     // Try to sync a connection that doesn't exist
     let result = engine.sync_connection("nonexistent").await;
@@ -42,7 +43,8 @@ async fn test_sync_connection_no_tables() -> Result<()> {
         cache_path.to_str().unwrap(),
         state_path.to_str().unwrap(),
         false,
-    )?;
+    )
+    .await?;
 
     // Add a connection with no tables
     let config = serde_json::json!({
@@ -58,7 +60,9 @@ async fn test_sync_connection_no_tables() -> Result<()> {
     // Instead, manually add a connection with no tables through the catalog
     let catalog = engine.catalog();
     let config_json = serde_json::to_string(&config)?;
-    catalog.add_connection("empty_conn", "postgres", &config_json)?;
+    catalog
+        .add_connection("empty_conn", "postgres", &config_json)
+        .await?;
 
     // Try to sync - should succeed but do nothing
     let result = engine.sync_connection("empty_conn").await;

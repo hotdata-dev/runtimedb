@@ -1,3 +1,4 @@
+use super::block_on;
 use super::catalog_provider::HotDataCatalogProvider;
 use crate::catalog::{CatalogManager, ConnectionInfo, SqliteCatalogManager, TableInfo};
 use crate::datafetch::DataFetcher;
@@ -27,12 +28,12 @@ pub struct HotDataEngine {
 
 impl HotDataEngine {
     /// Create a new engine instance and register all existing connections.
-    pub fn new(catalog_path: &str) -> Result<Self> {
-        Self::new_with_paths(catalog_path, "cache", "state", false)
+    pub async fn new(catalog_path: &str) -> Result<Self> {
+        Self::new_with_paths(catalog_path, "cache", "state", false).await
     }
 
     /// Create a new engine instance with custom paths for catalog, cache, and state.
-    pub fn new_with_paths(
+    pub async fn new_with_paths(
         catalog_path: &str,
         cache_base: &str,
         state_base: &str,
@@ -41,18 +42,18 @@ impl HotDataEngine {
         // Create filesystem storage manager
         let storage: Arc<dyn StorageManager> =
             Arc::new(FilesystemStorage::new(cache_base, state_base));
-        Self::new_with_storage(catalog_path, storage, readonly)
+        Self::new_with_storage(catalog_path, storage, readonly).await
     }
 
     /// Create a new engine instance with custom storage manager.
     /// This allows using S3 or other storage backends.
-    pub fn new_with_storage(
+    pub async fn new_with_storage(
         catalog_path: &str,
         storage: Arc<dyn StorageManager>,
         _readonly: bool,
     ) -> Result<Self> {
-        let catalog = SqliteCatalogManager::new(catalog_path)?;
-        catalog.run_migrations()?;
+        let catalog = SqliteCatalogManager::new(catalog_path).await?;
+        catalog.run_migrations().await?;
 
         let df_ctx = SessionContext::new();
 
@@ -66,7 +67,7 @@ impl HotDataEngine {
         };
 
         // Register all existing connections as DataFusion catalogs
-        engine.register_existing_connections()?;
+        engine.register_existing_connections().await?;
 
         Ok(engine)
     }
@@ -116,8 +117,8 @@ impl HotDataEngine {
     }
 
     /// Register all connections from the catalog store as DataFusion catalogs.
-    fn register_existing_connections(&mut self) -> Result<()> {
-        let connections = self.catalog.list_connections()?;
+    async fn register_existing_connections(&mut self) -> Result<()> {
+        let connections = self.catalog.list_connections().await?;
 
         for conn in connections {
             let source: Source = serde_json::from_str(&conn.config_json)?;
@@ -154,7 +155,8 @@ impl HotDataEngine {
         let config_json = serde_json::to_string(&source)?;
         let conn_id = self
             .catalog
-            .add_connection(name, source_type, &config_json)?;
+            .add_connection(name, source_type, &config_json)
+            .await?;
 
         // Add discovered tables to catalog with schema in one call
         for table in &tables {
@@ -162,7 +164,8 @@ impl HotDataEngine {
             let schema_json = serde_json::to_string(schema.as_ref())
                 .map_err(|e| anyhow::anyhow!("Failed to serialize schema: {}", e))?;
             self.catalog
-                .add_table(conn_id, &table.schema_name, &table.table_name, &schema_json)?;
+                .add_table(conn_id, &table.schema_name, &table.table_name, &schema_json)
+                .await?;
         }
 
         // Register with DataFusion
@@ -191,14 +194,14 @@ impl HotDataEngine {
     }
 
     /// List all configured connections.
-    pub fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
-        self.catalog.list_connections()
+    pub async fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
+        self.catalog.list_connections().await
     }
 
     /// List all tables, optionally filtered by connection name.
-    pub fn list_tables(&self, connection_name: Option<&str>) -> Result<Vec<TableInfo>> {
+    pub async fn list_tables(&self, connection_name: Option<&str>) -> Result<Vec<TableInfo>> {
         let connection_id = if let Some(name) = connection_name {
-            match self.catalog.get_connection(name)? {
+            match self.catalog.get_connection(name).await? {
                 Some(conn) => Some(conn.id),
                 None => anyhow::bail!("Connection '{}' not found", name),
             }
@@ -206,7 +209,7 @@ impl HotDataEngine {
             None
         };
 
-        self.catalog.list_tables(connection_id)
+        self.catalog.list_tables(connection_id).await
     }
 
     /// Execute a SQL query and return the results.
@@ -235,11 +238,12 @@ impl HotDataEngine {
         // Get connection info (validates it exists and gives us the ID)
         let conn = self
             .catalog
-            .get_connection(name)?
+            .get_connection(name)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", name))?;
 
         // Step 1: Clear metadata first (metadata-first ordering)
-        self.catalog.clear_connection_cache_metadata(name)?;
+        self.catalog.clear_connection_cache_metadata(name).await?;
 
         // Step 2: Re-register the connection with fresh state
         // This causes DataFusion to drop any open file handles to the cached files
@@ -272,14 +276,16 @@ impl HotDataEngine {
         // Validate connection exists
         let conn = self
             .catalog
-            .get_connection(connection_name)?
+            .get_connection(connection_name)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", connection_name))?;
 
         // Step 1: Clear metadata (set paths to NULL in DB)
         // This returns the table info with the old paths before clearing
-        let table_info =
-            self.catalog
-                .clear_table_cache_metadata(conn.id, schema_name, table_name)?;
+        let table_info = self
+            .catalog
+            .clear_table_cache_metadata(conn.id, schema_name, table_name)
+            .await?;
 
         // Step 2: Re-register the connection with fresh state
         // This causes DataFusion to drop any open file handles to the cached files
@@ -308,11 +314,12 @@ impl HotDataEngine {
         // Get connection info (validates it exists and gives us the ID)
         let conn = self
             .catalog
-            .get_connection(name)?
+            .get_connection(name)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", name))?;
 
         // Step 1: Delete metadata first
-        self.catalog.delete_connection(name)?;
+        self.catalog.delete_connection(name).await?;
 
         // Step 2: Delete the physical files
         self.delete_connection_files(conn.id).await?;
@@ -327,7 +334,7 @@ impl HotDataEngine {
     /// Set the default catalog for queries (allows queries without fully-qualified table names).
     pub async fn set_default_catalog(&self, name: &str) -> Result<()> {
         // Validate connection exists
-        if self.catalog.get_connection(name)?.is_none() {
+        if self.catalog.get_connection(name).await?.is_none() {
             anyhow::bail!("Connection '{}' not found", name);
         }
 
@@ -346,15 +353,15 @@ impl HotDataEngine {
 
     /// Shutdown the engine and close all connections.
     /// This should be called before the application exits to ensure proper cleanup.
-    pub fn shutdown(&self) -> Result<()> {
-        self.catalog.close()
+    pub async fn shutdown(&self) -> Result<()> {
+        self.catalog.close().await
     }
 }
 
 impl Drop for HotDataEngine {
     fn drop(&mut self) {
         // Ensure catalog connection is closed when engine is dropped
-        let _ = self.catalog.close();
+        let _ = block_on(self.catalog.close());
     }
 }
 
@@ -407,7 +414,7 @@ impl HotDataEngineBuilder {
         self
     }
 
-    pub fn build(self) -> Result<HotDataEngine> {
+    pub async fn build(self) -> Result<HotDataEngine> {
         let catalog = self
             .catalog
             .ok_or_else(|| anyhow::anyhow!("Catalog manager not set"))?;
@@ -415,7 +422,7 @@ impl HotDataEngineBuilder {
             .storage
             .ok_or_else(|| anyhow::anyhow!("Storage manager not set"))?;
 
-        catalog.run_migrations()?;
+        catalog.run_migrations().await?;
 
         // Create DataFusion session context
         let df_ctx = SessionContext::new();
@@ -430,7 +437,7 @@ impl HotDataEngineBuilder {
         };
 
         // Register all existing connections as DataFusion catalogs
-        engine.register_existing_connections()?;
+        engine.register_existing_connections().await?;
 
         Ok(engine)
     }
@@ -443,7 +450,7 @@ impl HotDataEngine {
 
     /// Create a new engine from application configuration.
     /// This is a convenience method that sets up catalog and storage based on the config.
-    pub fn from_config(config: &crate::config::AppConfig) -> Result<Self> {
+    pub async fn from_config(config: &crate::config::AppConfig) -> Result<Self> {
         // Determine metadata directory root (defaults to ~/.hotdata/rivetdb)
         let metadata_dir = if let Some(cache_dir) = &config.paths.cache_dir {
             PathBuf::from(cache_dir)
@@ -486,11 +493,14 @@ impl HotDataEngine {
         let catalog: Arc<dyn CatalogManager> = match config.catalog.catalog_type.as_str() {
             "sqlite" => {
                 let catalog_path = metadata_dir.join("catalog.db");
-                Arc::new(SqliteCatalogManager::new(
-                    catalog_path
-                        .to_str()
-                        .ok_or_else(|| anyhow::anyhow!("Invalid catalog path"))?,
-                )?)
+                Arc::new(
+                    SqliteCatalogManager::new(
+                        catalog_path
+                            .to_str()
+                            .ok_or_else(|| anyhow::anyhow!("Invalid catalog path"))?,
+                    )
+                    .await?,
+                )
             }
             "postgres" => {
                 let host = config
@@ -520,9 +530,7 @@ impl HotDataEngine {
                     user, password, host, port, database
                 );
 
-                Arc::new(crate::catalog::PostgresCatalogManager::new(
-                    &connection_string,
-                )?)
+                Arc::new(crate::catalog::PostgresCatalogManager::new(&connection_string).await?)
             }
             _ => anyhow::bail!("Unsupported catalog type: {}", config.catalog.catalog_type),
         };
@@ -579,6 +587,7 @@ impl HotDataEngine {
             .catalog(catalog)
             .storage(storage)
             .build()
+            .await
     }
 }
 
@@ -594,7 +603,11 @@ mod tests {
         let catalog_path = metadata_dir.join("catalog.db");
 
         // Create catalog and storage
-        let catalog = Arc::new(SqliteCatalogManager::new(catalog_path.to_str().unwrap()).unwrap());
+        let catalog = Arc::new(
+            SqliteCatalogManager::new(catalog_path.to_str().unwrap())
+                .await
+                .unwrap(),
+        );
 
         let storage = Arc::new(FilesystemStorage::new(
             temp_dir.path().join("cache").to_str().unwrap(),
@@ -606,14 +619,15 @@ mod tests {
             .metadata_dir(metadata_dir.clone())
             .catalog(catalog)
             .storage(storage)
-            .build();
+            .build()
+            .await;
 
         assert!(engine.is_ok(), "Builder should successfully create engine");
 
         let engine = engine.unwrap();
 
         // Verify we can list connections (should be empty)
-        let connections = engine.list_connections();
+        let connections = engine.list_connections().await;
         assert!(connections.is_ok(), "Should be able to list connections");
         assert_eq!(
             connections.unwrap().len(),
@@ -622,13 +636,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_builder_pattern_missing_fields() {
+    #[tokio::test]
+    async fn test_builder_pattern_missing_fields() {
         // Test that builder fails when required fields are missing
         let temp_dir = TempDir::new().unwrap();
         let result = HotDataEngine::builder()
             .metadata_dir(temp_dir.path().to_path_buf())
-            .build();
+            .build()
+            .await;
         assert!(result.is_err(), "Builder should fail without catalog");
         if let Err(e) = result {
             assert!(
@@ -672,7 +687,7 @@ mod tests {
             },
         };
 
-        let engine = HotDataEngine::from_config(&config);
+        let engine = HotDataEngine::from_config(&config).await;
         assert!(
             engine.is_ok(),
             "from_config should create engine successfully"
@@ -681,7 +696,7 @@ mod tests {
         let engine = engine.unwrap();
 
         // Verify we can list connections
-        let connections = engine.list_connections();
+        let connections = engine.list_connections().await;
         assert!(connections.is_ok(), "Should be able to list connections");
     }
 }

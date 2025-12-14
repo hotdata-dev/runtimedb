@@ -12,7 +12,7 @@ use tempfile::TempDir;
 use tower::util::ServiceExt;
 
 /// Create test router with in-memory engine
-fn setup_test() -> Result<(Router, TempDir)> {
+async fn setup_test() -> Result<(Router, TempDir)> {
     let temp_dir = tempfile::tempdir()?;
     let metadata_dir = temp_dir.path().to_path_buf();
     let catalog_path = metadata_dir.join("catalog.db");
@@ -24,7 +24,8 @@ fn setup_test() -> Result<(Router, TempDir)> {
         cache_path.to_str().unwrap(),
         state_path.to_str().unwrap(),
         false,
-    )?;
+    )
+    .await?;
 
     let app = AppServer::new(engine);
 
@@ -174,7 +175,7 @@ async fn test_query_endpoint_invalid_sql() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_malformed_json() -> Result<()> {
-    let (app, _tempdir) = setup_test()?;
+    let (app, _tempdir) = setup_test().await?;
 
     let response = app
         .oneshot(
@@ -193,7 +194,7 @@ async fn test_query_endpoint_malformed_json() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_missing_sql_field() -> Result<()> {
-    let (app, _tempdir) = setup_test()?;
+    let (app, _tempdir) = setup_test().await?;
 
     let response = app
         .oneshot(
@@ -215,7 +216,7 @@ async fn test_query_endpoint_missing_sql_field() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_tables_endpoint_empty() -> Result<()> {
-    let (app, _tempdir) = setup_test()?;
+    let (app, _tempdir) = setup_test().await?;
 
     let response = app
         .oneshot(
@@ -240,7 +241,7 @@ async fn test_tables_endpoint_empty() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_tables_endpoint_with_connection_filter_not_found() -> Result<()> {
-    let (app, _tempdir) = setup_test()?;
+    let (app, _tempdir) = setup_test().await?;
 
     let response = app
         .oneshot(
@@ -335,7 +336,7 @@ async fn test_query_endpoint_joins() -> Result<()> {
 }
 
 async fn _send_query(sql: &str) -> Result<Response> {
-    let (app, _tempdir) = setup_test()?;
+    let (app, _tempdir) = setup_test().await?;
 
     let response = app
         .oneshot(
@@ -355,7 +356,7 @@ async fn _send_query(sql: &str) -> Result<Response> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_list_connections_empty() -> Result<()> {
-    let (app, _tempdir) = setup_test()?;
+    let (app, _tempdir) = setup_test().await?;
 
     let response = app
         .oneshot(
@@ -379,7 +380,7 @@ async fn test_list_connections_empty() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_create_connection_empty_name() -> Result<()> {
-    let (app, _tempdir) = setup_test()?;
+    let (app, _tempdir) = setup_test().await?;
 
     let response = app
         .oneshot(
@@ -407,7 +408,7 @@ async fn test_create_connection_empty_name() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_create_connection_unsupported_source_type() -> Result<()> {
-    let (app, _tempdir) = setup_test()?;
+    let (app, _tempdir) = setup_test().await?;
 
     let response = app
         .oneshot(
@@ -438,7 +439,7 @@ async fn test_create_connection_unsupported_source_type() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_create_connection_missing_fields() -> Result<()> {
-    let (app, _tempdir) = setup_test()?;
+    let (app, _tempdir) = setup_test().await?;
 
     let response = app
         .oneshot(

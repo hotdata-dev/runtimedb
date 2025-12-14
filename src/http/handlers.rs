@@ -93,7 +93,7 @@ pub async fn tables_handler(
     // todo: add exists method to engine/catalog;
     // todo: consider accepting connection_id instead?
     if let Some(conn_name) = connection_filter {
-        let connections = engine.list_connections()?;
+        let connections = engine.list_connections().await?;
         if !connections.iter().any(|c| c.name == conn_name) {
             return Err(ApiError::not_found(format!(
                 "Connection '{}' not found",
@@ -103,10 +103,10 @@ pub async fn tables_handler(
     }
 
     // Get tables from engine
-    let tables = engine.list_tables(connection_filter)?;
+    let tables = engine.list_tables(connection_filter).await?;
 
     // Get all connections to map connection_id to connection name
-    let connections = engine.list_connections()?;
+    let connections = engine.list_connections().await?;
     let connection_map: HashMap<i32, String> =
         connections.into_iter().map(|c| (c.id, c.name)).collect();
 
@@ -156,7 +156,8 @@ pub async fn create_connection_handler(
     // Check if connection already exists
     // todo: add "exists" method
     if engine
-        .list_connections()?
+        .list_connections()
+        .await?
         .iter()
         .any(|c| c.name == request.name)
     {
@@ -204,6 +205,7 @@ pub async fn create_connection_handler(
     // Count discovered tables
     let tables_discovered = engine
         .list_tables(Some(&request.name))
+        .await
         .map(|t| t.len())
         .unwrap_or(0);
 
@@ -221,7 +223,7 @@ pub async fn create_connection_handler(
 pub async fn list_connections_handler(
     State(engine): State<Arc<HotDataEngine>>,
 ) -> Result<Json<ListConnectionsResponse>, ApiError> {
-    let connections = engine.list_connections()?;
+    let connections = engine.list_connections().await?;
 
     let connection_infos: Vec<ConnectionInfo> = connections
         .into_iter()
@@ -245,11 +247,12 @@ pub async fn get_connection_handler(
     // Get connection info
     let conn = engine
         .catalog()
-        .get_connection(&name)?
+        .get_connection(&name)
+        .await?
         .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", name)))?;
 
     // Get table counts
-    let tables = engine.list_tables(Some(&name))?;
+    let tables = engine.list_tables(Some(&name)).await?;
     let table_count = tables.len();
     let synced_table_count = tables.iter().filter(|t| t.parquet_path.is_some()).count();
 

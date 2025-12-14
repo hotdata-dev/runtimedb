@@ -1,8 +1,8 @@
 use anyhow::Result;
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::fmt::Debug;
-use tokio::task::block_in_place;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ConnectionInfo {
@@ -24,52 +24,45 @@ pub struct TableInfo {
     pub arrow_schema_json: Option<String>,
 }
 
-/// Blocking helper for async operations.
-///
-/// Uses `block_in_place` to avoid blocking the tokio runtime when calling
-/// async code from a sync context.
-pub fn block_on<F, T>(f: F) -> Result<T>
-where
-    F: std::future::Future<Output = Result<T>>,
-{
-    block_in_place(|| tokio::runtime::Handle::current().block_on(f))
-}
-
-/// Synchronous interface for catalog operations.
-///
-/// This trait uses blocking methods for compatibility with `dyn` trait objects.
-/// Implementations should use [`block_on`] to wrap async database operations.
+/// Async interface for catalog operations.
+#[async_trait]
 pub trait CatalogManager: Debug + Send + Sync {
     /// Close the catalog connection. This is idempotent and can be called multiple times.
-    fn close(&self) -> Result<()> {
+    async fn close(&self) -> Result<()> {
         // Default implementation does nothing - sqlx pools handle cleanup automatically
         Ok(())
     }
 
     /// Apply any pending schema migrations. Should be idempotent.
-    fn run_migrations(&self) -> Result<()>;
+    async fn run_migrations(&self) -> Result<()>;
 
-    fn list_connections(&self) -> Result<Vec<ConnectionInfo>>;
-    fn add_connection(&self, name: &str, source_type: &str, config_json: &str) -> Result<i32>;
-    fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>>;
-    fn add_table(
+    async fn list_connections(&self) -> Result<Vec<ConnectionInfo>>;
+    async fn add_connection(&self, name: &str, source_type: &str, config_json: &str)
+        -> Result<i32>;
+    async fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>>;
+    async fn add_table(
         &self,
         connection_id: i32,
         schema_name: &str,
         table_name: &str,
         arrow_schema_json: &str,
     ) -> Result<i32>;
-    fn list_tables(&self, connection_id: Option<i32>) -> Result<Vec<TableInfo>>;
-    fn get_table(
+    async fn list_tables(&self, connection_id: Option<i32>) -> Result<Vec<TableInfo>>;
+    async fn get_table(
         &self,
         connection_id: i32,
         schema_name: &str,
         table_name: &str,
     ) -> Result<Option<TableInfo>>;
-    fn update_table_sync(&self, table_id: i32, parquet_path: &str, state_path: &str) -> Result<()>;
+    async fn update_table_sync(
+        &self,
+        table_id: i32,
+        parquet_path: &str,
+        state_path: &str,
+    ) -> Result<()>;
 
     /// Clear table cache metadata (set paths to NULL) without deleting files.
-    fn clear_table_cache_metadata(
+    async fn clear_table_cache_metadata(
         &self,
         connection_id: i32,
         schema_name: &str,
@@ -77,8 +70,8 @@ pub trait CatalogManager: Debug + Send + Sync {
     ) -> Result<TableInfo>;
 
     /// Clear cache metadata for all tables in a connection (set paths to NULL).
-    fn clear_connection_cache_metadata(&self, name: &str) -> Result<()>;
+    async fn clear_connection_cache_metadata(&self, name: &str) -> Result<()>;
 
     /// Delete connection and all associated table rows from metadata.
-    fn delete_connection(&self, name: &str) -> Result<()>;
+    async fn delete_connection(&self, name: &str) -> Result<()>;
 }
