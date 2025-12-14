@@ -21,7 +21,7 @@ async fn s3_storage_write_read_delete() {
 
     let storage = S3Storage::new("test-bucket").unwrap();
 
-    let url = storage.state_url(1, "public", "users");
+    let url = storage.cache_url(1, "public", "users");
     let data = b"test data";
 
     // Write
@@ -87,17 +87,9 @@ async fn s3_storage_path_construction() {
     let cache_url = storage.cache_url(1, "public", "users");
     assert_eq!(cache_url, "s3://test-bucket/cache/1/public/users");
 
-    // Test state URL construction
-    let state_url = storage.state_url(1, "public", "users");
-    assert_eq!(state_url, "s3://test-bucket/state/1/public/users.json");
-
     // Test cache prefix construction
     let cache_prefix = storage.cache_prefix(1);
     assert_eq!(cache_prefix, "s3://test-bucket/cache/1");
-
-    // Test state prefix construction
-    let state_prefix = storage.state_prefix(1);
-    assert_eq!(state_prefix, "s3://test-bucket/state/1");
 }
 
 /// Test that S3Storage created with new_with_config returns credentials via get_s3_credentials

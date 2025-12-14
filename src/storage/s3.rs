@@ -86,19 +86,8 @@ impl StorageManager for S3Storage {
         )
     }
 
-    fn state_url(&self, connection_id: i32, schema: &str, table: &str) -> String {
-        format!(
-            "s3://{}/state/{}/{}/{}.json",
-            self.bucket, connection_id, schema, table
-        )
-    }
-
     fn cache_prefix(&self, connection_id: i32) -> String {
         format!("s3://{}/cache/{}", self.bucket, connection_id)
-    }
-
-    fn state_prefix(&self, connection_id: i32) -> String {
-        format!("s3://{}/state/{}", self.bucket, connection_id)
     }
 
     async fn read(&self, url: &str) -> Result<Vec<u8>> {

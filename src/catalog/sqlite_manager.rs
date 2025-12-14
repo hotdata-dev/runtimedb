@@ -56,7 +56,6 @@ impl SqliteCatalogManager {
                 schema_name TEXT NOT NULL,
                 table_name TEXT NOT NULL,
                 parquet_path TEXT,
-                state_path TEXT,
                 last_sync TIMESTAMP,
                 arrow_schema_json TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -124,15 +123,8 @@ impl CatalogManager for SqliteCatalogManager {
             .await
     }
 
-    async fn update_table_sync(
-        &self,
-        table_id: i32,
-        parquet_path: &str,
-        state_path: &str,
-    ) -> Result<()> {
-        self.backend
-            .update_table_sync(table_id, parquet_path, state_path)
-            .await
+    async fn update_table_sync(&self, table_id: i32, parquet_path: &str) -> Result<()> {
+        self.backend.update_table_sync(table_id, parquet_path).await
     }
 
     async fn clear_table_cache_metadata(

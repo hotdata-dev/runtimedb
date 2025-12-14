@@ -10,4 +10,3 @@ type = "filesystem"
 
 [paths]
 cache_dir = "/app/cache"
-state_dir = "/app/state"

@@ -25,4 +25,3 @@ type = "filesystem"
 
 [paths]
 #cache_dir = "~/.hotdata/rivetdb/cache"
-#state_dir = "~/.hotdata/rivetdb/state"

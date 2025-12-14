@@ -15,5 +15,4 @@
 # Project-specific
 catalog.db*
 cache/
-state/
 

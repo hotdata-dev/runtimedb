@@ -12,7 +12,7 @@ pub mod s3;
 pub use filesystem::FilesystemStorage;
 pub use s3::S3Storage;
 
-/// S3 credentials for passing to sync scripts (e.g., DLT).
+/// S3 credentials for passing to sync scripts
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S3Credentials {
     pub aws_access_key_id: String,
@@ -24,9 +24,7 @@ pub struct S3Credentials {
 pub trait StorageManager: Debug + Send + Sync {
     // Path construction
     fn cache_url(&self, connection_id: i32, schema: &str, table: &str) -> String;
-    fn state_url(&self, connection_id: i32, schema: &str, table: &str) -> String;
     fn cache_prefix(&self, connection_id: i32) -> String;
-    fn state_prefix(&self, connection_id: i32) -> String;
 
     // File operations
     async fn read(&self, url: &str) -> Result<Vec<u8>>;
@@ -38,7 +36,7 @@ pub trait StorageManager: Debug + Send + Sync {
     // DataFusion integration
     fn register_with_datafusion(&self, ctx: &SessionContext) -> Result<()>;
 
-    /// Get S3 credentials for DLT sync script.
+    /// Get S3 credentials
     /// Returns None for non-S3 storage backends.
     fn get_s3_credentials(&self) -> Option<S3Credentials> {
         None

@@ -28,19 +28,17 @@ pub struct RivetEngine {
 impl RivetEngine {
     /// Create a new engine instance and register all existing connections.
     pub async fn new(catalog_path: &str) -> Result<Self> {
-        Self::new_with_paths(catalog_path, "cache", "state", false).await
+        Self::new_with_paths(catalog_path, "cache", false).await
     }
 
     /// Create a new engine instance with custom paths for catalog, cache, and state.
     pub async fn new_with_paths(
         catalog_path: &str,
         cache_base: &str,
-        state_base: &str,
         readonly: bool,
     ) -> Result<Self> {
         // Create filesystem storage manager
-        let storage: Arc<dyn StorageManager> =
-            Arc::new(FilesystemStorage::new(cache_base, state_base));
+        let storage: Arc<dyn StorageManager> = Arc::new(FilesystemStorage::new(cache_base));
         Self::new_with_storage(catalog_path, storage, readonly).await
     }
 
@@ -74,18 +72,9 @@ impl RivetEngine {
     /// Delete cache and state directories for a connection.
     async fn delete_connection_files(&self, connection_id: i32) -> Result<()> {
         let cache_prefix = self.storage.cache_prefix(connection_id);
-        let state_prefix = self.storage.state_prefix(connection_id);
 
-        let (cache_res, state_res) = tokio::join!(
-            self.storage.delete_prefix(&cache_prefix),
-            self.storage.delete_prefix(&state_prefix),
-        );
-
-        if let Err(e) = cache_res {
+        if let Err(e) = self.storage.delete_prefix(&cache_prefix).await {
             warn!("Failed to delete cache prefix {}: {}", cache_prefix, e);
-        }
-        if let Err(e) = state_res {
-            warn!("Failed to delete state prefix {}: {}", state_prefix, e);
         }
 
         Ok(())
@@ -97,13 +86,6 @@ impl RivetEngine {
         if let Some(parquet_path) = &table_info.parquet_path {
             if let Err(e) = self.storage.delete(parquet_path).await {
                 warn!("Failed to delete parquet file {}: {}", parquet_path, e);
-            }
-        }
-
-        // Delete state path if it exists
-        if let Some(state_path) = &table_info.state_path {
-            if let Err(e) = self.storage.delete(state_path).await {
-                warn!("Failed to delete state file {}: {}", state_path, e);
             }
         }
 
@@ -456,11 +438,6 @@ impl RivetEngine {
                 .parent()
                 .ok_or_else(|| anyhow::anyhow!("Invalid cache directory path"))?
                 .to_path_buf()
-        } else if let Some(state_dir) = &config.paths.state_dir {
-            PathBuf::from(state_dir)
-                .parent()
-                .ok_or_else(|| anyhow::anyhow!("Invalid state directory path"))?
-                .to_path_buf()
         } else {
             // Default to ~/.hotdata/rivetdb
             let home = std::env::var("HOME")
@@ -476,17 +453,10 @@ impl RivetEngine {
             .as_ref()
             .map(PathBuf::from)
             .unwrap_or_else(|| metadata_dir.join("cache"));
-        let state_dir_path = config
-            .paths
-            .state_dir
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| metadata_dir.join("state"));
 
         // Ensure directories exist before using them
         std::fs::create_dir_all(&metadata_dir)?;
         std::fs::create_dir_all(&cache_dir_path)?;
-        std::fs::create_dir_all(&state_dir_path)?;
 
         // Create catalog manager based on config
         let catalog: Arc<dyn CatalogManager> = match config.catalog.catalog_type.as_str() {
@@ -540,10 +510,7 @@ impl RivetEngine {
                 let cache_dir_str = cache_dir_path
                     .to_str()
                     .ok_or_else(|| anyhow::anyhow!("Invalid cache directory path"))?;
-                let state_dir_str = state_dir_path
-                    .to_str()
-                    .ok_or_else(|| anyhow::anyhow!("Invalid state directory path"))?;
-                Arc::new(FilesystemStorage::new(cache_dir_str, state_dir_str))
+                Arc::new(FilesystemStorage::new(cache_dir_str))
             }
             "s3" => {
                 let bucket = config
@@ -610,7 +577,6 @@ mod tests {
 
         let storage = Arc::new(FilesystemStorage::new(
             temp_dir.path().join("cache").to_str().unwrap(),
-            temp_dir.path().join("state").to_str().unwrap(),
         ));
 
         // Build engine using builder pattern
@@ -659,7 +625,6 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let cache_dir = temp_dir.path().join("cache");
-        let state_dir = temp_dir.path().join("state");
 
         let config = AppConfig {
             server: ServerConfig {
@@ -682,7 +647,6 @@ mod tests {
             },
             paths: PathsConfig {
                 cache_dir: Some(cache_dir.to_str().unwrap().to_string()),
-                state_dir: Some(state_dir.to_str().unwrap().to_string()),
             },
         };
 

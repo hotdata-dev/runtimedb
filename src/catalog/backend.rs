@@ -183,7 +183,7 @@ where
 
     pub async fn list_tables(&self, connection_id: Option<i32>) -> Result<Vec<TableInfo>> {
         let mut sql = String::from(
-            "SELECT id, connection_id, schema_name, table_name, parquet_path, state_path, \
+            "SELECT id, connection_id, schema_name, table_name, parquet_path, \
              CAST(last_sync AS TEXT) as last_sync, arrow_schema_json \
              FROM tables",
         );
@@ -210,7 +210,7 @@ where
         table_name: &str,
     ) -> Result<Option<TableInfo>> {
         let sql = format!(
-            "SELECT id, connection_id, schema_name, table_name, parquet_path, state_path, \
+            "SELECT id, connection_id, schema_name, table_name, parquet_path, \
              CAST(last_sync AS TEXT) as last_sync, arrow_schema_json \
              FROM tables WHERE connection_id = {} AND schema_name = {} AND table_name = {}",
             DB::bind_param(1),
@@ -227,23 +227,16 @@ where
             .map_err(Into::into)
     }
 
-    pub async fn update_table_sync(
-        &self,
-        table_id: i32,
-        parquet_path: &str,
-        state_path: &str,
-    ) -> Result<()> {
+    pub async fn update_table_sync(&self, table_id: i32, parquet_path: &str) -> Result<()> {
         let sql = format!(
-            "UPDATE tables SET parquet_path = {}, state_path = {}, last_sync = CURRENT_TIMESTAMP \
+            "UPDATE tables SET parquet_path = {}, last_sync = CURRENT_TIMESTAMP \
              WHERE id = {}",
             DB::bind_param(1),
             DB::bind_param(2),
-            DB::bind_param(3),
         );
 
         query(&sql)
             .bind(parquet_path)
-            .bind(state_path)
             .bind(table_id)
             .execute(&self.pool)
             .await?;
@@ -263,7 +256,7 @@ where
             .ok_or_else(|| anyhow!("Table '{}.{}' not found", schema_name, table_name))?;
 
         let sql = format!(
-            "UPDATE tables SET parquet_path = NULL, state_path = NULL, last_sync = NULL WHERE id = {}",
+            "UPDATE tables SET parquet_path = NULL, last_sync = NULL WHERE id = {}",
             DB::bind_param(1)
         );
 
@@ -279,7 +272,7 @@ where
             .ok_or_else(|| anyhow!("Connection '{}' not found", name))?;
 
         let sql = format!(
-            "UPDATE tables SET parquet_path = NULL, state_path = NULL, last_sync = NULL \
+            "UPDATE tables SET parquet_path = NULL, last_sync = NULL \
              WHERE connection_id = {}",
             DB::bind_param(1)
         );

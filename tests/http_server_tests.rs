@@ -17,12 +17,10 @@ async fn setup_test() -> Result<(Router, TempDir)> {
     let metadata_dir = temp_dir.path().to_path_buf();
     let catalog_path = metadata_dir.join("catalog.db");
     let cache_path = metadata_dir.join("cache");
-    let state_path = metadata_dir.join("state");
 
     let engine = RivetEngine::new_with_paths(
         catalog_path.to_str().unwrap(),
         cache_path.to_str().unwrap(),
-        state_path.to_str().unwrap(),
         false,
     )
     .await?;

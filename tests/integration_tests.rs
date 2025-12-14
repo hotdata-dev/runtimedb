@@ -486,15 +486,12 @@ impl TestHarness {
         let temp_dir = TempDir::new().unwrap();
         let catalog_path = temp_dir.path().join("catalog.db");
         let cache_dir = temp_dir.path().join("cache");
-        let state_dir = temp_dir.path().join("state");
 
         std::fs::create_dir_all(&cache_dir).unwrap();
-        std::fs::create_dir_all(&state_dir).unwrap();
 
         let engine = RivetEngine::new_with_paths(
             catalog_path.to_str().unwrap(),
             cache_dir.to_str().unwrap(),
-            state_dir.to_str().unwrap(),
             false,
         )
         .await

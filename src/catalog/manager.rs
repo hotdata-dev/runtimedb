@@ -19,7 +19,6 @@ pub struct TableInfo {
     pub schema_name: String,
     pub table_name: String,
     pub parquet_path: Option<String>,
-    pub state_path: Option<String>,
     pub last_sync: Option<String>,
     pub arrow_schema_json: Option<String>,
 }
@@ -54,12 +53,7 @@ pub trait CatalogManager: Debug + Send + Sync {
         schema_name: &str,
         table_name: &str,
     ) -> Result<Option<TableInfo>>;
-    async fn update_table_sync(
-        &self,
-        table_id: i32,
-        parquet_path: &str,
-        state_path: &str,
-    ) -> Result<()>;
+    async fn update_table_sync(&self, table_id: i32, parquet_path: &str) -> Result<()>;
 
     /// Clear table cache metadata (set paths to NULL) without deleting files.
     async fn clear_table_cache_metadata(

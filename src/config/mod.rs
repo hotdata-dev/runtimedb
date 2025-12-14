@@ -49,7 +49,6 @@ pub struct StorageConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct PathsConfig {
     pub cache_dir: Option<String>,
-    pub state_dir: Option<String>,
 }
 
 impl AppConfig {

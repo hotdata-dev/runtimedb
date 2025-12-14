@@ -170,7 +170,7 @@ macro_rules! catalog_manager_tests {
                     .unwrap();
 
                 catalog
-                    .update_table_sync(table_id, "/path/to/data.parquet", "/path/to/state.json")
+                    .update_table_sync(table_id, "/path/to/data.parquet")
                     .await
                     .unwrap();
 
@@ -180,7 +180,6 @@ macro_rules! catalog_manager_tests {
                     .unwrap()
                     .unwrap();
                 assert_eq!(table.parquet_path.as_deref(), Some("/path/to/data.parquet"));
-                assert_eq!(table.state_path.as_deref(), Some("/path/to/state.json"));
                 assert!(table.last_sync.is_some());
             }
 
@@ -249,7 +248,7 @@ macro_rules! catalog_manager_tests {
                     .unwrap();
 
                 catalog
-                    .update_table_sync(cached_id, "/fake/path/test.parquet", "/fake/path/test.json")
+                    .update_table_sync(cached_id, "/fake/path/test.parquet")
                     .await
                     .unwrap();
 
@@ -266,11 +265,9 @@ macro_rules! catalog_manager_tests {
                     .unwrap();
 
                 assert!(cached.parquet_path.is_some());
-                assert!(cached.state_path.is_some());
                 assert!(cached.last_sync.is_some());
 
                 assert!(not_cached.parquet_path.is_none());
-                assert!(not_cached.state_path.is_none());
                 assert!(not_cached.last_sync.is_none());
             }
 
@@ -290,7 +287,7 @@ macro_rules! catalog_manager_tests {
                     .unwrap();
 
                 catalog
-                    .update_table_sync(table_id, "/fake/path/test.parquet", "/fake/path/test.json")
+                    .update_table_sync(table_id, "/fake/path/test.parquet")
                     .await
                     .unwrap();
 
@@ -304,7 +301,6 @@ macro_rules! catalog_manager_tests {
                     .unwrap()
                     .unwrap();
                 assert!(table.parquet_path.is_none());
-                assert!(table.state_path.is_none());
                 assert!(table.last_sync.is_none());
             }
 
@@ -378,11 +374,11 @@ macro_rules! catalog_manager_tests {
                     .unwrap();
 
                 catalog
-                    .update_table_sync(users_id, "/fake/users.parquet", "/fake/users.json")
+                    .update_table_sync(users_id, "/fake/users.parquet")
                     .await
                     .unwrap();
                 catalog
-                    .update_table_sync(orders_id, "/fake/orders.parquet", "/fake/orders.json")
+                    .update_table_sync(orders_id, "/fake/orders.parquet")
                     .await
                     .unwrap();
 
@@ -398,7 +394,6 @@ macro_rules! catalog_manager_tests {
                     .unwrap()
                     .unwrap();
                 assert!(users_after.parquet_path.is_none());
-                assert!(users_after.state_path.is_none());
                 assert!(users_after.last_sync.is_none());
 
                 let orders_after = catalog
@@ -407,7 +402,6 @@ macro_rules! catalog_manager_tests {
                     .unwrap()
                     .unwrap();
                 assert!(orders_after.parquet_path.is_some());
-                assert!(orders_after.state_path.is_some());
             }
 
             #[tokio::test]
@@ -448,7 +442,6 @@ macro_rules! catalog_manager_tests {
                     .await
                     .unwrap();
                 assert!(table_info.parquet_path.is_none());
-                assert!(table_info.state_path.is_none());
 
                 let table_after = catalog
                     .get_table(conn_id, "public", "users")
@@ -456,7 +449,6 @@ macro_rules! catalog_manager_tests {
                     .unwrap()
                     .unwrap();
                 assert!(table_after.parquet_path.is_none());
-                assert!(table_after.state_path.is_none());
                 assert!(table_after.last_sync.is_none());
             }
 

@@ -10,14 +10,12 @@ use super::StorageManager;
 #[derive(Debug)]
 pub struct FilesystemStorage {
     cache_base: PathBuf,
-    state_base: PathBuf,
 }
 
 impl FilesystemStorage {
-    pub fn new(cache_base: &str, state_base: &str) -> Self {
+    pub fn new(cache_base: &str) -> Self {
         Self {
             cache_base: PathBuf::from(cache_base),
-            state_base: PathBuf::from(state_base),
         }
     }
 }
@@ -35,24 +33,8 @@ impl StorageManager for FilesystemStorage {
         format!("file://{}", path.display())
     }
 
-    fn state_url(&self, connection_id: i32, schema: &str, table: &str) -> String {
-        let path = self
-            .state_base
-            .join(connection_id.to_string())
-            .join(schema)
-            .join(format!("{}.json", table));
-        format!("file://{}", path.display())
-    }
-
     fn cache_prefix(&self, connection_id: i32) -> String {
         self.cache_base
-            .join(connection_id.to_string())
-            .to_string_lossy()
-            .to_string()
-    }
-
-    fn state_prefix(&self, connection_id: i32) -> String {
-        self.state_base
             .join(connection_id.to_string())
             .to_string_lossy()
             .to_string()

@@ -9,12 +9,10 @@ async fn test_sync_connection_not_found() -> Result<()> {
     let dir = tempdir()?;
     let catalog_path = dir.path().join("catalog.db");
     let cache_path = dir.path().join("cache");
-    let state_path = dir.path().join("state");
 
     let engine = RivetEngine::new_with_paths(
         catalog_path.to_str().unwrap(),
         cache_path.to_str().unwrap(),
-        state_path.to_str().unwrap(),
         false,
     )
     .await?;
@@ -36,12 +34,10 @@ async fn test_sync_connection_no_tables() -> Result<()> {
     let dir = tempdir()?;
     let catalog_path = dir.path().join("catalog.db");
     let cache_path = dir.path().join("cache");
-    let state_path = dir.path().join("state");
 
     let engine = RivetEngine::new_with_paths(
         catalog_path.to_str().unwrap(),
         cache_path.to_str().unwrap(),
-        state_path.to_str().unwrap(),
         false,
     )
     .await?;

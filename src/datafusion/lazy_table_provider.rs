@@ -147,10 +147,7 @@ impl LazyTableProvider {
             .get_table(self.connection_id, &self.schema_name, &self.table_name)
             .await
         {
-            let _ = self
-                .catalog
-                .update_table_sync(info.id, &parquet_url, "")
-                .await;
+            let _ = self.catalog.update_table_sync(info.id, &parquet_url).await;
         }
 
         Ok(parquet_url)
