@@ -7,15 +7,8 @@ use tempfile::tempdir;
 #[ignore]
 async fn test_sync_connection_not_found() -> Result<()> {
     let dir = tempdir()?;
-    let catalog_path = dir.path().join("catalog.db");
-    let cache_path = dir.path().join("cache");
 
-    let engine = RivetEngine::new_with_paths(
-        catalog_path.to_str().unwrap(),
-        cache_path.to_str().unwrap(),
-        false,
-    )
-    .await?;
+    let engine = RivetEngine::defaults(dir.path()).await?;
 
     // Try to sync a connection that doesn't exist
     let result = engine.sync_connection("nonexistent").await;
@@ -32,15 +25,8 @@ async fn test_sync_connection_not_found() -> Result<()> {
 #[ignore]
 async fn test_sync_connection_no_tables() -> Result<()> {
     let dir = tempdir()?;
-    let catalog_path = dir.path().join("catalog.db");
-    let cache_path = dir.path().join("cache");
 
-    let engine = RivetEngine::new_with_paths(
-        catalog_path.to_str().unwrap(),
-        cache_path.to_str().unwrap(),
-        false,
-    )
-    .await?;
+    let engine = RivetEngine::defaults(dir.path()).await?;
 
     // Add a connection with no tables
     let config = serde_json::json!({

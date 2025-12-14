@@ -26,48 +26,139 @@ pub struct RivetEngine {
 }
 
 impl RivetEngine {
-    /// Create a new engine instance and register all existing connections.
-    pub async fn new(catalog_path: &str) -> Result<Self> {
-        Self::new_with_paths(catalog_path, "cache", false).await
+    // =========================================================================
+    // Constructors
+    // =========================================================================
+
+    /// Create an engine with default settings at the given base directory.
+    ///
+    /// Uses SQLite catalog at {base_dir}/catalog.db and filesystem storage at {base_dir}/cache.
+    pub async fn defaults(base_dir: impl Into<PathBuf>) -> Result<Self> {
+        Self::builder().base_dir(base_dir).build().await
     }
 
-    /// Create a new engine instance with custom paths for catalog, cache, and state.
-    pub async fn new_with_paths(
-        catalog_path: &str,
-        cache_base: &str,
-        readonly: bool,
-    ) -> Result<Self> {
-        // Create filesystem storage manager
-        let storage: Arc<dyn StorageManager> = Arc::new(FilesystemStorage::new(cache_base));
-        Self::new_with_storage(catalog_path, storage, readonly).await
+    /// Create a builder for more control over engine configuration.
+    pub fn builder() -> RivetEngineBuilder {
+        RivetEngineBuilder::new()
     }
 
-    /// Create a new engine instance with custom storage manager.
-    /// This allows using S3 or other storage backends.
-    pub async fn new_with_storage(
-        catalog_path: &str,
-        storage: Arc<dyn StorageManager>,
-        _readonly: bool,
-    ) -> Result<Self> {
-        let catalog = SqliteCatalogManager::new(catalog_path).await?;
-        catalog.run_migrations().await?;
+    /// Create a new engine from application configuration.
+    ///
+    /// For sqlite catalog + filesystem storage, the builder handles defaults.
+    /// This method only creates explicit catalog/storage for non-default backends (postgres, s3).
+    pub async fn from_config(config: &crate::config::AppConfig) -> Result<Self> {
+        let mut builder = RivetEngine::builder();
 
-        let df_ctx = SessionContext::new();
+        // Set base_dir if explicitly configured
+        if let Some(base) = &config.paths.base_dir {
+            builder = builder.base_dir(PathBuf::from(base));
+        }
 
-        // Register storage with DataFusion
-        storage.register_with_datafusion(&df_ctx)?;
+        // Set cache_dir if explicitly configured
+        if let Some(cache) = &config.paths.cache_dir {
+            builder = builder.cache_dir(PathBuf::from(cache));
+        }
 
-        let mut engine = Self {
-            catalog: Arc::new(catalog),
-            df_ctx,
-            storage,
-        };
+        // Only create explicit catalog for non-sqlite backends
+        if config.catalog.catalog_type != "sqlite" {
+            let catalog = Self::create_catalog_from_config(config).await?;
+            builder = builder.catalog(catalog);
+        }
 
-        // Register all existing connections as DataFusion catalogs
-        engine.register_existing_connections().await?;
+        // Only create explicit storage for non-filesystem backends
+        if config.storage.storage_type != "filesystem" {
+            let storage = Self::create_storage_from_config(config).await?;
+            builder = builder.storage(storage);
+        }
 
-        Ok(engine)
+        builder.build().await
     }
+
+    /// Create a catalog manager from config (for non-sqlite backends).
+    async fn create_catalog_from_config(
+        config: &crate::config::AppConfig,
+    ) -> Result<Arc<dyn CatalogManager>> {
+        match config.catalog.catalog_type.as_str() {
+            "postgres" => {
+                let host = config
+                    .catalog
+                    .host
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Postgres catalog requires host"))?;
+                let port = config.catalog.port.unwrap_or(5432);
+                let database = config
+                    .catalog
+                    .database
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Postgres catalog requires database"))?;
+                let user = config
+                    .catalog
+                    .user
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Postgres catalog requires user"))?;
+                let password = config
+                    .catalog
+                    .password
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Postgres catalog requires password"))?;
+
+                let connection_string = format!(
+                    "postgresql://{}:{}@{}:{}/{}",
+                    user, password, host, port, database
+                );
+
+                Ok(Arc::new(
+                    crate::catalog::PostgresCatalogManager::new(&connection_string).await?,
+                ))
+            }
+            _ => anyhow::bail!("Unsupported catalog type: {}", config.catalog.catalog_type),
+        }
+    }
+
+    /// Create a storage manager from config (for non-filesystem backends).
+    async fn create_storage_from_config(
+        config: &crate::config::AppConfig,
+    ) -> Result<Arc<dyn StorageManager>> {
+        match config.storage.storage_type.as_str() {
+            "s3" => {
+                let bucket = config
+                    .storage
+                    .bucket
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("S3 storage requires bucket"))?;
+
+                // Check if we have custom endpoint (for MinIO/localstack)
+                if let Some(endpoint) = &config.storage.endpoint {
+                    // For custom endpoint, we need credentials from environment
+                    let access_key = std::env::var("AWS_ACCESS_KEY_ID")
+                        .or_else(|_| std::env::var("RIVETDB_STORAGE_ACCESS_KEY_ID"))
+                        .unwrap_or_else(|_| "minioadmin".to_string());
+                    let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")
+                        .or_else(|_| std::env::var("RIVETDB_STORAGE_SECRET_ACCESS_KEY"))
+                        .unwrap_or_else(|_| "minioadmin".to_string());
+
+                    // Allow HTTP for local MinIO
+                    let allow_http = endpoint.starts_with("http://");
+
+                    Ok(Arc::new(crate::storage::S3Storage::new_with_config(
+                        bucket,
+                        endpoint,
+                        &access_key,
+                        &secret_key,
+                        allow_http,
+                    )?))
+                } else {
+                    // Use AWS credentials from environment
+                    Ok(Arc::new(crate::storage::S3Storage::new(bucket)?))
+                }
+            }
+            _ => anyhow::bail!("Unsupported storage type: {}", config.storage.storage_type),
+        }
+    }
+
+    // =========================================================================
+    // Private helpers
+    // =========================================================================
 
     /// Delete cache and state directories for a connection.
     async fn delete_connection_files(&self, connection_id: i32) -> Result<()> {
@@ -348,19 +439,34 @@ impl Drop for RivetEngine {
 
 /// Builder for RivetEngine
 ///
+/// The builder is responsible for:
+/// - Resolving the base directory (defaults to ~/.hotdata/rivetdb)
+/// - Creating default catalog (SQLite) and storage (filesystem) when not explicitly provided
+/// - Ensuring directories exist before use
+///
 /// # Example
 ///
 /// ```no_run
 /// use rivetdb::RivetEngine;
 /// use std::path::PathBuf;
 ///
-/// let builder = RivetEngine::builder()
-///     .base_dir(PathBuf::from("/tmp/rivet"));
+/// // Minimal: uses ~/.hotdata/rivetdb with SQLite + filesystem
+/// // let engine = RivetEngine::builder().build().await.unwrap();
 ///
-/// // let engine = builder.build().unwrap();
+/// // Custom base dir with defaults
+/// // let engine = RivetEngine::builder()
+/// //     .base_dir(PathBuf::from("/tmp/rivet"))
+/// //     .build().await.unwrap();
+///
+/// // Explicit catalog/storage (skips defaults)
+/// // let engine = RivetEngine::builder()
+/// //     .catalog(my_catalog)
+/// //     .storage(my_storage)
+/// //     .build().await.unwrap();
 /// ```
 pub struct RivetEngineBuilder {
     base_dir: Option<PathBuf>,
+    cache_dir: Option<PathBuf>,
     catalog: Option<Arc<dyn CatalogManager>>,
     storage: Option<Arc<dyn StorageManager>>,
 }
@@ -375,40 +481,97 @@ impl RivetEngineBuilder {
     pub fn new() -> Self {
         Self {
             base_dir: None,
+            cache_dir: None,
             catalog: None,
             storage: None,
         }
     }
 
-    pub fn base_dir(mut self, dir: PathBuf) -> Self {
-        self.base_dir = Some(dir);
+    /// Set the base directory for all RivetDB data.
+    /// Defaults to ~/.hotdata/rivetdb if not set.
+    pub fn base_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.base_dir = Some(dir.into());
         self
     }
 
+    /// Set a custom cache directory for Parquet files.
+    /// Defaults to {base_dir}/cache if not set.
+    pub fn cache_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.cache_dir = Some(dir.into());
+        self
+    }
+
+    /// Set a custom catalog manager.
+    /// If not set, creates a SQLite catalog at {base_dir}/catalog.db
     pub fn catalog(mut self, catalog: Arc<dyn CatalogManager>) -> Self {
         self.catalog = Some(catalog);
         self
     }
 
+    /// Set a custom storage manager.
+    /// If not set, creates filesystem storage at {cache_dir}
     pub fn storage(mut self, storage: Arc<dyn StorageManager>) -> Self {
         self.storage = Some(storage);
         self
     }
 
-    pub async fn build(self) -> Result<RivetEngine> {
-        let catalog = self
-            .catalog
-            .ok_or_else(|| anyhow::anyhow!("Catalog manager not set"))?;
-        let storage = self
-            .storage
-            .ok_or_else(|| anyhow::anyhow!("Storage manager not set"))?;
+    /// Resolve the base directory, using default if not set.
+    fn resolve_base_dir(&self) -> PathBuf {
+        self.base_dir.clone().unwrap_or_else(|| {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join(".hotdata").join("rivetdb")
+        })
+    }
 
+    /// Resolve the cache directory, using default if not set.
+    fn resolve_cache_dir(&self, base_dir: &PathBuf) -> PathBuf {
+        self.cache_dir
+            .clone()
+            .unwrap_or_else(|| base_dir.join("cache"))
+    }
+
+    pub async fn build(self) -> Result<RivetEngine> {
+        // Step 1: Resolve directories
+        let base_dir = self.resolve_base_dir();
+        let cache_dir = self.resolve_cache_dir(&base_dir);
+
+        // Step 2: Ensure directories exist
+        std::fs::create_dir_all(&base_dir)?;
+        std::fs::create_dir_all(&cache_dir)?;
+
+        // Step 3: Create catalog if not provided
+        let catalog: Arc<dyn CatalogManager> = match self.catalog {
+            Some(c) => c,
+            None => {
+                let catalog_path = base_dir.join("catalog.db");
+                Arc::new(
+                    SqliteCatalogManager::new(
+                        catalog_path
+                            .to_str()
+                            .ok_or_else(|| anyhow::anyhow!("Invalid catalog path"))?,
+                    )
+                    .await?,
+                )
+            }
+        };
+
+        // Step 4: Create storage if not provided
+        let storage: Arc<dyn StorageManager> = match self.storage {
+            Some(s) => s,
+            None => {
+                let cache_dir_str = cache_dir
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid cache directory path"))?;
+                Arc::new(FilesystemStorage::new(cache_dir_str))
+            }
+        };
+
+        // Step 5: Run migrations and set up DataFusion
         catalog.run_migrations().await?;
 
-        // Create DataFusion session context
         let df_ctx = SessionContext::new();
-
-        // Register storage with DataFusion
         storage.register_with_datafusion(&df_ctx)?;
 
         let mut engine = RivetEngine {
@@ -421,135 +584,6 @@ impl RivetEngineBuilder {
         engine.register_existing_connections().await?;
 
         Ok(engine)
-    }
-}
-
-impl RivetEngine {
-    pub fn builder() -> RivetEngineBuilder {
-        RivetEngineBuilder::new()
-    }
-
-    /// Create a new engine from application configuration.
-    /// This is a convenience method that sets up catalog and storage based on the config.
-    pub async fn from_config(config: &crate::config::AppConfig) -> Result<Self> {
-        // Determine base directory (defaults to ~/.hotdata/rivetdb)
-        let base_dir = if let Some(base) = &config.paths.base_dir {
-            PathBuf::from(base)
-        } else {
-            let home = std::env::var("HOME")
-                .or_else(|_| std::env::var("USERPROFILE"))
-                .unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(".hotdata").join("rivetdb")
-        };
-
-        // Cache directory defaults to {base_dir}/cache unless explicitly set
-        let cache_dir_path = config
-            .paths
-            .cache_dir
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| base_dir.join("cache"));
-
-        // Ensure directories exist before using them
-        std::fs::create_dir_all(&base_dir)?;
-        std::fs::create_dir_all(&cache_dir_path)?;
-
-        // Create catalog manager based on config
-        let catalog: Arc<dyn CatalogManager> = match config.catalog.catalog_type.as_str() {
-            "sqlite" => {
-                let catalog_path = base_dir.join("catalog.db");
-                Arc::new(
-                    SqliteCatalogManager::new(
-                        catalog_path
-                            .to_str()
-                            .ok_or_else(|| anyhow::anyhow!("Invalid catalog path"))?,
-                    )
-                    .await?,
-                )
-            }
-            "postgres" => {
-                let host = config
-                    .catalog
-                    .host
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Postgres catalog requires host"))?;
-                let port = config.catalog.port.unwrap_or(5432);
-                let database = config
-                    .catalog
-                    .database
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Postgres catalog requires database"))?;
-                let user = config
-                    .catalog
-                    .user
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Postgres catalog requires user"))?;
-                let password = config
-                    .catalog
-                    .password
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Postgres catalog requires password"))?;
-
-                let connection_string = format!(
-                    "postgresql://{}:{}@{}:{}/{}",
-                    user, password, host, port, database
-                );
-
-                Arc::new(crate::catalog::PostgresCatalogManager::new(&connection_string).await?)
-            }
-            _ => anyhow::bail!("Unsupported catalog type: {}", config.catalog.catalog_type),
-        };
-
-        // Create storage manager based on config
-        let storage: Arc<dyn StorageManager> = match config.storage.storage_type.as_str() {
-            "filesystem" => {
-                let cache_dir_str = cache_dir_path
-                    .to_str()
-                    .ok_or_else(|| anyhow::anyhow!("Invalid cache directory path"))?;
-                Arc::new(FilesystemStorage::new(cache_dir_str))
-            }
-            "s3" => {
-                let bucket = config
-                    .storage
-                    .bucket
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("S3 storage requires bucket"))?;
-
-                // Check if we have custom endpoint (for MinIO/localstack)
-                if let Some(endpoint) = &config.storage.endpoint {
-                    // For custom endpoint, we need credentials from environment
-                    let access_key = std::env::var("AWS_ACCESS_KEY_ID")
-                        .or_else(|_| std::env::var("RIVETDB_STORAGE_ACCESS_KEY_ID"))
-                        .unwrap_or_else(|_| "minioadmin".to_string());
-                    let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")
-                        .or_else(|_| std::env::var("RIVETDB_STORAGE_SECRET_ACCESS_KEY"))
-                        .unwrap_or_else(|_| "minioadmin".to_string());
-
-                    // Allow HTTP for local MinIO
-                    let allow_http = endpoint.starts_with("http://");
-
-                    Arc::new(crate::storage::S3Storage::new_with_config(
-                        bucket,
-                        endpoint,
-                        &access_key,
-                        &secret_key,
-                        allow_http,
-                    )?)
-                } else {
-                    // Use AWS credentials from environment
-                    Arc::new(crate::storage::S3Storage::new(bucket)?)
-                }
-            }
-            _ => anyhow::bail!("Unsupported storage type: {}", config.storage.storage_type),
-        };
-
-        // Use builder to construct engine
-        RivetEngine::builder()
-            .base_dir(base_dir)
-            .catalog(catalog)
-            .storage(storage)
-            .build()
-            .await
     }
 }
 
@@ -597,22 +631,39 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_builder_pattern_missing_fields() {
-        // Test that builder fails when required fields are missing
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_builder_with_defaults() {
+        // Test that builder creates defaults when only base_dir is provided
         let temp_dir = TempDir::new().unwrap();
         let result = RivetEngine::builder()
             .base_dir(temp_dir.path().to_path_buf())
             .build()
             .await;
-        assert!(result.is_err(), "Builder should fail without catalog");
-        if let Err(e) = result {
-            assert!(
-                e.to_string().contains("Catalog"),
-                "Error should mention catalog: {}",
-                e
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "Builder should create engine with defaults: {:?}",
+            result.err()
+        );
+
+        let engine = result.unwrap();
+        let connections = engine.list_connections().await;
+        assert!(connections.is_ok(), "Should be able to list connections");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_defaults_constructor() {
+        // Test the defaults() convenience constructor
+        let temp_dir = TempDir::new().unwrap();
+        let engine = RivetEngine::defaults(temp_dir.path().to_path_buf()).await;
+        assert!(
+            engine.is_ok(),
+            "defaults() should create engine: {:?}",
+            engine.err()
+        );
+
+        let engine = engine.unwrap();
+        let connections = engine.list_connections().await;
+        assert!(connections.is_ok(), "Should be able to list connections");
     }
 
     #[tokio::test(flavor = "multi_thread")]

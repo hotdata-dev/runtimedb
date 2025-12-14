@@ -484,18 +484,8 @@ struct TestHarness {
 impl TestHarness {
     async fn new() -> Self {
         let temp_dir = TempDir::new().unwrap();
-        let catalog_path = temp_dir.path().join("catalog.db");
-        let cache_dir = temp_dir.path().join("cache");
 
-        std::fs::create_dir_all(&cache_dir).unwrap();
-
-        let engine = RivetEngine::new_with_paths(
-            catalog_path.to_str().unwrap(),
-            cache_dir.to_str().unwrap(),
-            false,
-        )
-        .await
-        .unwrap();
+        let engine = RivetEngine::defaults(temp_dir.path()).await.unwrap();
 
         let app = AppServer::new(engine);
 

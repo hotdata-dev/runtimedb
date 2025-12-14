@@ -14,16 +14,8 @@ use tower::util::ServiceExt;
 /// Create test router with in-memory engine
 async fn setup_test() -> Result<(Router, TempDir)> {
     let temp_dir = tempfile::tempdir()?;
-    let metadata_dir = temp_dir.path().to_path_buf();
-    let catalog_path = metadata_dir.join("catalog.db");
-    let cache_path = metadata_dir.join("cache");
 
-    let engine = RivetEngine::new_with_paths(
-        catalog_path.to_str().unwrap(),
-        cache_path.to_str().unwrap(),
-        false,
-    )
-    .await?;
+    let engine = RivetEngine::defaults(temp_dir.path()).await?;
 
     let app = AppServer::new(engine);
 
