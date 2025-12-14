@@ -355,12 +355,12 @@ impl Drop for RivetEngine {
 /// use std::path::PathBuf;
 ///
 /// let builder = RivetEngine::builder()
-///     .metadata_dir(PathBuf::from("/tmp/rivet"));
+///     .base_dir(PathBuf::from("/tmp/rivet"));
 ///
 /// // let engine = builder.build().unwrap();
 /// ```
 pub struct RivetEngineBuilder {
-    metadata_dir: Option<PathBuf>,
+    base_dir: Option<PathBuf>,
     catalog: Option<Arc<dyn CatalogManager>>,
     storage: Option<Arc<dyn StorageManager>>,
 }
@@ -374,14 +374,14 @@ impl Default for RivetEngineBuilder {
 impl RivetEngineBuilder {
     pub fn new() -> Self {
         Self {
-            metadata_dir: None,
+            base_dir: None,
             catalog: None,
             storage: None,
         }
     }
 
-    pub fn metadata_dir(mut self, dir: PathBuf) -> Self {
-        self.metadata_dir = Some(dir);
+    pub fn base_dir(mut self, dir: PathBuf) -> Self {
+        self.base_dir = Some(dir);
         self
     }
 
@@ -432,36 +432,32 @@ impl RivetEngine {
     /// Create a new engine from application configuration.
     /// This is a convenience method that sets up catalog and storage based on the config.
     pub async fn from_config(config: &crate::config::AppConfig) -> Result<Self> {
-        // Determine metadata directory root (defaults to ~/.hotdata/rivetdb)
-        let metadata_dir = if let Some(cache_dir) = &config.paths.cache_dir {
-            PathBuf::from(cache_dir)
-                .parent()
-                .ok_or_else(|| anyhow::anyhow!("Invalid cache directory path"))?
-                .to_path_buf()
+        // Determine base directory (defaults to ~/.hotdata/rivetdb)
+        let base_dir = if let Some(base) = &config.paths.base_dir {
+            PathBuf::from(base)
         } else {
-            // Default to ~/.hotdata/rivetdb
             let home = std::env::var("HOME")
                 .or_else(|_| std::env::var("USERPROFILE"))
                 .unwrap_or_else(|_| ".".to_string());
             PathBuf::from(home).join(".hotdata").join("rivetdb")
         };
 
-        // Default cache/state directories live under metadata dir unless explicitly set
+        // Cache directory defaults to {base_dir}/cache unless explicitly set
         let cache_dir_path = config
             .paths
             .cache_dir
             .as_ref()
             .map(PathBuf::from)
-            .unwrap_or_else(|| metadata_dir.join("cache"));
+            .unwrap_or_else(|| base_dir.join("cache"));
 
         // Ensure directories exist before using them
-        std::fs::create_dir_all(&metadata_dir)?;
+        std::fs::create_dir_all(&base_dir)?;
         std::fs::create_dir_all(&cache_dir_path)?;
 
         // Create catalog manager based on config
         let catalog: Arc<dyn CatalogManager> = match config.catalog.catalog_type.as_str() {
             "sqlite" => {
-                let catalog_path = metadata_dir.join("catalog.db");
+                let catalog_path = base_dir.join("catalog.db");
                 Arc::new(
                     SqliteCatalogManager::new(
                         catalog_path
@@ -549,7 +545,7 @@ impl RivetEngine {
 
         // Use builder to construct engine
         RivetEngine::builder()
-            .metadata_dir(metadata_dir)
+            .base_dir(base_dir)
             .catalog(catalog)
             .storage(storage)
             .build()
@@ -565,8 +561,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_builder_pattern() {
         let temp_dir = TempDir::new().unwrap();
-        let metadata_dir = temp_dir.path().to_path_buf();
-        let catalog_path = metadata_dir.join("catalog.db");
+        let base_dir = temp_dir.path().to_path_buf();
+        let catalog_path = base_dir.join("catalog.db");
 
         // Create catalog and storage
         let catalog = Arc::new(
@@ -581,7 +577,7 @@ mod tests {
 
         // Build engine using builder pattern
         let engine = RivetEngine::builder()
-            .metadata_dir(metadata_dir.clone())
+            .base_dir(base_dir.clone())
             .catalog(catalog)
             .storage(storage)
             .build()
@@ -606,7 +602,7 @@ mod tests {
         // Test that builder fails when required fields are missing
         let temp_dir = TempDir::new().unwrap();
         let result = RivetEngine::builder()
-            .metadata_dir(temp_dir.path().to_path_buf())
+            .base_dir(temp_dir.path().to_path_buf())
             .build()
             .await;
         assert!(result.is_err(), "Builder should fail without catalog");
@@ -624,7 +620,7 @@ mod tests {
         use crate::config::{AppConfig, CatalogConfig, PathsConfig, ServerConfig, StorageConfig};
 
         let temp_dir = TempDir::new().unwrap();
-        let cache_dir = temp_dir.path().join("cache");
+        let base_dir = temp_dir.path().to_path_buf();
 
         let config = AppConfig {
             server: ServerConfig {
@@ -646,7 +642,8 @@ mod tests {
                 endpoint: None,
             },
             paths: PathsConfig {
-                cache_dir: Some(cache_dir.to_str().unwrap().to_string()),
+                base_dir: Some(base_dir.to_str().unwrap().to_string()),
+                cache_dir: None,
             },
         };
 

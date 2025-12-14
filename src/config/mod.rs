@@ -48,6 +48,10 @@ pub struct StorageConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct PathsConfig {
+    /// Base directory for all RivetDB data (catalog.db, cache/).
+    /// Defaults to ~/.hotdata/rivetdb
+    pub base_dir: Option<String>,
+    /// Cache directory for Parquet files. Defaults to {base_dir}/cache
     pub cache_dir: Option<String>,
 }
 
