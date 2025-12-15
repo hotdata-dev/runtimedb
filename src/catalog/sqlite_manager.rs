@@ -67,6 +67,31 @@ impl SqliteCatalogManager {
         .execute(pool)
         .await?;
 
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS secrets (
+                name TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                provider_ref TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS encrypted_secret_values (
+                name TEXT PRIMARY KEY REFERENCES secrets(name) ON DELETE CASCADE,
+                encrypted_value BLOB NOT NULL
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
         Ok(())
     }
 }

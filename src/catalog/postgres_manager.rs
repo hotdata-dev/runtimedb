@@ -52,6 +52,27 @@ impl PostgresCatalogManager {
         .execute(pool)
         .await?;
 
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS secrets (
+                name TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                provider_ref TEXT,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            )",
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS encrypted_secret_values (
+                name TEXT PRIMARY KEY REFERENCES secrets(name) ON DELETE CASCADE,
+                encrypted_value BYTEA NOT NULL
+            )",
+        )
+        .execute(pool)
+        .await?;
+
         Ok(())
     }
 }
