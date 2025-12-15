@@ -1,4 +1,3 @@
-use anyhow::Result;
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::Session;
@@ -10,9 +9,8 @@ use std::any::Any;
 use std::sync::Arc;
 
 use crate::catalog::CatalogManager;
-use crate::datafetch::DataFetcher;
+use crate::datafetch::FetchOrchestrator;
 use crate::source::Source;
-use crate::storage::StorageManager;
 
 /// A lazy table provider that defers data fetching until scan() is called.
 ///
@@ -22,33 +20,29 @@ use crate::storage::StorageManager;
 #[derive(Debug)]
 pub struct LazyTableProvider {
     schema: SchemaRef,
-    fetcher: Arc<dyn DataFetcher>,
     source: Arc<Source>,
     catalog: Arc<dyn CatalogManager>,
-    storage: Arc<dyn StorageManager>,
+    orchestrator: Arc<FetchOrchestrator>,
     connection_id: i32,
     schema_name: String,
     table_name: String,
 }
 
 impl LazyTableProvider {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         schema: SchemaRef,
-        fetcher: Arc<dyn DataFetcher>,
         source: Arc<Source>,
         catalog: Arc<dyn CatalogManager>,
-        storage: Arc<dyn StorageManager>,
+        orchestrator: Arc<FetchOrchestrator>,
         connection_id: i32,
         schema_name: String,
         table_name: String,
     ) -> Self {
         Self {
             schema,
-            fetcher,
             source,
             catalog,
-            storage,
+            orchestrator,
             connection_id,
             schema_name,
             table_name,
@@ -96,61 +90,15 @@ impl LazyTableProvider {
 
     /// Fetch the table data and update catalog
     async fn fetch_and_cache(&self) -> Result<String, DataFusionError> {
-        use crate::datafetch::native::StreamingParquetWriter;
-
-        // Prepare cache write location
-        let write_path = self.storage.prepare_cache_write(
-            self.connection_id,
-            &self.schema_name,
-            &self.table_name,
-        );
-
-        // Create writer
-        let mut writer = StreamingParquetWriter::new(write_path.clone());
-
-        // Fetch the table data into writer using the Source directly
-        self.fetcher
-            .fetch_table(
+        self.orchestrator
+            .cache_table(
                 &self.source,
-                None, // catalog
-                &self.schema_name,
-                &self.table_name,
-                &mut writer,
-            )
-            .await
-            .map_err(|e| {
-                DataFusionError::External(format!("Failed to fetch table: {}", e).into())
-            })?;
-
-        // Close writer
-        writer.close().map_err(|e| {
-            DataFusionError::External(format!("Failed to close writer: {}", e).into())
-        })?;
-
-        // Finalize cache write (uploads to S3 if needed, returns URL)
-        let parquet_url = self
-            .storage
-            .finalize_cache_write(
-                &write_path,
                 self.connection_id,
                 &self.schema_name,
                 &self.table_name,
             )
             .await
-            .map_err(|e| {
-                DataFusionError::External(format!("Failed to finalize cache write: {}", e).into())
-            })?;
-
-        // Update catalog with new path
-        if let Ok(Some(info)) = self
-            .catalog
-            .get_table(self.connection_id, &self.schema_name, &self.table_name)
-            .await
-        {
-            let _ = self.catalog.update_table_sync(info.id, &parquet_url).await;
-        }
-
-        Ok(parquet_url)
+            .map_err(|e| DataFusionError::External(format!("Failed to cache table: {}", e).into()))
     }
 }
 

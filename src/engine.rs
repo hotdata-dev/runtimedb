@@ -1,5 +1,5 @@
 use crate::catalog::{CatalogManager, ConnectionInfo, SqliteCatalogManager, TableInfo};
-use crate::datafetch::DataFetcher;
+use crate::datafetch::{DataFetcher, FetchOrchestrator, NativeFetcher};
 use crate::datafusion::{block_on, RivetCatalogProvider};
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
@@ -23,6 +23,7 @@ pub struct RivetEngine {
     catalog: Arc<dyn CatalogManager>,
     df_ctx: SessionContext,
     storage: Arc<dyn StorageManager>,
+    orchestrator: Arc<FetchOrchestrator>,
 }
 
 impl RivetEngine {
@@ -200,7 +201,7 @@ impl RivetEngine {
                 conn.name.clone(),
                 Arc::new(source),
                 self.catalog.clone(),
-                self.storage.clone(),
+                self.orchestrator.clone(),
             )) as Arc<dyn CatalogProvider>;
 
             self.df_ctx.register_catalog(&conn.name, catalog_provider);
@@ -246,7 +247,7 @@ impl RivetEngine {
             name.to_string(),
             Arc::new(source),
             self.catalog.clone(),
-            self.storage.clone(),
+            self.orchestrator.clone(),
         )) as Arc<dyn CatalogProvider>;
 
         self.df_ctx.register_catalog(name, catalog_provider);
@@ -326,7 +327,7 @@ impl RivetEngine {
             conn.name.clone(),
             Arc::new(source),
             self.catalog.clone(),
-            self.storage.clone(),
+            self.orchestrator.clone(),
         )) as Arc<dyn CatalogProvider>;
 
         // register_catalog replaces existing catalog with same name
@@ -368,7 +369,7 @@ impl RivetEngine {
             conn.name.clone(),
             Arc::new(source),
             self.catalog.clone(),
-            self.storage.clone(),
+            self.orchestrator.clone(),
         )) as Arc<dyn CatalogProvider>;
 
         // register_catalog replaces existing catalog with same name
@@ -574,10 +575,19 @@ impl RivetEngineBuilder {
         let df_ctx = SessionContext::new();
         storage.register_with_datafusion(&df_ctx)?;
 
+        // Step 6: Create fetch orchestrator
+        let fetcher = Arc::new(NativeFetcher::new());
+        let orchestrator = Arc::new(FetchOrchestrator::new(
+            fetcher,
+            storage.clone(),
+            catalog.clone(),
+        ));
+
         let mut engine = RivetEngine {
             catalog,
             df_ctx,
             storage,
+            orchestrator,
         };
 
         // Register all existing connections as DataFusion catalogs

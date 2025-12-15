@@ -1,9 +1,8 @@
 use super::block_on;
 use super::schema_provider::RivetSchemaProvider;
 use crate::catalog::CatalogManager;
-use crate::datafetch::{DataFetcher, NativeFetcher};
+use crate::datafetch::FetchOrchestrator;
 use crate::source::Source;
-use crate::storage::StorageManager;
 use async_trait::async_trait;
 use datafusion::catalog::{CatalogProvider, SchemaProvider};
 use std::collections::HashMap;
@@ -17,9 +16,8 @@ pub struct RivetCatalogProvider {
     connection_name: String,
     source: Arc<Source>,
     catalog: Arc<dyn CatalogManager>,
+    orchestrator: Arc<FetchOrchestrator>,
     schemas: Arc<RwLock<HashMap<String, Arc<dyn SchemaProvider>>>>,
-    storage: Arc<dyn StorageManager>,
-    fetcher: Arc<dyn DataFetcher>,
 }
 
 impl RivetCatalogProvider {
@@ -28,16 +26,15 @@ impl RivetCatalogProvider {
         connection_name: String,
         source: Arc<Source>,
         catalog: Arc<dyn CatalogManager>,
-        storage: Arc<dyn StorageManager>,
+        orchestrator: Arc<FetchOrchestrator>,
     ) -> Self {
         Self {
             connection_id,
             connection_name,
             source,
             catalog,
+            orchestrator,
             schemas: Arc::new(RwLock::new(HashMap::new())),
-            storage,
-            fetcher: Arc::new(NativeFetcher::new()),
         }
     }
 
@@ -66,8 +63,7 @@ impl RivetCatalogProvider {
             schema_name.to_string(),
             self.source.clone(),
             self.catalog.clone(),
-            self.storage.clone(),
-            self.fetcher.clone(),
+            self.orchestrator.clone(),
         )) as Arc<dyn SchemaProvider>;
 
         schemas.insert(schema_name.to_string(), schema_provider.clone());

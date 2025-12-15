@@ -4,12 +4,10 @@ use datafusion::datasource::TableProvider;
 use std::sync::Arc;
 
 use super::block_on;
-use crate::catalog::CatalogManager;
-use crate::datafetch::{deserialize_arrow_schema, DataFetcher};
-use crate::source::Source;
-use crate::storage::StorageManager;
-
 use super::lazy_table_provider::LazyTableProvider;
+use crate::catalog::CatalogManager;
+use crate::datafetch::{deserialize_arrow_schema, FetchOrchestrator};
+use crate::source::Source;
 
 /// A schema provider that syncs tables on-demand from remote sources.
 /// Wraps MemorySchemaProvider for caching already-loaded tables.
@@ -21,21 +19,18 @@ pub struct RivetSchemaProvider {
     schema_name: String,
     source: Arc<Source>,
     catalog: Arc<dyn CatalogManager>,
+    orchestrator: Arc<FetchOrchestrator>,
     inner: Arc<MemorySchemaProvider>,
-    storage: Arc<dyn StorageManager>,
-    fetcher: Arc<dyn DataFetcher>,
 }
 
 impl RivetSchemaProvider {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         connection_id: i32,
         connection_name: String,
         schema_name: String,
         source: Arc<Source>,
         catalog: Arc<dyn CatalogManager>,
-        storage: Arc<dyn StorageManager>,
-        fetcher: Arc<dyn DataFetcher>,
+        orchestrator: Arc<FetchOrchestrator>,
     ) -> Self {
         Self {
             connection_id,
@@ -43,9 +38,8 @@ impl RivetSchemaProvider {
             schema_name,
             source,
             catalog,
+            orchestrator,
             inner: Arc::new(MemorySchemaProvider::new()),
-            storage,
-            fetcher,
         }
     }
 }
@@ -109,10 +103,9 @@ impl SchemaProvider for RivetSchemaProvider {
         // Create LazyTableProvider
         let provider = Arc::new(LazyTableProvider::new(
             schema,
-            self.fetcher.clone(),
             self.source.clone(),
             self.catalog.clone(),
-            self.storage.clone(),
+            self.orchestrator.clone(),
             self.connection_id,
             self.schema_name.clone(),
             name.to_string(),
