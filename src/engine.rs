@@ -225,7 +225,7 @@ impl RivetEngine {
         info!("Discovering tables for {} source...", source_type);
         let fetcher = crate::datafetch::NativeFetcher::new();
         let tables = fetcher
-            .discover_tables(&source)
+            .discover_tables(&source, self.secret_manager.as_deref())
             .await
             .map_err(|e| anyhow::anyhow!("Discovery failed: {}", e))?;
 
@@ -477,6 +477,7 @@ pub struct RivetEngineBuilder {
     cache_dir: Option<PathBuf>,
     catalog: Option<Arc<dyn CatalogManager>>,
     storage: Option<Arc<dyn StorageManager>>,
+    secret_key: Option<String>,
 }
 
 impl Default for RivetEngineBuilder {
@@ -492,6 +493,7 @@ impl RivetEngineBuilder {
             cache_dir: None,
             catalog: None,
             storage: None,
+            secret_key: std::env::var("RIVETDB_SECRET_KEY").ok(),
         }
     }
 
@@ -520,6 +522,14 @@ impl RivetEngineBuilder {
     /// If not set, creates filesystem storage at {cache_dir}
     pub fn storage(mut self, storage: Arc<dyn StorageManager>) -> Self {
         self.storage = Some(storage);
+        self
+    }
+
+    /// Set the encryption key for the secret manager (base64-encoded 32-byte key).
+    /// If not set, falls back to RIVETDB_SECRET_KEY environment variable.
+    /// If neither is set, the secret manager will be disabled.
+    pub fn secret_key(mut self, key: impl Into<String>) -> Self {
+        self.secret_key = Some(key.into());
         self
     }
 
@@ -582,34 +592,34 @@ impl RivetEngineBuilder {
         let df_ctx = SessionContext::new();
         storage.register_with_datafusion(&df_ctx)?;
 
-        // Step 6: Create fetch orchestrator
+        // Step 6: Initialize secret manager from builder config (which defaults from env var)
+        let secret_manager: Option<Arc<dyn SecretManager>> = match self.secret_key {
+            Some(key) => {
+                match EncryptedSecretManager::from_base64_key(&key, catalog.clone()) {
+                    Ok(manager) => {
+                        info!("Secret manager initialized");
+                        Some(Arc::new(manager))
+                    }
+                    Err(e) => {
+                        warn!("Failed to initialize secret manager: {}", e);
+                        None
+                    }
+                }
+            }
+            None => {
+                info!("No secret key configured, secret manager disabled");
+                None
+            }
+        };
+
+        // Step 7: Create fetch orchestrator (needs secret_manager)
         let fetcher = Arc::new(NativeFetcher::new());
         let orchestrator = Arc::new(FetchOrchestrator::new(
             fetcher,
             storage.clone(),
             catalog.clone(),
+            secret_manager.clone(),
         ));
-
-        // Step 7: Initialize secret manager from environment
-        let secret_manager: Option<Arc<dyn SecretManager>> =
-            match std::env::var("RIVETDB_SECRET_KEY") {
-                Ok(key) => {
-                    match EncryptedSecretManager::from_base64_key(&key, catalog.clone()) {
-                        Ok(manager) => {
-                            info!("Secret manager initialized");
-                            Some(Arc::new(manager))
-                        }
-                        Err(e) => {
-                            warn!("Failed to initialize secret manager: {}", e);
-                            None
-                        }
-                    }
-                }
-                Err(_) => {
-                    info!("RIVETDB_SECRET_KEY not set, secret manager disabled");
-                    None
-                }
-            };
 
         let mut engine = RivetEngine {
             catalog,
