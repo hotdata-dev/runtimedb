@@ -1,5 +1,8 @@
+mod encrypted;
 mod encryption;
 mod validation;
+
+pub use encrypted::EncryptedSecretManager;
 
 pub use encryption::{decrypt, encrypt, DecryptError, EncryptError};
 pub use validation::{validate_and_normalize_name, ValidationError};

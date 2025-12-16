@@ -1,8 +1,10 @@
 use crate::catalog::backend::CatalogBackend;
 use crate::catalog::manager::{CatalogManager, ConnectionInfo, TableInfo};
 use crate::catalog::migrations::{run_migrations, CatalogMigrations};
+use crate::secrets::SecretMetadata;
 use anyhow::Result;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use sqlx::{Sqlite, SqlitePool};
 use std::fmt::{self, Debug, Formatter};
 
@@ -169,6 +171,109 @@ impl CatalogManager for SqliteCatalogManager {
 
     async fn delete_connection(&self, name: &str) -> Result<()> {
         self.backend.delete_connection(name).await
+    }
+
+    async fn get_encrypted_secret(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        sqlx::query_scalar("SELECT encrypted_value FROM encrypted_secret_values WHERE name = ?")
+            .bind(name)
+            .fetch_optional(self.backend.pool())
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn get_secret_metadata(&self, name: &str) -> Result<Option<SecretMetadata>> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            name: String,
+            created_at: String,
+            updated_at: String,
+        }
+
+        let row: Option<Row> =
+            sqlx::query_as("SELECT name, created_at, updated_at FROM secrets WHERE name = ?")
+                .bind(name)
+                .fetch_optional(self.backend.pool())
+                .await?;
+
+        Ok(row.map(|r| SecretMetadata {
+            name: r.name,
+            created_at: r.created_at.parse().unwrap_or_else(|_| Utc::now()),
+            updated_at: r.updated_at.parse().unwrap_or_else(|_| Utc::now()),
+        }))
+    }
+
+    async fn put_secret(
+        &self,
+        name: &str,
+        provider: &str,
+        provider_ref: Option<&str>,
+        encrypted_value: &[u8],
+        timestamp: DateTime<Utc>,
+    ) -> Result<()> {
+        let ts = timestamp.to_rfc3339();
+
+        // Upsert into secrets table
+        sqlx::query(
+            "INSERT INTO secrets (name, provider, provider_ref, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT (name) DO UPDATE SET \
+             provider = excluded.provider, \
+             provider_ref = excluded.provider_ref, \
+             updated_at = excluded.updated_at",
+        )
+        .bind(name)
+        .bind(provider)
+        .bind(provider_ref)
+        .bind(&ts)
+        .bind(&ts)
+        .execute(self.backend.pool())
+        .await?;
+
+        // Upsert into encrypted_secret_values table
+        sqlx::query(
+            "INSERT INTO encrypted_secret_values (name, encrypted_value) \
+             VALUES (?, ?) \
+             ON CONFLICT (name) DO UPDATE SET \
+             encrypted_value = excluded.encrypted_value",
+        )
+        .bind(name)
+        .bind(encrypted_value)
+        .execute(self.backend.pool())
+        .await?;
+
+        Ok(())
+    }
+
+    async fn delete_secret(&self, name: &str) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM secrets WHERE name = ?")
+            .bind(name)
+            .execute(self.backend.pool())
+            .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            name: String,
+            created_at: String,
+            updated_at: String,
+        }
+
+        let rows: Vec<Row> =
+            sqlx::query_as("SELECT name, created_at, updated_at FROM secrets ORDER BY name")
+                .fetch_all(self.backend.pool())
+                .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| SecretMetadata {
+                name: r.name,
+                created_at: r.created_at.parse().unwrap_or_else(|_| Utc::now()),
+                updated_at: r.updated_at.parse().unwrap_or_else(|_| Utc::now()),
+            })
+            .collect())
     }
 }
 
