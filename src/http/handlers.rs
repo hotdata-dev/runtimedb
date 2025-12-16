@@ -1,7 +1,9 @@
 use crate::http::error::ApiError;
 use crate::http::models::{
-    ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse, GetConnectionResponse,
-    ListConnectionsResponse, QueryRequest, QueryResponse, TableInfo, TablesResponse,
+    ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse, CreateSecretRequest,
+    CreateSecretResponse, GetConnectionResponse, GetSecretResponse, ListConnectionsResponse,
+    ListSecretsResponse, QueryRequest, QueryResponse, SecretMetadataResponse, TableInfo,
+    TablesResponse,
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
 use crate::source::Source;
@@ -321,6 +323,82 @@ pub async fn purge_table_cache_handler(
                 ApiError::internal_error(msg)
             }
         })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// Secret management handlers
+
+/// Handler for POST /secrets
+pub async fn create_secret_handler(
+    State(engine): State<Arc<RivetEngine>>,
+    Json(request): Json<CreateSecretRequest>,
+) -> Result<(StatusCode, Json<CreateSecretResponse>), ApiError> {
+    let secret_manager = engine
+        .secret_manager()
+        .ok_or_else(|| ApiError::service_unavailable("Secret manager not configured"))?;
+
+    secret_manager
+        .put(&request.name, request.value.as_bytes())
+        .await?;
+
+    let metadata = secret_manager.get_metadata(&request.name).await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateSecretResponse {
+            name: metadata.name,
+            created_at: metadata.created_at,
+        }),
+    ))
+}
+
+/// Handler for GET /secrets
+pub async fn list_secrets_handler(
+    State(engine): State<Arc<RivetEngine>>,
+) -> Result<Json<ListSecretsResponse>, ApiError> {
+    let secret_manager = engine
+        .secret_manager()
+        .ok_or_else(|| ApiError::service_unavailable("Secret manager not configured"))?;
+
+    let secrets = secret_manager.list().await?;
+
+    Ok(Json(ListSecretsResponse {
+        secrets: secrets
+            .into_iter()
+            .map(SecretMetadataResponse::from)
+            .collect(),
+    }))
+}
+
+/// Handler for GET /secrets/{name}
+pub async fn get_secret_handler(
+    State(engine): State<Arc<RivetEngine>>,
+    Path(name): Path<String>,
+) -> Result<Json<GetSecretResponse>, ApiError> {
+    let secret_manager = engine
+        .secret_manager()
+        .ok_or_else(|| ApiError::service_unavailable("Secret manager not configured"))?;
+
+    let metadata = secret_manager.get_metadata(&name).await?;
+
+    Ok(Json(GetSecretResponse {
+        name: metadata.name,
+        created_at: metadata.created_at,
+        updated_at: metadata.updated_at,
+    }))
+}
+
+/// Handler for DELETE /secrets/{name}
+pub async fn delete_secret_handler(
+    State(engine): State<Arc<RivetEngine>>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let secret_manager = engine
+        .secret_manager()
+        .ok_or_else(|| ApiError::service_unavailable("Secret manager not configured"))?;
+
+    secret_manager.delete(&name).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

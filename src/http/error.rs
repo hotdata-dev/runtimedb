@@ -53,6 +53,14 @@ impl ApiError {
             code: "BAD_GATEWAY".to_string(),
         }
     }
+
+    pub fn service_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: message.into(),
+            code: "SERVICE_UNAVAILABLE".to_string(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -74,5 +82,31 @@ impl From<anyhow::Error> for ApiError {
         // For now, treat all anyhow errors as internal server errors
         // TODO: Parse error messages to classify as 400 vs 500
         ApiError::internal_error(err.to_string())
+    }
+}
+
+/// Convert SecretError to ApiError
+impl From<crate::secrets::SecretError> for ApiError {
+    fn from(e: crate::secrets::SecretError) -> Self {
+        use crate::secrets::SecretError;
+        match e {
+            SecretError::NotFound(name) => {
+                ApiError::not_found(format!("Secret '{}' not found", name))
+            }
+            SecretError::NotConfigured => {
+                ApiError::service_unavailable("Secret manager not configured")
+            }
+            SecretError::InvalidName(msg) => ApiError::bad_request(msg),
+            SecretError::EncryptionFailed(msg) => {
+                ApiError::internal_error(format!("Encryption failed: {}", msg))
+            }
+            SecretError::DecryptionFailed(msg) => {
+                ApiError::internal_error(format!("Decryption failed: {}", msg))
+            }
+            SecretError::InvalidUtf8 => ApiError::internal_error("Invalid UTF-8 in secret"),
+            SecretError::Database(msg) => {
+                ApiError::internal_error(format!("Database error: {}", msg))
+            }
+        }
     }
 }
