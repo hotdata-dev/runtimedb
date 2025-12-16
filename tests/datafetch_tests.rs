@@ -10,7 +10,7 @@ async fn test_duckdb_discovery_empty() {
         path: ":memory:".to_string(),
     };
 
-    let result = fetcher.discover_tables(&source).await;
+    let result = fetcher.discover_tables(&source, None).await;
     assert!(
         result.is_ok(),
         "Discovery should succeed: {:?}",
@@ -43,7 +43,7 @@ async fn test_duckdb_discovery_with_table() {
         path: db_path.to_str().unwrap().to_string(),
     };
 
-    let result = fetcher.discover_tables(&source).await;
+    let result = fetcher.discover_tables(&source, None).await;
     assert!(
         result.is_ok(),
         "Discovery should succeed: {:?}",
@@ -69,13 +69,13 @@ async fn test_unsupported_driver() {
     let source = Source::Snowflake {
         account: "fake".to_string(),
         user: "fake".to_string(),
-        password: "fake".to_string(),
         warehouse: "fake".to_string(),
         database: "fake".to_string(),
         role: None,
+        credential: rivetdb::source::Credential::None,
     };
 
-    let result = fetcher.discover_tables(&source).await;
+    let result = fetcher.discover_tables(&source, None).await;
     assert!(result.is_err(), "Should fail for unsupported driver");
 }
 
@@ -124,7 +124,7 @@ async fn test_duckdb_fetch_table() {
     let mut writer = StreamingParquetWriter::new(output_path.clone());
 
     let result = fetcher
-        .fetch_table(&source, None, "test_schema", "products", &mut writer)
+        .fetch_table(&source, None, None, "test_schema", "products", &mut writer)
         .await;
     assert!(result.is_ok(), "Fetch should succeed: {:?}", result.err());
 
