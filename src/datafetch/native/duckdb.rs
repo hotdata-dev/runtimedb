@@ -2,10 +2,11 @@
 
 use duckdb::Connection;
 use std::collections::HashMap;
+use urlencoding::encode;
 
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::secrets::SecretManager;
-use crate::source::{ResolvedCredential, Source};
+use crate::source::Source;
 
 use super::StreamingParquetWriter;
 
@@ -24,22 +25,30 @@ pub async fn discover_tables(
     .map_err(|e| DataFetchError::Connection(e.to_string()))?
 }
 
-/// Resolve credentials and build connection string
-async fn resolve_connection_string(
+/// Resolve credentials and build connection string for DuckDB or Motherduck source.
+pub async fn resolve_connection_string(
     source: &Source,
     secrets: Option<&dyn SecretManager>,
 ) -> Result<String, DataFetchError> {
-    match secrets {
-        Some(mgr) => source
-            .with_resolved_credential(mgr, |cred| source.connection_string(cred))
-            .await
-            .map_err(|e| DataFetchError::Connection(e.to_string())),
-        None => {
-            // No secret manager - only works for sources that don't need credentials
-            source
-                .connection_string(ResolvedCredential::None)
-                .map_err(|e| DataFetchError::Connection(e.to_string()))
+    match source {
+        Source::Duckdb { path } => Ok(path.clone()),
+        Source::Motherduck {
+            database,
+            credential,
+        } => {
+            let token = credential
+                .resolve(secrets)
+                .await
+                .map_err(|e| DataFetchError::Connection(e.to_string()))?;
+            Ok(format!(
+                "md:{}?motherduck_token={}",
+                encode(database),
+                encode(&token)
+            ))
         }
+        _ => Err(DataFetchError::Connection(
+            "Expected DuckDB or Motherduck source".to_string(),
+        )),
     }
 }
 

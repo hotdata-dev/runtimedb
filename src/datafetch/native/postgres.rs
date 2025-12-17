@@ -10,30 +10,58 @@ use futures::StreamExt;
 use sqlx::postgres::{PgColumn, PgConnection, PgRow};
 use sqlx::{Column, Connection, Row, TypeInfo};
 use std::sync::Arc;
+use urlencoding::encode;
 
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::secrets::SecretManager;
-use crate::source::{ResolvedCredential, Source};
+use crate::source::Source;
 
 use super::StreamingParquetWriter;
 
-/// Resolve credentials and build connection string
-async fn resolve_connection_string(
+/// Build a PostgreSQL connection string from source configuration and resolved password.
+fn build_connection_string(
+    host: &str,
+    port: u16,
+    user: &str,
+    database: &str,
+    password: &str,
+) -> String {
+    format!(
+        "postgresql://{}:{}@{}:{}/{}",
+        encode(user),
+        encode(password),
+        encode(host),
+        port,
+        encode(database)
+    )
+}
+
+/// Resolve credentials and build connection string for a Postgres source.
+pub async fn resolve_connection_string(
     source: &Source,
     secrets: Option<&dyn SecretManager>,
 ) -> Result<String, DataFetchError> {
-    match secrets {
-        Some(mgr) => source
-            .with_resolved_credential(mgr, |cred| source.connection_string(cred))
-            .await
-            .map_err(|e| DataFetchError::Connection(e.to_string())),
-        None => {
-            // No secret manager - only works for sources that don't need credentials
-            source
-                .connection_string(ResolvedCredential::None)
-                .map_err(|e| DataFetchError::Connection(e.to_string()))
+    let (host, port, user, database, credential) = match source {
+        Source::Postgres {
+            host,
+            port,
+            user,
+            database,
+            credential,
+        } => (host, *port, user, database, credential),
+        _ => {
+            return Err(DataFetchError::Connection(
+                "Expected Postgres source".to_string(),
+            ))
         }
-    }
+    };
+
+    let password = credential
+        .resolve(secrets)
+        .await
+        .map_err(|e| DataFetchError::Connection(e.to_string()))?;
+
+    Ok(build_connection_string(host, port, user, database, &password))
 }
 
 /// Connect to PostgreSQL with automatic SSL retry.
