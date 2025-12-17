@@ -81,26 +81,44 @@ impl SecretManager for EncryptedSecretManager {
         let encrypted = encrypt(&self.key, value, &normalized)
             .map_err(|e| SecretError::EncryptionFailed(e.to_string()))?;
 
-        let now = Utc::now();
-
+        // Step 1: Store encrypted value
         self.catalog
-            .put_secret(&normalized, "encrypted", None, &encrypted, now)
+            .put_encrypted_secret_value(&normalized, &encrypted)
             .await
-            .map_err(|e| SecretError::Database(e.to_string()))
+            .map_err(|e| SecretError::Database(e.to_string()))?;
+
+        // Step 2: Store metadata (references the encrypted value)
+        let now = Utc::now();
+        if let Err(e) = self
+            .catalog
+            .put_secret_metadata(&normalized, "encrypted", None, now)
+            .await
+        {
+            // Rollback: delete the encrypted value we just stored
+            let _ = self.catalog.delete_encrypted_secret_value(&normalized).await;
+            return Err(SecretError::Database(e.to_string()));
+        }
+
+        Ok(())
     }
 
     async fn delete(&self, name: &str) -> Result<(), SecretError> {
         let normalized = validate_and_normalize_name(name)?;
 
+        // Delete metadata first (FK cascade will also delete encrypted value,
+        // but we explicitly delete both for clarity and future provider compatibility)
         let deleted = self
             .catalog
-            .delete_secret(&normalized)
+            .delete_secret_metadata(&normalized)
             .await
             .map_err(|e| SecretError::Database(e.to_string()))?;
 
         if !deleted {
             return Err(SecretError::NotFound(normalized));
         }
+
+        // Also explicitly delete encrypted value (may already be gone via cascade)
+        let _ = self.catalog.delete_encrypted_secret_value(&normalized).await;
 
         Ok(())
     }
@@ -126,7 +144,9 @@ impl SecretManager for EncryptedSecretManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::SqliteCatalogManager;
+    use crate::catalog::{CatalogManager, ConnectionInfo, SqliteCatalogManager, TableInfo};
+    use chrono::DateTime;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::TempDir;
 
     fn test_key() -> [u8; 32] {
@@ -270,5 +290,150 @@ mod tests {
         // Invalid base64
         let result = EncryptedSecretManager::from_base64_key("not-valid-base64!!!", catalog);
         assert!(matches!(result, Err(SecretError::EncryptionFailed(_))));
+    }
+
+    /// Mock catalog that wraps a real catalog but can be configured to fail on specific calls.
+    struct FailingCatalog {
+        inner: Arc<dyn CatalogManager>,
+        fail_put_metadata: AtomicBool,
+    }
+
+    impl std::fmt::Debug for FailingCatalog {
+        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+            f.debug_struct("FailingCatalog").finish()
+        }
+    }
+
+    #[async_trait]
+    impl CatalogManager for FailingCatalog {
+        async fn run_migrations(&self) -> anyhow::Result<()> {
+            self.inner.run_migrations().await
+        }
+        async fn list_connections(&self) -> anyhow::Result<Vec<ConnectionInfo>> {
+            self.inner.list_connections().await
+        }
+        async fn add_connection(
+            &self,
+            name: &str,
+            source_type: &str,
+            config_json: &str,
+        ) -> anyhow::Result<i32> {
+            self.inner.add_connection(name, source_type, config_json).await
+        }
+        async fn get_connection(&self, name: &str) -> anyhow::Result<Option<ConnectionInfo>> {
+            self.inner.get_connection(name).await
+        }
+        async fn add_table(
+            &self,
+            connection_id: i32,
+            schema_name: &str,
+            table_name: &str,
+            arrow_schema_json: &str,
+        ) -> anyhow::Result<i32> {
+            self.inner
+                .add_table(connection_id, schema_name, table_name, arrow_schema_json)
+                .await
+        }
+        async fn list_tables(&self, connection_id: Option<i32>) -> anyhow::Result<Vec<TableInfo>> {
+            self.inner.list_tables(connection_id).await
+        }
+        async fn get_table(
+            &self,
+            connection_id: i32,
+            schema_name: &str,
+            table_name: &str,
+        ) -> anyhow::Result<Option<TableInfo>> {
+            self.inner.get_table(connection_id, schema_name, table_name).await
+        }
+        async fn update_table_sync(&self, table_id: i32, parquet_path: &str) -> anyhow::Result<()> {
+            self.inner.update_table_sync(table_id, parquet_path).await
+        }
+        async fn clear_table_cache_metadata(
+            &self,
+            connection_id: i32,
+            schema_name: &str,
+            table_name: &str,
+        ) -> anyhow::Result<TableInfo> {
+            self.inner
+                .clear_table_cache_metadata(connection_id, schema_name, table_name)
+                .await
+        }
+        async fn clear_connection_cache_metadata(&self, name: &str) -> anyhow::Result<()> {
+            self.inner.clear_connection_cache_metadata(name).await
+        }
+        async fn delete_connection(&self, name: &str) -> anyhow::Result<()> {
+            self.inner.delete_connection(name).await
+        }
+        async fn get_secret_metadata(&self, name: &str) -> anyhow::Result<Option<SecretMetadata>> {
+            self.inner.get_secret_metadata(name).await
+        }
+        async fn put_secret_metadata(
+            &self,
+            name: &str,
+            provider: &str,
+            provider_ref: Option<&str>,
+            timestamp: DateTime<Utc>,
+        ) -> anyhow::Result<()> {
+            if self.fail_put_metadata.load(Ordering::SeqCst) {
+                return Err(anyhow::anyhow!("Simulated metadata failure"));
+            }
+            self.inner
+                .put_secret_metadata(name, provider, provider_ref, timestamp)
+                .await
+        }
+        async fn delete_secret_metadata(&self, name: &str) -> anyhow::Result<bool> {
+            self.inner.delete_secret_metadata(name).await
+        }
+        async fn list_secrets(&self) -> anyhow::Result<Vec<SecretMetadata>> {
+            self.inner.list_secrets().await
+        }
+        async fn get_encrypted_secret(&self, name: &str) -> anyhow::Result<Option<Vec<u8>>> {
+            self.inner.get_encrypted_secret(name).await
+        }
+        async fn put_encrypted_secret_value(
+            &self,
+            name: &str,
+            encrypted_value: &[u8],
+        ) -> anyhow::Result<()> {
+            self.inner.put_encrypted_secret_value(name, encrypted_value).await
+        }
+        async fn delete_encrypted_secret_value(&self, name: &str) -> anyhow::Result<bool> {
+            self.inner.delete_encrypted_secret_value(name).await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_put_rolls_back_encrypted_value_on_metadata_failure() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let inner_catalog = Arc::new(
+            SqliteCatalogManager::new(db_path.to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        inner_catalog.run_migrations().await.unwrap();
+
+        let failing_catalog = Arc::new(FailingCatalog {
+            inner: inner_catalog.clone(),
+            fail_put_metadata: AtomicBool::new(true),
+        });
+
+        let manager = EncryptedSecretManager::new(test_key(), failing_catalog);
+
+        // Attempt to put a secret - should fail on metadata
+        let result = manager.put("rollback-test", b"secret-value").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("metadata failure"));
+
+        // Verify the encrypted value was rolled back (not left orphaned)
+        let orphaned = inner_catalog.get_encrypted_secret("rollback-test").await.unwrap();
+        assert!(
+            orphaned.is_none(),
+            "Encrypted value should be rolled back when metadata fails"
+        );
+
+        // Verify no metadata was stored either
+        let metadata = inner_catalog.get_secret_metadata("rollback-test").await.unwrap();
+        assert!(metadata.is_none(), "No metadata should exist after rollback");
     }
 }

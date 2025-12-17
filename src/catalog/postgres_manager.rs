@@ -68,7 +68,7 @@ impl PostgresCatalogManager {
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS encrypted_secret_values (
-                name TEXT PRIMARY KEY REFERENCES secrets(name) ON DELETE CASCADE,
+                name TEXT PRIMARY KEY,
                 encrypted_value BYTEA NOT NULL
             )",
         )
@@ -191,14 +191,6 @@ impl CatalogManager for PostgresCatalogManager {
         self.backend.delete_connection(name).await
     }
 
-    async fn get_encrypted_secret(&self, name: &str) -> Result<Option<Vec<u8>>> {
-        sqlx::query_scalar("SELECT encrypted_value FROM encrypted_secret_values WHERE name = $1")
-            .bind(name)
-            .fetch_optional(self.backend.pool())
-            .await
-            .map_err(Into::into)
-    }
-
     async fn get_secret_metadata(&self, name: &str) -> Result<Option<SecretMetadata>> {
         #[derive(sqlx::FromRow)]
         struct Row {
@@ -220,15 +212,13 @@ impl CatalogManager for PostgresCatalogManager {
         }))
     }
 
-    async fn put_secret(
+    async fn put_secret_metadata(
         &self,
         name: &str,
         provider: &str,
         provider_ref: Option<&str>,
-        encrypted_value: &[u8],
         timestamp: DateTime<Utc>,
     ) -> Result<()> {
-        // Upsert into secrets table
         sqlx::query(
             "INSERT INTO secrets (name, provider, provider_ref, created_at, updated_at) \
              VALUES ($1, $2, $3, $4, $5) \
@@ -245,7 +235,27 @@ impl CatalogManager for PostgresCatalogManager {
         .execute(self.backend.pool())
         .await?;
 
-        // Upsert into encrypted_secret_values table
+        Ok(())
+    }
+
+    async fn delete_secret_metadata(&self, name: &str) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM secrets WHERE name = $1")
+            .bind(name)
+            .execute(self.backend.pool())
+            .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn get_encrypted_secret(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        sqlx::query_scalar("SELECT encrypted_value FROM encrypted_secret_values WHERE name = $1")
+            .bind(name)
+            .fetch_optional(self.backend.pool())
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn put_encrypted_secret_value(&self, name: &str, encrypted_value: &[u8]) -> Result<()> {
         sqlx::query(
             "INSERT INTO encrypted_secret_values (name, encrypted_value) \
              VALUES ($1, $2) \
@@ -260,8 +270,8 @@ impl CatalogManager for PostgresCatalogManager {
         Ok(())
     }
 
-    async fn delete_secret(&self, name: &str) -> Result<bool> {
-        let result = sqlx::query("DELETE FROM secrets WHERE name = $1")
+    async fn delete_encrypted_secret_value(&self, name: &str) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM encrypted_secret_values WHERE name = $1")
             .bind(name)
             .execute(self.backend.pool())
             .await?;

@@ -71,27 +71,34 @@ pub trait CatalogManager: Debug + Send + Sync {
     /// Delete connection and all associated table rows from metadata.
     async fn delete_connection(&self, name: &str) -> Result<()>;
 
-    // Secret management methods
-
-    /// Get the encrypted value for a secret.
-    async fn get_encrypted_secret(&self, name: &str) -> Result<Option<Vec<u8>>>;
+    // Secret management methods - metadata (used by all secret providers)
 
     /// Get metadata for a secret (without value).
     async fn get_secret_metadata(&self, name: &str) -> Result<Option<SecretMetadata>>;
 
-    /// Store or update a secret.
-    async fn put_secret(
+    /// Store or update secret metadata. Called after the secret value is stored.
+    async fn put_secret_metadata(
         &self,
         name: &str,
         provider: &str,
         provider_ref: Option<&str>,
-        encrypted_value: &[u8],
         timestamp: DateTime<Utc>,
     ) -> Result<()>;
 
-    /// Delete a secret. Returns true if the secret existed.
-    async fn delete_secret(&self, name: &str) -> Result<bool>;
+    /// Delete secret metadata. Returns true if the secret existed.
+    async fn delete_secret_metadata(&self, name: &str) -> Result<bool>;
 
     /// List all secrets (metadata only).
     async fn list_secrets(&self) -> Result<Vec<SecretMetadata>>;
+
+    // Secret management methods - encrypted storage (used by EncryptedSecretManager only)
+
+    /// Get the encrypted value for a secret.
+    async fn get_encrypted_secret(&self, name: &str) -> Result<Option<Vec<u8>>>;
+
+    /// Store or update an encrypted secret value.
+    async fn put_encrypted_secret_value(&self, name: &str, encrypted_value: &[u8]) -> Result<()>;
+
+    /// Delete an encrypted secret value. Returns true if it existed.
+    async fn delete_encrypted_secret_value(&self, name: &str) -> Result<bool>;
 }
