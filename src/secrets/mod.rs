@@ -256,19 +256,22 @@ impl SecretManager {
     /// 3. Delete metadata row
     ///
     /// If step 2 fails, the secret remains in 'pending_delete' state.
+    /// Subsequent delete calls can retry (we use any_status lookup).
     /// If step 3 fails, the secret is effectively deleted (value gone).
     pub async fn delete(&self, name: &str) -> Result<(), SecretError> {
         let normalized = validate_and_normalize_name(name)?;
 
-        // Fetch metadata to get provider_ref for the backend
+        // Fetch metadata to get provider_ref for the backend.
+        // Use any_status so we can retry deletion of pending_delete secrets.
         let metadata = self
             .catalog
-            .get_secret_metadata(&normalized)
+            .get_secret_metadata_any_status(&normalized)
             .await
             .map_err(|e| SecretError::Database(e.to_string()))?
             .ok_or_else(|| SecretError::NotFound(normalized.clone()))?;
 
         // Phase 1: Mark as pending_delete (secret becomes invisible to reads)
+        // This is idempotent if already pending_delete.
         self.catalog
             .set_secret_status(&normalized, "pending_delete")
             .await
@@ -457,5 +460,45 @@ mod tests {
 
         let result = manager.update("invalid name!", b"value").await;
         assert!(matches!(result, Err(SecretError::InvalidName(_))));
+    }
+
+    #[tokio::test]
+    async fn test_delete_retry_after_pending_delete() {
+        // Simulates the scenario where backend delete fails, leaving secret in pending_delete.
+        // Subsequent delete calls should still work (not return NotFound).
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let catalog = Arc::new(
+            SqliteCatalogManager::new(db_path.to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        catalog.run_migrations().await.unwrap();
+
+        let backend = Arc::new(EncryptedCatalogBackend::new(test_key(), catalog.clone()));
+        let manager = SecretManager::new(backend, catalog.clone(), ENCRYPTED_PROVIDER_TYPE);
+
+        // Create a secret
+        manager.create("retry-delete", b"value").await.unwrap();
+
+        // Simulate a failed delete by setting status to pending_delete directly
+        catalog
+            .set_secret_status("retry-delete", "pending_delete")
+            .await
+            .unwrap();
+
+        // Secret should no longer be visible to normal reads
+        let result = manager.get("retry-delete").await;
+        assert!(matches!(result, Err(SecretError::NotFound(_))));
+
+        // But delete should still work (this was the bug - it would return NotFound)
+        manager.delete("retry-delete").await.unwrap();
+
+        // Verify it's fully deleted
+        let any_status = catalog
+            .get_secret_metadata_any_status("retry-delete")
+            .await
+            .unwrap();
+        assert!(any_status.is_none());
     }
 }
