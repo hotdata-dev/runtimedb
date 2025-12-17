@@ -2,7 +2,7 @@ use crate::http::handlers::{
     create_connection_handler, create_secret_handler, delete_connection_handler,
     delete_secret_handler, get_connection_handler, get_secret_handler, health_handler,
     list_connections_handler, list_secrets_handler, purge_connection_cache_handler,
-    purge_table_cache_handler, query_handler, tables_handler,
+    purge_table_cache_handler, query_handler, tables_handler, update_secret_handler,
 };
 use crate::RivetEngine;
 use axum::routing::{delete, get, post};
@@ -51,7 +51,9 @@ impl AppServer {
                 )
                 .route(
                     PATH_SECRET,
-                    get(get_secret_handler).delete(delete_secret_handler),
+                    get(get_secret_handler)
+                        .put(update_secret_handler)
+                        .delete(delete_secret_handler),
                 )
                 .with_state(engine.clone()),
             engine,

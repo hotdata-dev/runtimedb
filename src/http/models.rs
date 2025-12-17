@@ -82,11 +82,24 @@ pub struct CreateSecretRequest {
     pub value: String,
 }
 
+/// Request body for PUT /secrets/{name}
+#[derive(Debug, Deserialize)]
+pub struct UpdateSecretRequest {
+    pub value: String,
+}
+
 /// Response body for POST /secrets
 #[derive(Debug, Serialize)]
 pub struct CreateSecretResponse {
     pub name: String,
     pub created_at: DateTime<Utc>,
+}
+
+/// Response body for PUT /secrets/{name}
+#[derive(Debug, Serialize)]
+pub struct UpdateSecretResponse {
+    pub name: String,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// Response body for GET /secrets

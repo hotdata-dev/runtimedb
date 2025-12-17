@@ -7,7 +7,9 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rand::RngCore;
-use rivetdb::http::app_server::{AppServer, PATH_CONNECTIONS, PATH_QUERY, PATH_TABLES};
+use rivetdb::http::app_server::{
+    AppServer, PATH_CONNECTIONS, PATH_QUERY, PATH_SECRET, PATH_SECRETS, PATH_TABLES,
+};
 use rivetdb::RivetEngine;
 use serde_json::json;
 use tempfile::TempDir;
@@ -452,6 +454,282 @@ async fn test_create_connection_missing_fields() -> Result<()> {
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&json!({
                     "name": "test_conn"
+                }))?))?,
+        )
+        .await?;
+
+    // Axum returns UNPROCESSABLE_ENTITY (422) when required fields are missing
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    Ok(())
+}
+
+// ==================== Secret Endpoint Tests ====================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_secrets_empty() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(PATH_SECRETS)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert!(json["secrets"].is_array());
+    assert_eq!(json["secrets"].as_array().unwrap().len(), 0);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_and_get_secret() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RivetEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create a secret
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_SECRETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "test_secret",
+                    "value": "super_secret_value"
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(json["name"], "test_secret");
+    assert!(json["created_at"].is_string());
+
+    // Fetch the secret metadata
+    let secret_path = PATH_SECRET.replace("{name}", "test_secret");
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&secret_path)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(json["name"], "test_secret");
+    assert!(json["created_at"].is_string());
+    assert!(json["updated_at"].is_string());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_secrets_after_create() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RivetEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create two secrets
+    for name in ["secret_one", "secret_two"] {
+        let response = app
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(PATH_SECRETS)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&json!({
+                        "name": name,
+                        "value": format!("value_for_{}", name)
+                    }))?))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    // List secrets
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(PATH_SECRETS)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    let secrets = json["secrets"].as_array().unwrap();
+    assert_eq!(secrets.len(), 2);
+
+    let names: Vec<&str> = secrets
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"secret_one"));
+    assert!(names.contains(&"secret_two"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_delete_secret() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RivetEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create a secret
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_SECRETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "to_delete",
+                    "value": "will_be_deleted"
+                }))?))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Delete the secret
+    let secret_path = PATH_SECRET.replace("{name}", "to_delete");
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(&secret_path)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    // Verify it's gone by listing
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(PATH_SECRETS)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(json["secrets"].as_array().unwrap().len(), 0);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_nonexistent_secret() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    let secret_path = PATH_SECRET.replace("{name}", "does_not_exist");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&secret_path)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not found"));
+    assert_eq!(json["error"]["code"], "NOT_FOUND");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_delete_nonexistent_secret() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    let secret_path = PATH_SECRET.replace("{name}", "does_not_exist");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(&secret_path)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_secret_missing_fields() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_SECRETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "test_secret"
+                    // missing "value" field
                 }))?))?,
         )
         .await?;

@@ -3,7 +3,7 @@ mod encrypted_catalog_backend;
 mod encryption;
 mod validation;
 
-pub use backend::{BackendError, BackendRead, BackendWrite, SecretBackend, SecretRecord, WriteStatus};
+pub use backend::{BackendError, BackendRead, BackendWrite, SecretBackend, SecretRecord};
 pub use encrypted_catalog_backend::{EncryptedCatalogBackend, PROVIDER_TYPE as ENCRYPTED_PROVIDER_TYPE};
 pub use encryption::{decrypt, encrypt, DecryptError, EncryptError};
 pub use validation::{validate_and_normalize_name, ValidationError};
@@ -29,6 +29,9 @@ pub struct SecretMetadata {
 pub enum SecretError {
     #[error("Secret '{0}' not found")]
     NotFound(String),
+
+    #[error("Secret '{0}' already exists")]
+    AlreadyExists(String),
 
     #[error("Secret manager not configured")]
     NotConfigured,
@@ -140,34 +143,91 @@ impl SecretManager {
             .ok_or_else(|| SecretError::NotFound(normalized))
     }
 
-    /// Store a secret (create or update).
+    /// Create a new secret.
     ///
-    /// The `record` should contain the secret name and optionally the `provider_ref`
-    /// from existing metadata (for updates). For new secrets, `provider_ref` should be `None`.
-    pub async fn put(&self, record: &SecretRecord, value: &[u8]) -> Result<(), SecretError> {
-        let normalized = validate_and_normalize_name(&record.name)?;
+    /// Fails with `AlreadyExists` if a secret with this name already exists.
+    /// For updating an existing secret, use `update` instead.
+    pub async fn create(&self, name: &str, value: &[u8]) -> Result<(), SecretError> {
+        let normalized = validate_and_normalize_name(name)?;
 
-        let normalized_record = SecretRecord {
+        // Check if secret already exists
+        let existing = self
+            .catalog
+            .get_secret_metadata(&normalized)
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?;
+
+        if existing.is_some() {
+            return Err(SecretError::AlreadyExists(normalized));
+        }
+
+        let record = SecretRecord {
             name: normalized.clone(),
-            provider_ref: record.provider_ref.clone(),
+            provider_ref: None, // New secrets never have a provider_ref
         };
 
         // Store via backend
-        let write = self.backend.put(&normalized_record, value).await?;
+        let write = self.backend.put(&record, value).await?;
 
-        // Update metadata
+        // Create metadata
         let now = Utc::now();
         if let Err(e) = self
             .catalog
-            .put_secret_metadata(&normalized, &self.provider_type, write.provider_ref.as_deref(), now)
+            .put_secret_metadata(
+                &normalized,
+                &self.provider_type,
+                write.provider_ref.as_deref(),
+                now,
+            )
             .await
         {
-            // Rollback: delete the value we just stored (only if it was created)
-            if write.status == WriteStatus::Created {
-                let _ = self.backend.delete(&normalized_record).await;
-            }
+            // Rollback: delete the value we just stored
+            let _ = self.backend.delete(&record).await;
             return Err(SecretError::Database(e.to_string()));
         }
+
+        Ok(())
+    }
+
+    /// Update an existing secret's value.
+    ///
+    /// Fails with `NotFound` if the secret doesn't exist.
+    /// For creating a new secret, use `create` instead.
+    pub async fn update(&self, name: &str, value: &[u8]) -> Result<(), SecretError> {
+        let normalized = validate_and_normalize_name(name)?;
+
+        // Load existing metadata to get provider_ref
+        let metadata = self
+            .catalog
+            .get_secret_metadata(&normalized)
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?
+            .ok_or_else(|| SecretError::NotFound(normalized.clone()))?;
+
+        let existing_ref = metadata.provider_ref;
+
+        let record = SecretRecord {
+            name: normalized.clone(),
+            provider_ref: existing_ref.clone(),
+        };
+
+        // Store via backend (update path)
+        let write = self.backend.put(&record, value).await?;
+
+        // Use new provider_ref if backend returned one, otherwise preserve existing
+        let updated_ref = write.provider_ref.or(existing_ref);
+
+        // Update metadata timestamp
+        let now = Utc::now();
+        self.catalog
+            .put_secret_metadata(
+                &normalized,
+                &self.provider_type,
+                updated_ref.as_deref(),
+                now,
+            )
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?;
 
         Ok(())
     }
@@ -238,36 +298,36 @@ mod tests {
         )
     }
 
-    fn record(name: &str) -> SecretRecord {
-        SecretRecord {
-            name: name.to_string(),
-            provider_ref: None,
-        }
-    }
-
     #[tokio::test]
-    async fn test_put_and_get() {
+    async fn test_create_and_get() {
         let (manager, _dir) = test_manager().await;
         let value = b"my-secret-password";
 
-        manager.put(&record("my-secret"), value).await.unwrap();
+        manager.create("my-secret", value).await.unwrap();
         let retrieved = manager.get("my-secret").await.unwrap();
 
         assert_eq!(retrieved, value);
     }
 
     #[tokio::test]
-    async fn test_put_and_get_string() {
+    async fn test_create_and_get_string() {
         let (manager, _dir) = test_manager().await;
         let value = "my-string-secret";
 
-        manager
-            .put(&record("string-secret"), value.as_bytes())
-            .await
-            .unwrap();
+        manager.create("string-secret", value.as_bytes()).await.unwrap();
         let retrieved = manager.get_string("string-secret").await.unwrap();
 
         assert_eq!(retrieved, value);
+    }
+
+    #[tokio::test]
+    async fn test_create_already_exists() {
+        let (manager, _dir) = test_manager().await;
+
+        manager.create("duplicate", b"first").await.unwrap();
+        let result = manager.create("duplicate", b"second").await;
+
+        assert!(matches!(result, Err(SecretError::AlreadyExists(_))));
     }
 
     #[tokio::test]
@@ -279,10 +339,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_update_existing() {
+        let (manager, _dir) = test_manager().await;
+
+        manager.create("updatable", b"old-value").await.unwrap();
+        manager.update("updatable", b"new-value").await.unwrap();
+
+        let retrieved = manager.get("updatable").await.unwrap();
+        assert_eq!(retrieved, b"new-value");
+    }
+
+    #[tokio::test]
+    async fn test_update_not_found() {
+        let (manager, _dir) = test_manager().await;
+        let result = manager.update("nonexistent", b"value").await;
+
+        assert!(matches!(result, Err(SecretError::NotFound(_))));
+    }
+
+    #[tokio::test]
     async fn test_delete() {
         let (manager, _dir) = test_manager().await;
 
-        manager.put(&record("to-delete"), b"value").await.unwrap();
+        manager.create("to-delete", b"value").await.unwrap();
         manager.delete("to-delete").await.unwrap();
 
         let result = manager.get("to-delete").await;
@@ -301,8 +380,8 @@ mod tests {
     async fn test_list_and_metadata() {
         let (manager, _dir) = test_manager().await;
 
-        manager.put(&record("secret-a"), b"value-a").await.unwrap();
-        manager.put(&record("secret-b"), b"value-b").await.unwrap();
+        manager.create("secret-a", b"value-a").await.unwrap();
+        manager.create("secret-b", b"value-b").await.unwrap();
 
         let list = manager.list().await.unwrap();
         assert_eq!(list.len(), 2);
@@ -315,7 +394,7 @@ mod tests {
     async fn test_name_normalization() {
         let (manager, _dir) = test_manager().await;
 
-        manager.put(&record("My-Secret"), b"value").await.unwrap();
+        manager.create("My-Secret", b"value").await.unwrap();
 
         // Should be able to retrieve with different case
         let retrieved = manager.get("my-secret").await.unwrap();
@@ -323,21 +402,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_invalid_name() {
+    async fn test_invalid_name_on_create() {
         let (manager, _dir) = test_manager().await;
 
-        let result = manager.put(&record("invalid name!"), b"value").await;
+        let result = manager.create("invalid name!", b"value").await;
         assert!(matches!(result, Err(SecretError::InvalidName(_))));
     }
 
     #[tokio::test]
-    async fn test_update_existing() {
+    async fn test_invalid_name_on_update() {
         let (manager, _dir) = test_manager().await;
 
-        manager.put(&record("updatable"), b"old-value").await.unwrap();
-        manager.put(&record("updatable"), b"new-value").await.unwrap();
-
-        let retrieved = manager.get("updatable").await.unwrap();
-        assert_eq!(retrieved, b"new-value");
+        let result = manager.update("invalid name!", b"value").await;
+        assert!(matches!(result, Err(SecretError::InvalidName(_))));
     }
 }

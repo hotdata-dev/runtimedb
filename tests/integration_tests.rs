@@ -11,7 +11,6 @@ use axum::{
     Router,
 };
 use rivetdb::http::app_server::{AppServer, PATH_CONNECTIONS, PATH_QUERY, PATH_TABLES};
-use rivetdb::secrets::SecretRecord;
 use rivetdb::source::Source;
 use rivetdb::RivetEngine;
 use serde_json::json;
@@ -529,11 +528,9 @@ impl TestHarness {
     /// Store a secret for use in connection credentials.
     async fn store_secret(&self, name: &str, value: &str) {
         let secret_manager = self.engine_executor.engine.secret_manager();
-        let record = SecretRecord {
-            name: name.to_string(),
-            provider_ref: None,
-        };
-        secret_manager.put(&record, value.as_bytes()).await
+        secret_manager
+            .create(name, value.as_bytes())
+            .await
             .expect("Failed to store test secret");
     }
 }

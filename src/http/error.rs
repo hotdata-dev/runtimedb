@@ -93,6 +93,9 @@ impl From<crate::secrets::SecretError> for ApiError {
             SecretError::NotFound(name) => {
                 ApiError::not_found(format!("Secret '{}' not found", name))
             }
+            SecretError::AlreadyExists(name) => {
+                ApiError::conflict(format!("Secret '{}' already exists", name))
+            }
             SecretError::NotConfigured => {
                 ApiError::service_unavailable("Secret manager not configured")
             }

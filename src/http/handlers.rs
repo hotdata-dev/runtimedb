@@ -3,10 +3,9 @@ use crate::http::models::{
     ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse, CreateSecretRequest,
     CreateSecretResponse, GetConnectionResponse, GetSecretResponse, ListConnectionsResponse,
     ListSecretsResponse, QueryRequest, QueryResponse, SecretMetadataResponse, TableInfo,
-    TablesResponse,
+    TablesResponse, UpdateSecretRequest, UpdateSecretResponse,
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
-use crate::secrets::SecretRecord;
 use crate::source::Source;
 use crate::RivetEngine;
 use axum::{
@@ -337,11 +336,9 @@ pub async fn create_secret_handler(
 ) -> Result<(StatusCode, Json<CreateSecretResponse>), ApiError> {
     let secret_manager = engine.secret_manager();
 
-    let record = SecretRecord {
-        name: request.name.clone(),
-        provider_ref: None,
-    };
-    secret_manager.put(&record, request.value.as_bytes()).await?;
+    secret_manager
+        .create(&request.name, request.value.as_bytes())
+        .await?;
 
     let metadata = secret_manager.get_metadata(&request.name).await?;
 
@@ -352,6 +349,26 @@ pub async fn create_secret_handler(
             created_at: metadata.created_at,
         }),
     ))
+}
+
+/// Handler for PUT /secrets/{name}
+pub async fn update_secret_handler(
+    State(engine): State<Arc<RivetEngine>>,
+    Path(name): Path<String>,
+    Json(request): Json<UpdateSecretRequest>,
+) -> Result<Json<UpdateSecretResponse>, ApiError> {
+    let secret_manager = engine.secret_manager();
+
+    secret_manager
+        .update(&name, request.value.as_bytes())
+        .await?;
+
+    let metadata = secret_manager.get_metadata(&name).await?;
+
+    Ok(Json(UpdateSecretResponse {
+        name: metadata.name,
+        updated_at: metadata.updated_at,
+    }))
 }
 
 /// Handler for GET /secrets
