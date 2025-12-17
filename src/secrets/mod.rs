@@ -2,7 +2,7 @@ mod encrypted;
 mod encryption;
 mod validation;
 
-pub use encrypted::EncryptedSecretManager;
+pub use encrypted::{EncryptedSecretManager, PROVIDER_TYPE as ENCRYPTED_PROVIDER_TYPE};
 
 pub use encryption::{decrypt, encrypt, DecryptError, EncryptError};
 pub use validation::{validate_and_normalize_name, ValidationError};

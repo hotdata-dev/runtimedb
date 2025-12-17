@@ -1,6 +1,9 @@
 //! SecretManager implementation that encrypts values using AES-256-GCM-SIV.
 
 use crate::catalog::CatalogManager;
+
+/// Provider type identifier for secrets encrypted with this manager.
+pub const PROVIDER_TYPE: &str = "encrypted";
 use crate::secrets::{
     decrypt, encrypt, validate_and_normalize_name, SecretError, SecretManager, SecretMetadata,
 };
@@ -91,7 +94,7 @@ impl SecretManager for EncryptedSecretManager {
         let now = Utc::now();
         if let Err(e) = self
             .catalog
-            .put_secret_metadata(&normalized, "encrypted", None, now)
+            .put_secret_metadata(&normalized, PROVIDER_TYPE, None, now)
             .await
         {
             // Rollback: delete the encrypted value we just stored
