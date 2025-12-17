@@ -145,20 +145,37 @@ impl SecretManager {
 
     /// Create a new secret.
     ///
-    /// Fails with `AlreadyExists` if a secret with this name already exists.
+    /// Fails with `AlreadyExists` if an active secret with this name exists.
+    /// If a `pending_delete` record exists, it will be cleaned up and replaced.
     /// For updating an existing secret, use `update` instead.
     pub async fn create(&self, name: &str, value: &[u8]) -> Result<(), SecretError> {
         let normalized = validate_and_normalize_name(name)?;
 
-        // Check if secret already exists
-        let existing = self
+        // Check if an active secret already exists
+        let existing_active = self
             .catalog
             .get_secret_metadata(&normalized)
             .await
             .map_err(|e| SecretError::Database(e.to_string()))?;
 
-        if existing.is_some() {
+        if existing_active.is_some() {
             return Err(SecretError::AlreadyExists(normalized));
+        }
+
+        // Check for stale pending_delete record and clean it up
+        let existing_any = self
+            .catalog
+            .get_secret_metadata_any_status(&normalized)
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?;
+
+        if existing_any.is_some() {
+            // Stale record from failed delete - clean it up
+            tracing::info!(
+                secret = %normalized,
+                "Cleaning up stale pending_delete metadata before create"
+            );
+            let _ = self.catalog.delete_secret_metadata(&normalized).await;
         }
 
         let record = SecretRecord {
@@ -232,7 +249,14 @@ impl SecretManager {
         Ok(())
     }
 
-    /// Delete a secret.
+    /// Delete a secret using three-phase commit.
+    ///
+    /// 1. Mark metadata as 'pending_delete' (secret becomes invisible)
+    /// 2. Delete from backend
+    /// 3. Delete metadata row
+    ///
+    /// If step 2 fails, the secret remains in 'pending_delete' state.
+    /// If step 3 fails, the secret is effectively deleted (value gone).
     pub async fn delete(&self, name: &str) -> Result<(), SecretError> {
         let normalized = validate_and_normalize_name(name)?;
 
@@ -244,25 +268,35 @@ impl SecretManager {
             .map_err(|e| SecretError::Database(e.to_string()))?
             .ok_or_else(|| SecretError::NotFound(normalized.clone()))?;
 
-        // Delete from backend first using provider_ref from metadata
+        // Phase 1: Mark as pending_delete (secret becomes invisible to reads)
+        self.catalog
+            .set_secret_status(&normalized, "pending_delete")
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?;
+
+        // Phase 2: Delete from backend
         let record = SecretRecord {
             name: normalized.clone(),
             provider_ref: metadata.provider_ref,
         };
 
         if let Err(e) = self.backend.delete(&record).await {
-            tracing::error!(secret = %normalized, error = %e, "Failed to delete secret from backend");
+            tracing::error!(
+                secret = %normalized,
+                error = %e,
+                "Failed to delete secret from backend; secret left in pending_delete state"
+            );
             return Err(e.into());
         }
 
-        // Backend succeeded, now delete metadata
+        // Phase 3: Delete metadata row
         if let Err(e) = self.catalog.delete_secret_metadata(&normalized).await {
-            // Backend value is gone but metadata remains - log but don't fail
-            // The secret is effectively deleted (value gone), metadata is orphaned
+            // Backend value is gone but metadata remains in pending_delete
+            // This is acceptable - create will clean it up
             tracing::warn!(
                 secret = %normalized,
                 error = %e,
-                "Secret value deleted but failed to remove metadata"
+                "Secret value deleted but failed to remove metadata; will be cleaned up on next create"
             );
         }
 

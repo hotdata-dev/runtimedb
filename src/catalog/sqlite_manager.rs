@@ -75,6 +75,7 @@ impl SqliteCatalogManager {
                 name TEXT PRIMARY KEY,
                 provider TEXT NOT NULL,
                 provider_ref TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -183,6 +184,30 @@ impl CatalogManager for SqliteCatalogManager {
         }
 
         let row: Option<Row> = sqlx::query_as(
+            "SELECT name, provider_ref, created_at, updated_at FROM secrets WHERE name = ? AND status = 'active'",
+        )
+        .bind(name)
+        .fetch_optional(self.backend.pool())
+        .await?;
+
+        Ok(row.map(|r| SecretMetadata {
+            name: r.name,
+            provider_ref: r.provider_ref,
+            created_at: r.created_at.parse().unwrap_or_else(|_| Utc::now()),
+            updated_at: r.updated_at.parse().unwrap_or_else(|_| Utc::now()),
+        }))
+    }
+
+    async fn get_secret_metadata_any_status(&self, name: &str) -> Result<Option<SecretMetadata>> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            name: String,
+            provider_ref: Option<String>,
+            created_at: String,
+            updated_at: String,
+        }
+
+        let row: Option<Row> = sqlx::query_as(
             "SELECT name, provider_ref, created_at, updated_at FROM secrets WHERE name = ?",
         )
         .bind(name)
@@ -207,11 +232,12 @@ impl CatalogManager for SqliteCatalogManager {
         let ts = timestamp.to_rfc3339();
 
         sqlx::query(
-            "INSERT INTO secrets (name, provider, provider_ref, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?) \
+            "INSERT INTO secrets (name, provider, provider_ref, status, created_at, updated_at) \
+             VALUES (?, ?, ?, 'active', ?, ?) \
              ON CONFLICT (name) DO UPDATE SET \
              provider = excluded.provider, \
              provider_ref = excluded.provider_ref, \
+             status = 'active', \
              updated_at = excluded.updated_at",
         )
         .bind(name)
@@ -223,6 +249,16 @@ impl CatalogManager for SqliteCatalogManager {
         .await?;
 
         Ok(())
+    }
+
+    async fn set_secret_status(&self, name: &str, status: &str) -> Result<bool> {
+        let result = sqlx::query("UPDATE secrets SET status = ? WHERE name = ?")
+            .bind(status)
+            .bind(name)
+            .execute(self.backend.pool())
+            .await?;
+
+        Ok(result.rows_affected() > 0)
     }
 
     async fn delete_secret_metadata(&self, name: &str) -> Result<bool> {
@@ -276,7 +312,7 @@ impl CatalogManager for SqliteCatalogManager {
         }
 
         let rows: Vec<Row> = sqlx::query_as(
-            "SELECT name, provider_ref, created_at, updated_at FROM secrets ORDER BY name",
+            "SELECT name, provider_ref, created_at, updated_at FROM secrets WHERE status = 'active' ORDER BY name",
         )
         .fetch_all(self.backend.pool())
         .await?;

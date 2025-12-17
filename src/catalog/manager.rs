@@ -73,10 +73,14 @@ pub trait CatalogManager: Debug + Send + Sync {
 
     // Secret management methods - metadata (used by all secret providers)
 
-    /// Get metadata for a secret (without value).
+    /// Get metadata for an active secret (without value).
+    /// Returns None for secrets with status != 'active'.
     async fn get_secret_metadata(&self, name: &str) -> Result<Option<SecretMetadata>>;
 
-    /// Store or update secret metadata. Called after the secret value is stored.
+    /// Get metadata for a secret regardless of status (for internal cleanup).
+    async fn get_secret_metadata_any_status(&self, name: &str) -> Result<Option<SecretMetadata>>;
+
+    /// Store or update secret metadata. Sets status to 'active'.
     async fn put_secret_metadata(
         &self,
         name: &str,
@@ -85,10 +89,13 @@ pub trait CatalogManager: Debug + Send + Sync {
         timestamp: DateTime<Utc>,
     ) -> Result<()>;
 
+    /// Set the status of a secret ('active' or 'pending_delete').
+    async fn set_secret_status(&self, name: &str, status: &str) -> Result<bool>;
+
     /// Delete secret metadata. Returns true if the secret existed.
     async fn delete_secret_metadata(&self, name: &str) -> Result<bool>;
 
-    /// List all secrets (metadata only).
+    /// List all active secrets (metadata only).
     async fn list_secrets(&self) -> Result<Vec<SecretMetadata>>;
 
     // Secret management methods - encrypted storage (used by EncryptedSecretManager only)
