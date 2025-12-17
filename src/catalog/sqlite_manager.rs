@@ -177,18 +177,21 @@ impl CatalogManager for SqliteCatalogManager {
         #[derive(sqlx::FromRow)]
         struct Row {
             name: String,
+            provider_ref: Option<String>,
             created_at: String,
             updated_at: String,
         }
 
-        let row: Option<Row> =
-            sqlx::query_as("SELECT name, created_at, updated_at FROM secrets WHERE name = ?")
-                .bind(name)
-                .fetch_optional(self.backend.pool())
-                .await?;
+        let row: Option<Row> = sqlx::query_as(
+            "SELECT name, provider_ref, created_at, updated_at FROM secrets WHERE name = ?",
+        )
+        .bind(name)
+        .fetch_optional(self.backend.pool())
+        .await?;
 
         Ok(row.map(|r| SecretMetadata {
             name: r.name,
+            provider_ref: r.provider_ref,
             created_at: r.created_at.parse().unwrap_or_else(|_| Utc::now()),
             updated_at: r.updated_at.parse().unwrap_or_else(|_| Utc::now()),
         }))
@@ -267,19 +270,22 @@ impl CatalogManager for SqliteCatalogManager {
         #[derive(sqlx::FromRow)]
         struct Row {
             name: String,
+            provider_ref: Option<String>,
             created_at: String,
             updated_at: String,
         }
 
-        let rows: Vec<Row> =
-            sqlx::query_as("SELECT name, created_at, updated_at FROM secrets ORDER BY name")
-                .fetch_all(self.backend.pool())
-                .await?;
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT name, provider_ref, created_at, updated_at FROM secrets ORDER BY name",
+        )
+        .fetch_all(self.backend.pool())
+        .await?;
 
         Ok(rows
             .into_iter()
             .map(|r| SecretMetadata {
                 name: r.name,
+                provider_ref: r.provider_ref,
                 created_at: r.created_at.parse().unwrap_or_else(|_| Utc::now()),
                 updated_at: r.updated_at.parse().unwrap_or_else(|_| Utc::now()),
             })

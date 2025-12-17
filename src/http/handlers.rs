@@ -6,6 +6,7 @@ use crate::http::models::{
     TablesResponse,
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
+use crate::secrets::SecretRecord;
 use crate::source::Source;
 use crate::RivetEngine;
 use axum::{
@@ -336,9 +337,11 @@ pub async fn create_secret_handler(
 ) -> Result<(StatusCode, Json<CreateSecretResponse>), ApiError> {
     let secret_manager = engine.secret_manager();
 
-    secret_manager
-        .put(&request.name, request.value.as_bytes())
-        .await?;
+    let record = SecretRecord {
+        name: request.name.clone(),
+        provider_ref: None,
+    };
+    secret_manager.put(&record, request.value.as_bytes()).await?;
 
     let metadata = secret_manager.get_metadata(&request.name).await?;
 

@@ -195,18 +195,21 @@ impl CatalogManager for PostgresCatalogManager {
         #[derive(sqlx::FromRow)]
         struct Row {
             name: String,
+            provider_ref: Option<String>,
             created_at: DateTime<Utc>,
             updated_at: DateTime<Utc>,
         }
 
-        let row: Option<Row> =
-            sqlx::query_as("SELECT name, created_at, updated_at FROM secrets WHERE name = $1")
-                .bind(name)
-                .fetch_optional(self.backend.pool())
-                .await?;
+        let row: Option<Row> = sqlx::query_as(
+            "SELECT name, provider_ref, created_at, updated_at FROM secrets WHERE name = $1",
+        )
+        .bind(name)
+        .fetch_optional(self.backend.pool())
+        .await?;
 
         Ok(row.map(|r| SecretMetadata {
             name: r.name,
+            provider_ref: r.provider_ref,
             created_at: r.created_at,
             updated_at: r.updated_at,
         }))
@@ -283,19 +286,22 @@ impl CatalogManager for PostgresCatalogManager {
         #[derive(sqlx::FromRow)]
         struct Row {
             name: String,
+            provider_ref: Option<String>,
             created_at: DateTime<Utc>,
             updated_at: DateTime<Utc>,
         }
 
-        let rows: Vec<Row> =
-            sqlx::query_as("SELECT name, created_at, updated_at FROM secrets ORDER BY name")
-                .fetch_all(self.backend.pool())
-                .await?;
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT name, provider_ref, created_at, updated_at FROM secrets ORDER BY name",
+        )
+        .fetch_all(self.backend.pool())
+        .await?;
 
         Ok(rows
             .into_iter()
             .map(|r| SecretMetadata {
                 name: r.name,
+                provider_ref: r.provider_ref,
                 created_at: r.created_at,
                 updated_at: r.updated_at,
             })

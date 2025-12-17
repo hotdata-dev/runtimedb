@@ -19,6 +19,7 @@ use chrono::{DateTime, Utc as ChronoUtc};
 #[derive(Debug, Clone)]
 pub struct SecretMetadata {
     pub name: String,
+    pub provider_ref: Option<String>,
     pub created_at: DateTime<ChronoUtc>,
     pub updated_at: DateTime<ChronoUtc>,
 }
@@ -100,8 +101,8 @@ impl SecretManager {
     pub async fn get(&self, name: &str) -> Result<Vec<u8>, SecretError> {
         let normalized = validate_and_normalize_name(name)?;
 
-        // Verify secret exists via metadata check
-        let _metadata = self
+        // Fetch metadata to get provider_ref for the backend
+        let metadata = self
             .catalog
             .get_secret_metadata(&normalized)
             .await
@@ -110,7 +111,7 @@ impl SecretManager {
 
         let record = SecretRecord {
             name: normalized.clone(),
-            provider_ref: None, // TODO: extend SecretMetadata to include provider_ref
+            provider_ref: metadata.provider_ref,
         };
 
         let read = self
@@ -140,16 +141,19 @@ impl SecretManager {
     }
 
     /// Store a secret (create or update).
-    pub async fn put(&self, name: &str, value: &[u8]) -> Result<(), SecretError> {
-        let normalized = validate_and_normalize_name(name)?;
+    ///
+    /// The `record` should contain the secret name and optionally the `provider_ref`
+    /// from existing metadata (for updates). For new secrets, `provider_ref` should be `None`.
+    pub async fn put(&self, record: &SecretRecord, value: &[u8]) -> Result<(), SecretError> {
+        let normalized = validate_and_normalize_name(&record.name)?;
 
-        let record = SecretRecord {
+        let normalized_record = SecretRecord {
             name: normalized.clone(),
-            provider_ref: None,
+            provider_ref: record.provider_ref.clone(),
         };
 
         // Store via backend
-        let write = self.backend.put(&record, value).await?;
+        let write = self.backend.put(&normalized_record, value).await?;
 
         // Update metadata
         let now = Utc::now();
@@ -160,7 +164,7 @@ impl SecretManager {
         {
             // Rollback: delete the value we just stored (only if it was created)
             if write.status == WriteStatus::Created {
-                let _ = self.backend.delete(&record).await;
+                let _ = self.backend.delete(&normalized_record).await;
             }
             return Err(SecretError::Database(e.to_string()));
         }
@@ -172,21 +176,25 @@ impl SecretManager {
     pub async fn delete(&self, name: &str) -> Result<(), SecretError> {
         let normalized = validate_and_normalize_name(name)?;
 
-        // Delete metadata first
-        let deleted = self
+        // Fetch metadata to get provider_ref for the backend
+        let metadata = self
+            .catalog
+            .get_secret_metadata(&normalized)
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?
+            .ok_or_else(|| SecretError::NotFound(normalized.clone()))?;
+
+        // Delete metadata
+        let _ = self
             .catalog
             .delete_secret_metadata(&normalized)
             .await
             .map_err(|e| SecretError::Database(e.to_string()))?;
 
-        if !deleted {
-            return Err(SecretError::NotFound(normalized));
-        }
-
-        // Delete from backend
+        // Delete from backend using provider_ref from metadata
         let record = SecretRecord {
             name: normalized,
-            provider_ref: None,
+            provider_ref: metadata.provider_ref,
         };
         let _ = self.backend.delete(&record).await;
 
@@ -230,12 +238,19 @@ mod tests {
         )
     }
 
+    fn record(name: &str) -> SecretRecord {
+        SecretRecord {
+            name: name.to_string(),
+            provider_ref: None,
+        }
+    }
+
     #[tokio::test]
     async fn test_put_and_get() {
         let (manager, _dir) = test_manager().await;
         let value = b"my-secret-password";
 
-        manager.put("my-secret", value).await.unwrap();
+        manager.put(&record("my-secret"), value).await.unwrap();
         let retrieved = manager.get("my-secret").await.unwrap();
 
         assert_eq!(retrieved, value);
@@ -247,7 +262,7 @@ mod tests {
         let value = "my-string-secret";
 
         manager
-            .put("string-secret", value.as_bytes())
+            .put(&record("string-secret"), value.as_bytes())
             .await
             .unwrap();
         let retrieved = manager.get_string("string-secret").await.unwrap();
@@ -267,7 +282,7 @@ mod tests {
     async fn test_delete() {
         let (manager, _dir) = test_manager().await;
 
-        manager.put("to-delete", b"value").await.unwrap();
+        manager.put(&record("to-delete"), b"value").await.unwrap();
         manager.delete("to-delete").await.unwrap();
 
         let result = manager.get("to-delete").await;
@@ -286,8 +301,8 @@ mod tests {
     async fn test_list_and_metadata() {
         let (manager, _dir) = test_manager().await;
 
-        manager.put("secret-a", b"value-a").await.unwrap();
-        manager.put("secret-b", b"value-b").await.unwrap();
+        manager.put(&record("secret-a"), b"value-a").await.unwrap();
+        manager.put(&record("secret-b"), b"value-b").await.unwrap();
 
         let list = manager.list().await.unwrap();
         assert_eq!(list.len(), 2);
@@ -300,7 +315,7 @@ mod tests {
     async fn test_name_normalization() {
         let (manager, _dir) = test_manager().await;
 
-        manager.put("My-Secret", b"value").await.unwrap();
+        manager.put(&record("My-Secret"), b"value").await.unwrap();
 
         // Should be able to retrieve with different case
         let retrieved = manager.get("my-secret").await.unwrap();
@@ -311,7 +326,7 @@ mod tests {
     async fn test_invalid_name() {
         let (manager, _dir) = test_manager().await;
 
-        let result = manager.put("invalid name!", b"value").await;
+        let result = manager.put(&record("invalid name!"), b"value").await;
         assert!(matches!(result, Err(SecretError::InvalidName(_))));
     }
 
@@ -319,8 +334,8 @@ mod tests {
     async fn test_update_existing() {
         let (manager, _dir) = test_manager().await;
 
-        manager.put("updatable", b"old-value").await.unwrap();
-        manager.put("updatable", b"new-value").await.unwrap();
+        manager.put(&record("updatable"), b"old-value").await.unwrap();
+        manager.put(&record("updatable"), b"new-value").await.unwrap();
 
         let retrieved = manager.get("updatable").await.unwrap();
         assert_eq!(retrieved, b"new-value");
