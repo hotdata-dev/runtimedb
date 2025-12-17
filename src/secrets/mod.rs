@@ -190,7 +190,7 @@ impl SecretManager {
         let now = Utc::now();
         if let Err(e) = self
             .catalog
-            .put_secret_metadata(
+            .create_secret_metadata(
                 &normalized,
                 &self.provider_type,
                 write.provider_ref.as_deref(),
@@ -237,7 +237,7 @@ impl SecretManager {
         // Update metadata timestamp
         let now = Utc::now();
         self.catalog
-            .put_secret_metadata(
+            .update_secret_metadata(
                 &normalized,
                 &self.provider_type,
                 updated_ref.as_deref(),

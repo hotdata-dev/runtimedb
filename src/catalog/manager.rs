@@ -80,8 +80,17 @@ pub trait CatalogManager: Debug + Send + Sync {
     /// Get metadata for a secret regardless of status (for internal cleanup).
     async fn get_secret_metadata_any_status(&self, name: &str) -> Result<Option<SecretMetadata>>;
 
-    /// Store or update secret metadata. Sets status to 'active'.
-    async fn put_secret_metadata(
+    /// Create secret metadata. Fails if the secret already exists.
+    async fn create_secret_metadata(
+        &self,
+        name: &str,
+        provider: &str,
+        provider_ref: Option<&str>,
+        timestamp: DateTime<Utc>,
+    ) -> Result<()>;
+
+    /// Update existing secret metadata. Sets status to 'active'.
+    async fn update_secret_metadata(
         &self,
         name: &str,
         provider: &str,

@@ -222,7 +222,7 @@ impl CatalogManager for SqliteCatalogManager {
         }))
     }
 
-    async fn put_secret_metadata(
+    async fn create_secret_metadata(
         &self,
         name: &str,
         provider: &str,
@@ -233,18 +233,36 @@ impl CatalogManager for SqliteCatalogManager {
 
         sqlx::query(
             "INSERT INTO secrets (name, provider, provider_ref, status, created_at, updated_at) \
-             VALUES (?, ?, ?, 'active', ?, ?) \
-             ON CONFLICT (name) DO UPDATE SET \
-             provider = excluded.provider, \
-             provider_ref = excluded.provider_ref, \
-             status = 'active', \
-             updated_at = excluded.updated_at",
+             VALUES (?, ?, ?, 'active', ?, ?)",
         )
         .bind(name)
         .bind(provider)
         .bind(provider_ref)
         .bind(&ts)
         .bind(&ts)
+        .execute(self.backend.pool())
+        .await?;
+
+        Ok(())
+    }
+
+    async fn update_secret_metadata(
+        &self,
+        name: &str,
+        provider: &str,
+        provider_ref: Option<&str>,
+        timestamp: DateTime<Utc>,
+    ) -> Result<()> {
+        let ts = timestamp.to_rfc3339();
+
+        sqlx::query(
+            "UPDATE secrets SET provider = ?, provider_ref = ?, status = 'active', updated_at = ? \
+             WHERE name = ?",
+        )
+        .bind(provider)
+        .bind(provider_ref)
+        .bind(&ts)
+        .bind(name)
         .execute(self.backend.pool())
         .await?;
 

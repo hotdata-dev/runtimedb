@@ -240,7 +240,7 @@ impl CatalogManager for PostgresCatalogManager {
         }))
     }
 
-    async fn put_secret_metadata(
+    async fn create_secret_metadata(
         &self,
         name: &str,
         provider: &str,
@@ -249,18 +249,34 @@ impl CatalogManager for PostgresCatalogManager {
     ) -> Result<()> {
         sqlx::query(
             "INSERT INTO secrets (name, provider, provider_ref, status, created_at, updated_at) \
-             VALUES ($1, $2, $3, 'active', $4, $5) \
-             ON CONFLICT (name) DO UPDATE SET \
-             provider = excluded.provider, \
-             provider_ref = excluded.provider_ref, \
-             status = 'active', \
-             updated_at = excluded.updated_at",
+             VALUES ($1, $2, $3, 'active', $4, $5)",
         )
         .bind(name)
         .bind(provider)
         .bind(provider_ref)
         .bind(timestamp)
         .bind(timestamp)
+        .execute(self.backend.pool())
+        .await?;
+
+        Ok(())
+    }
+
+    async fn update_secret_metadata(
+        &self,
+        name: &str,
+        provider: &str,
+        provider_ref: Option<&str>,
+        timestamp: DateTime<Utc>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE secrets SET provider = $1, provider_ref = $2, status = 'active', updated_at = $3 \
+             WHERE name = $4",
+        )
+        .bind(provider)
+        .bind(provider_ref)
+        .bind(timestamp)
+        .bind(name)
         .execute(self.backend.pool())
         .await?;
 
