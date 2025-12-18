@@ -1,8 +1,22 @@
+use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::fmt::Debug;
+
+/// Used to conditionally update a secret only if it hasn't been modified.
+#[derive(Debug, Clone, Copy)]
+pub struct OptimisticLock {
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<DateTime<Utc>> for OptimisticLock {
+    fn from(created_at: DateTime<Utc>) -> Self {
+        Self { created_at }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ConnectionInfo {
@@ -68,4 +82,45 @@ pub trait CatalogManager: Debug + Send + Sync {
 
     /// Delete connection and all associated table rows from metadata.
     async fn delete_connection(&self, name: &str) -> Result<()>;
+
+    // Secret management methods - metadata (used by all secret providers)
+
+    /// Get metadata for an active secret (without value).
+    /// Returns None for secrets with status != 'active'.
+    async fn get_secret_metadata(&self, name: &str) -> Result<Option<SecretMetadata>>;
+
+    /// Get metadata for a secret regardless of status (for internal cleanup).
+    async fn get_secret_metadata_any_status(&self, name: &str) -> Result<Option<SecretMetadata>>;
+
+    /// Create secret metadata. Fails if the secret already exists.
+    async fn create_secret_metadata(&self, metadata: &SecretMetadata) -> Result<()>;
+
+    /// Update existing secret metadata.
+    /// If `lock` is Some, only updates if created_at matches (returns false on mismatch).
+    /// If `lock` is None, updates unconditionally.
+    async fn update_secret_metadata(
+        &self,
+        metadata: &SecretMetadata,
+        lock: Option<OptimisticLock>,
+    ) -> Result<bool>;
+
+    /// Set the status of a secret.
+    async fn set_secret_status(&self, name: &str, status: SecretStatus) -> Result<bool>;
+
+    /// Delete secret metadata. Returns true if the secret existed.
+    async fn delete_secret_metadata(&self, name: &str) -> Result<bool>;
+
+    /// List all active secrets (metadata only).
+    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>>;
+
+    // Secret management methods - encrypted storage (used by EncryptedSecretManager only)
+
+    /// Get the encrypted value for a secret.
+    async fn get_encrypted_secret(&self, name: &str) -> Result<Option<Vec<u8>>>;
+
+    /// Store or update an encrypted secret value.
+    async fn put_encrypted_secret_value(&self, name: &str, encrypted_value: &[u8]) -> Result<()>;
+
+    /// Delete an encrypted secret value. Returns true if it existed.
+    async fn delete_encrypted_secret_value(&self, name: &str) -> Result<bool>;
 }

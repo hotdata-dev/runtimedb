@@ -37,8 +37,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2.0.17"
 uuid = { version = "1.11", features = ["v4"] }
 urlencoding = "2.1"
+aes-gcm-siv = "0.11"
+base64 = "0.22"
 
 [dev-dependencies]
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 proptest = "1.6"
+rand = "0.8"

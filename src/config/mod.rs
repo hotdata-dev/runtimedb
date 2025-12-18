@@ -8,6 +8,8 @@ pub struct AppConfig {
     pub storage: StorageConfig,
     #[serde(default)]
     pub paths: PathsConfig,
+    #[serde(default)]
+    pub secrets: SecretsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -53,6 +55,13 @@ pub struct PathsConfig {
     pub base_dir: Option<String>,
     /// Cache directory for Parquet files. Defaults to {base_dir}/cache
     pub cache_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct SecretsConfig {
+    /// Encryption key for secrets (base64-encoded 32-byte key).
+    /// Can also be set via RIVETDB_SECRET_KEY environment variable.
+    pub encryption_key: Option<String>,
 }
 
 impl AppConfig {

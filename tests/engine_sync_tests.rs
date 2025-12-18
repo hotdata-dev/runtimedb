@@ -1,6 +1,15 @@
 use anyhow::Result;
+use base64::{engine::general_purpose::STANDARD, Engine};
+use rand::RngCore;
 use rivetdb::RivetEngine;
 use tempfile::tempdir;
+
+/// Generate a test secret key (base64-encoded 32 bytes)
+fn generate_test_secret_key() -> String {
+    let mut key = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut key);
+    STANDARD.encode(key)
+}
 
 /// Test that sync_connection handles non-existent connections correctly
 #[tokio::test]
@@ -8,7 +17,11 @@ use tempfile::tempdir;
 async fn test_sync_connection_not_found() -> Result<()> {
     let dir = tempdir()?;
 
-    let engine = RivetEngine::defaults(dir.path()).await?;
+    let engine = RivetEngine::builder()
+        .base_dir(dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
 
     // Try to sync a connection that doesn't exist
     let result = engine.sync_connection("nonexistent").await;
@@ -26,7 +39,11 @@ async fn test_sync_connection_not_found() -> Result<()> {
 async fn test_sync_connection_no_tables() -> Result<()> {
     let dir = tempdir()?;
 
-    let engine = RivetEngine::defaults(dir.path()).await?;
+    let engine = RivetEngine::builder()
+        .base_dir(dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
 
     // Add a connection with no tables
     let config = serde_json::json!({

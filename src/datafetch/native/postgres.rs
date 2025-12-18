@@ -10,11 +10,61 @@ use futures::StreamExt;
 use sqlx::postgres::{PgColumn, PgConnection, PgRow};
 use sqlx::{Column, Connection, Row, TypeInfo};
 use std::sync::Arc;
+use urlencoding::encode;
 
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
+use crate::secrets::SecretManager;
 use crate::source::Source;
 
 use super::StreamingParquetWriter;
+
+/// Build a PostgreSQL connection string from source configuration and resolved password.
+fn build_connection_string(
+    host: &str,
+    port: u16,
+    user: &str,
+    database: &str,
+    password: &str,
+) -> String {
+    format!(
+        "postgresql://{}:{}@{}:{}/{}",
+        encode(user),
+        encode(password),
+        encode(host),
+        port,
+        encode(database)
+    )
+}
+
+/// Resolve credentials and build connection string for a Postgres source.
+pub async fn resolve_connection_string(
+    source: &Source,
+    secrets: &SecretManager,
+) -> Result<String, DataFetchError> {
+    let (host, port, user, database, credential) = match source {
+        Source::Postgres {
+            host,
+            port,
+            user,
+            database,
+            credential,
+        } => (host, *port, user, database, credential),
+        _ => {
+            return Err(DataFetchError::Connection(
+                "Expected Postgres source".to_string(),
+            ))
+        }
+    };
+
+    let password = credential
+        .resolve(secrets)
+        .await
+        .map_err(|e| DataFetchError::Connection(e.to_string()))?;
+
+    Ok(build_connection_string(
+        host, port, user, database, &password,
+    ))
+}
 
 /// Connect to PostgreSQL with automatic SSL retry.
 /// If the initial connection fails with an "insecure connection" error,
@@ -42,8 +92,12 @@ async fn connect_with_ssl_retry(connection_string: &str) -> Result<PgConnection,
 }
 
 /// Discover tables and columns from PostgreSQL
-pub async fn discover_tables(source: &Source) -> Result<Vec<TableMetadata>, DataFetchError> {
-    let mut conn = connect_with_ssl_retry(&source.connection_string()).await?;
+pub async fn discover_tables(
+    source: &Source,
+    secrets: &SecretManager,
+) -> Result<Vec<TableMetadata>, DataFetchError> {
+    let connection_string = resolve_connection_string(source, secrets).await?;
+    let mut conn = connect_with_ssl_retry(&connection_string).await?;
 
     let rows = sqlx::query(
         r#"
@@ -110,12 +164,14 @@ pub async fn discover_tables(source: &Source) -> Result<Vec<TableMetadata>, Data
 /// Fetch table data and write to Parquet using streaming to avoid OOM on large tables
 pub async fn fetch_table(
     source: &Source,
+    secrets: &SecretManager,
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
     writer: &mut StreamingParquetWriter,
 ) -> Result<(), DataFetchError> {
-    let mut conn = connect_with_ssl_retry(&source.connection_string()).await?;
+    let connection_string = resolve_connection_string(source, secrets).await?;
+    let mut conn = connect_with_ssl_retry(&connection_string).await?;
 
     // Build query - properly escape identifiers
     let query = format!(
@@ -138,7 +194,7 @@ pub async fn fetch_table(
         None => {
             // Empty table: query information_schema for schema
             // Need a new connection since stream borrows conn
-            let mut schema_conn = connect_with_ssl_retry(&source.connection_string()).await?;
+            let mut schema_conn = connect_with_ssl_retry(&connection_string).await?;
             let schema_rows = sqlx::query(
                 r#"
                 SELECT column_name, data_type, is_nullable

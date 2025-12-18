@@ -1,6 +1,7 @@
 use crate::catalog::{CatalogManager, ConnectionInfo, SqliteCatalogManager, TableInfo};
 use crate::datafetch::{DataFetcher, FetchOrchestrator, NativeFetcher};
 use crate::datafusion::{block_on, RivetCatalogProvider};
+use crate::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
 use anyhow::Result;
@@ -13,6 +14,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::error;
 
+/// Default insecure encryption key for development use only.
+/// This key is publicly known and provides NO security.
+/// It is a base64-encoded 32-byte key: "INSECURE_DEFAULT_KEY_RIVETDB!!!!"
+const DEFAULT_INSECURE_KEY: &str = "SU5TRUNVUkVfREVGQVVMVF9LRVlfUklWRVREQiEhISE=";
+
 pub struct QueryResponse {
     pub results: Vec<RecordBatch>,
     pub execution_time: Duration,
@@ -24,6 +30,7 @@ pub struct RivetEngine {
     df_ctx: SessionContext,
     storage: Arc<dyn StorageManager>,
     orchestrator: Arc<FetchOrchestrator>,
+    secret_manager: Arc<SecretManager>,
 }
 
 impl RivetEngine {
@@ -58,6 +65,11 @@ impl RivetEngine {
         // Set cache_dir if explicitly configured
         if let Some(cache) = &config.paths.cache_dir {
             builder = builder.cache_dir(PathBuf::from(cache));
+        }
+
+        // Set secret key if explicitly configured
+        if let Some(key) = &config.secrets.encryption_key {
+            builder = builder.secret_key(key);
         }
 
         // Only create explicit catalog for non-sqlite backends
@@ -189,6 +201,11 @@ impl RivetEngine {
         &self.storage
     }
 
+    /// Get a reference to the secret manager.
+    pub fn secret_manager(&self) -> &Arc<SecretManager> {
+        &self.secret_manager
+    }
+
     /// Register all connections from the catalog store as DataFusion catalogs.
     async fn register_existing_connections(&mut self) -> Result<()> {
         let connections = self.catalog.list_connections().await?;
@@ -260,7 +277,7 @@ impl RivetEngine {
         info!("Discovering tables for {} source...", source_type);
         let fetcher = crate::datafetch::NativeFetcher::new();
         let tables = fetcher
-            .discover_tables(&source)
+            .discover_tables(&source, &self.secret_manager)
             .await
             .map_err(|e| anyhow::anyhow!("Discovery failed: {}", e))?;
 
@@ -504,6 +521,7 @@ pub struct RivetEngineBuilder {
     cache_dir: Option<PathBuf>,
     catalog: Option<Arc<dyn CatalogManager>>,
     storage: Option<Arc<dyn StorageManager>>,
+    secret_key: Option<String>,
 }
 
 impl Default for RivetEngineBuilder {
@@ -519,6 +537,7 @@ impl RivetEngineBuilder {
             cache_dir: None,
             catalog: None,
             storage: None,
+            secret_key: std::env::var("RIVETDB_SECRET_KEY").ok(),
         }
     }
 
@@ -547,6 +566,14 @@ impl RivetEngineBuilder {
     /// If not set, creates filesystem storage at {cache_dir}
     pub fn storage(mut self, storage: Arc<dyn StorageManager>) -> Self {
         self.storage = Some(storage);
+        self
+    }
+
+    /// Set the encryption key for the secret manager (base64-encoded 32-byte key).
+    /// If not set, falls back to RIVETDB_SECRET_KEY environment variable.
+    /// If neither is set, uses a default insecure key (with loud warnings).
+    pub fn secret_key(mut self, key: impl Into<String>) -> Self {
+        self.secret_key = Some(key.into());
         self
     }
 
@@ -609,12 +636,47 @@ impl RivetEngineBuilder {
         let df_ctx = SessionContext::new();
         storage.register_with_datafusion(&df_ctx)?;
 
-        // Step 6: Create fetch orchestrator
+        // Step 6: Initialize secret manager
+        let (secret_key, using_default_key) = match self.secret_key {
+            Some(key) => (key, false),
+            None => {
+                // Use insecure default key for development convenience
+                (DEFAULT_INSECURE_KEY.to_string(), true)
+            }
+        };
+
+        if using_default_key {
+            warn!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+            warn!("!!!                    SECURITY WARNING                       !!!");
+            warn!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+            warn!("!!! Using DEFAULT INSECURE encryption key for secrets.        !!!");
+            warn!("!!! This key is PUBLICLY KNOWN and provides NO SECURITY.      !!!");
+            warn!("!!!                                                           !!!");
+            warn!("!!! DO NOT USE IN PRODUCTION!                                 !!!");
+            warn!("!!!                                                           !!!");
+            warn!("!!! To fix: Set RIVETDB_SECRET_KEY environment variable       !!!");
+            warn!("!!! Generate a key with: openssl rand -base64 32              !!!");
+            warn!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        }
+
+        let backend = Arc::new(
+            EncryptedCatalogBackend::from_base64_key(&secret_key, catalog.clone())
+                .map_err(|e| anyhow::anyhow!("Invalid secret key: {}", e))?,
+        );
+        let secret_manager = Arc::new(SecretManager::new(
+            backend,
+            catalog.clone(),
+            ENCRYPTED_PROVIDER_TYPE,
+        ));
+        info!("Secret manager initialized");
+
+        // Step 7: Create fetch orchestrator (needs secret_manager)
         let fetcher = Arc::new(NativeFetcher::new());
         let orchestrator = Arc::new(FetchOrchestrator::new(
             fetcher,
             storage.clone(),
             catalog.clone(),
+            secret_manager.clone(),
         ));
 
         let mut engine = RivetEngine {
@@ -622,6 +684,7 @@ impl RivetEngineBuilder {
             df_ctx,
             storage,
             orchestrator,
+            secret_manager,
         };
 
         // Register all existing connections as DataFusion catalogs
@@ -635,6 +698,15 @@ impl RivetEngineBuilder {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Generate a test secret key (base64-encoded 32 bytes)
+    fn test_secret_key() -> String {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use rand::RngCore;
+        let mut key = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key);
+        STANDARD.encode(key)
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_builder_pattern() {
@@ -658,6 +730,7 @@ mod tests {
             .base_dir(base_dir.clone())
             .catalog(catalog)
             .storage(storage)
+            .secret_key(test_secret_key())
             .build()
             .await;
 
@@ -681,6 +754,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let result = RivetEngine::builder()
             .base_dir(temp_dir.path().to_path_buf())
+            .secret_key(test_secret_key())
             .build()
             .await;
         assert!(
@@ -695,24 +769,41 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_defaults_constructor() {
-        // Test the defaults() convenience constructor
+    async fn test_builder_uses_default_key_without_secret_key() {
+        // Test that builder uses default insecure key when no secret key is provided
         let temp_dir = TempDir::new().unwrap();
-        let engine = RivetEngine::defaults(temp_dir.path().to_path_buf()).await;
+
+        // Temporarily clear the env var if set
+        let old_key = std::env::var("RIVETDB_SECRET_KEY").ok();
+        std::env::remove_var("RIVETDB_SECRET_KEY");
+
+        let result = RivetEngine::builder()
+            .base_dir(temp_dir.path().to_path_buf())
+            .build()
+            .await;
+
+        // Restore env var if it was set
+        if let Some(key) = old_key {
+            std::env::set_var("RIVETDB_SECRET_KEY", key);
+        }
+
+        // Should succeed with default insecure key (with warnings logged)
         assert!(
-            engine.is_ok(),
-            "defaults() should create engine: {:?}",
-            engine.err()
+            result.is_ok(),
+            "Builder should succeed with default key: {:?}",
+            result.err()
         );
 
-        let engine = engine.unwrap();
+        let engine = result.unwrap();
         let connections = engine.list_connections().await;
         assert!(connections.is_ok(), "Should be able to list connections");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_from_config_sqlite_filesystem() {
-        use crate::config::{AppConfig, CatalogConfig, PathsConfig, ServerConfig, StorageConfig};
+        use crate::config::{
+            AppConfig, CatalogConfig, PathsConfig, SecretsConfig, ServerConfig, StorageConfig,
+        };
 
         let temp_dir = TempDir::new().unwrap();
         let base_dir = temp_dir.path().to_path_buf();
@@ -740,12 +831,16 @@ mod tests {
                 base_dir: Some(base_dir.to_str().unwrap().to_string()),
                 cache_dir: None,
             },
+            secrets: SecretsConfig {
+                encryption_key: Some(test_secret_key()),
+            },
         };
 
         let engine = RivetEngine::from_config(&config).await;
         assert!(
             engine.is_ok(),
-            "from_config should create engine successfully"
+            "from_config should create engine successfully: {:?}",
+            engine.err()
         );
 
         let engine = engine.unwrap();

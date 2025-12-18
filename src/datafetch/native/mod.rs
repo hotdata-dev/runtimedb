@@ -7,6 +7,7 @@ pub use parquet_writer::StreamingParquetWriter;
 use async_trait::async_trait;
 
 use crate::datafetch::{DataFetchError, DataFetcher, TableMetadata};
+use crate::secrets::SecretManager;
 use crate::source::Source;
 
 /// Native Rust driver-based data fetcher
@@ -21,12 +22,16 @@ impl NativeFetcher {
 
 #[async_trait]
 impl DataFetcher for NativeFetcher {
-    async fn discover_tables(&self, source: &Source) -> Result<Vec<TableMetadata>, DataFetchError> {
+    async fn discover_tables(
+        &self,
+        source: &Source,
+        secrets: &SecretManager,
+    ) -> Result<Vec<TableMetadata>, DataFetchError> {
         match source {
             Source::Duckdb { .. } | Source::Motherduck { .. } => {
-                duckdb::discover_tables(source).await
+                duckdb::discover_tables(source, secrets).await
             }
-            Source::Postgres { .. } => postgres::discover_tables(source).await,
+            Source::Postgres { .. } => postgres::discover_tables(source, secrets).await,
             Source::Snowflake { .. } => Err(DataFetchError::UnsupportedDriver("Snowflake")),
         }
     }
@@ -34,6 +39,7 @@ impl DataFetcher for NativeFetcher {
     async fn fetch_table(
         &self,
         source: &Source,
+        secrets: &SecretManager,
         catalog: Option<&str>,
         schema: &str,
         table: &str,
@@ -41,10 +47,10 @@ impl DataFetcher for NativeFetcher {
     ) -> Result<(), DataFetchError> {
         match source {
             Source::Duckdb { .. } | Source::Motherduck { .. } => {
-                duckdb::fetch_table(source, catalog, schema, table, writer).await
+                duckdb::fetch_table(source, secrets, catalog, schema, table, writer).await
             }
             Source::Postgres { .. } => {
-                postgres::fetch_table(source, catalog, schema, table, writer).await
+                postgres::fetch_table(source, secrets, catalog, schema, table, writer).await
             }
             Source::Snowflake { .. } => Err(DataFetchError::UnsupportedDriver("Snowflake")),
         }

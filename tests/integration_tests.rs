@@ -299,12 +299,20 @@ impl TestExecutor for ApiExecutor {
                 host,
                 port,
                 user,
-                password,
                 database,
-            } => (
-                "postgres",
-                json!({ "host": host, "port": port, "user": user, "password": password, "database": database }),
-            ),
+                credential,
+            } => {
+                let cred_json = match credential {
+                    rivetdb::source::Credential::None => json!({"type": "none"}),
+                    rivetdb::source::Credential::SecretRef { name } => {
+                        json!({"type": "secret_ref", "name": name})
+                    }
+                };
+                (
+                    "postgres",
+                    json!({ "host": host, "port": port, "user": user, "database": database, "credential": cred_json }),
+                )
+            }
             _ => panic!("Unsupported source type"),
         };
 
@@ -473,6 +481,13 @@ impl TestExecutor for ApiExecutor {
     }
 }
 
+/// Generate a random base64-encoded 32-byte key for test secret manager.
+fn generate_test_secret_key() -> String {
+    use base64::Engine;
+    let key_bytes: [u8; 32] = rand::random();
+    base64::engine::general_purpose::STANDARD.encode(key_bytes)
+}
+
 /// Test context providing both executors.
 struct TestHarness {
     engine_executor: EngineExecutor,
@@ -485,7 +500,15 @@ impl TestHarness {
     async fn new() -> Self {
         let temp_dir = TempDir::new().unwrap();
 
-        let engine = RivetEngine::defaults(temp_dir.path()).await.unwrap();
+        // Generate a test secret key to enable the secret manager
+        let secret_key = generate_test_secret_key();
+
+        let engine = RivetEngine::builder()
+            .base_dir(temp_dir.path())
+            .secret_key(secret_key)
+            .build()
+            .await
+            .unwrap();
 
         let app = AppServer::new(engine);
 
@@ -502,6 +525,15 @@ impl TestHarness {
 
     fn api(&self) -> &dyn TestExecutor {
         &self.api_executor
+    }
+
+    /// Store a secret for use in connection credentials.
+    async fn store_secret(&self, name: &str, value: &str) {
+        let secret_manager = self.engine_executor.engine.secret_manager();
+        secret_manager
+            .create(name, value.as_bytes())
+            .await
+            .expect("Failed to store test secret");
     }
 }
 
@@ -726,6 +758,9 @@ mod postgres_fixtures {
     use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
     use testcontainers_modules::postgres::Postgres;
 
+    /// The password used for test Postgres containers.
+    pub const TEST_PASSWORD: &str = "postgres";
+
     pub struct PostgresFixture {
         #[allow(dead_code)]
         pub container: ContainerAsync<Postgres>,
@@ -739,11 +774,14 @@ mod postgres_fixtures {
             .await
             .expect("Failed to start postgres");
         let port = container.get_host_port_ipv4(5432).await.unwrap();
-        let conn_str = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+        let conn_str = format!(
+            "postgres://postgres:{}@localhost:{}/postgres",
+            TEST_PASSWORD, port
+        );
         (container, conn_str)
     }
 
-    pub async fn standard() -> PostgresFixture {
+    pub async fn standard(secret_name: &str) -> PostgresFixture {
         let (container, conn_str) = start_container().await;
         let pool = sqlx::PgPool::connect(&conn_str).await.unwrap();
 
@@ -766,13 +804,15 @@ mod postgres_fixtures {
                 host: "localhost".into(),
                 port,
                 user: "postgres".into(),
-                password: "postgres".into(),
                 database: "postgres".into(),
+                credential: rivetdb::source::Credential::SecretRef {
+                    name: secret_name.to_string(),
+                },
             },
         }
     }
 
-    pub async fn multi_schema() -> PostgresFixture {
+    pub async fn multi_schema(secret_name: &str) -> PostgresFixture {
         let (container, conn_str) = start_container().await;
         let pool = sqlx::PgPool::connect(&conn_str).await.unwrap();
 
@@ -809,8 +849,10 @@ mod postgres_fixtures {
                 host: "localhost".into(),
                 port,
                 user: "postgres".into(),
-                password: "postgres".into(),
                 database: "postgres".into(),
+                credential: rivetdb::source::Credential::SecretRef {
+                    name: secret_name.to_string(),
+                },
             },
         }
     }
@@ -901,31 +943,46 @@ mod duckdb_tests {
 mod postgres_tests {
     use super::*;
 
+    const PG_SECRET_NAME: &str = "pg-test-password";
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_golden_path() {
-        let fixture = postgres_fixtures::standard().await;
         let harness = TestHarness::new().await;
+        // Store the password as a secret before creating the fixture
+        harness
+            .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
+            .await;
+        let fixture = postgres_fixtures::standard(PG_SECRET_NAME).await;
         run_golden_path_test(harness.engine(), &fixture.source, "pg_conn").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api_golden_path() {
-        let fixture = postgres_fixtures::standard().await;
         let harness = TestHarness::new().await;
+        harness
+            .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
+            .await;
+        let fixture = postgres_fixtures::standard(PG_SECRET_NAME).await;
         run_golden_path_test(harness.api(), &fixture.source, "pg_conn").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_multi_schema() {
-        let fixture = postgres_fixtures::multi_schema().await;
         let harness = TestHarness::new().await;
+        harness
+            .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
+            .await;
+        let fixture = postgres_fixtures::multi_schema(PG_SECRET_NAME).await;
         run_multi_schema_test(harness.engine(), &fixture.source, "pg_conn").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api_multi_schema() {
-        let fixture = postgres_fixtures::multi_schema().await;
         let harness = TestHarness::new().await;
+        harness
+            .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
+            .await;
+        let fixture = postgres_fixtures::multi_schema(PG_SECRET_NAME).await;
         run_multi_schema_test(harness.api(), &fixture.source, "pg_conn").await;
     }
 }

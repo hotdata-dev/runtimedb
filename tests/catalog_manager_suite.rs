@@ -460,6 +460,32 @@ macro_rules! catalog_manager_tests {
                 catalog.close().await.unwrap();
                 catalog.close().await.unwrap();
             }
+
+            #[tokio::test]
+            async fn create_secret_metadata_duplicate_fails() {
+                use rivetdb::secrets::{SecretMetadata, SecretStatus};
+
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+                let now = chrono::Utc::now();
+
+                let metadata = SecretMetadata {
+                    name: "my-secret".to_string(),
+                    provider: "encrypted".to_string(),
+                    provider_ref: None,
+                    status: SecretStatus::Active,
+                    created_at: now,
+                    updated_at: now,
+                };
+
+                // First create should succeed
+                catalog.create_secret_metadata(&metadata).await.unwrap();
+
+                // Second create with same name should fail (unique constraint)
+                let result = catalog.create_secret_metadata(&metadata).await;
+
+                assert!(result.is_err());
+            }
         }
     };
 }

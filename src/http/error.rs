@@ -53,6 +53,14 @@ impl ApiError {
             code: "BAD_GATEWAY".to_string(),
         }
     }
+
+    pub fn service_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: message.into(),
+            code: "SERVICE_UNAVAILABLE".to_string(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -74,5 +82,24 @@ impl From<anyhow::Error> for ApiError {
         // For now, treat all anyhow errors as internal server errors
         // TODO: Parse error messages to classify as 400 vs 500
         ApiError::internal_error(err.to_string())
+    }
+}
+
+/// Convert SecretError to ApiError
+impl From<crate::secrets::SecretError> for ApiError {
+    fn from(e: crate::secrets::SecretError) -> Self {
+        use crate::secrets::SecretError;
+        let constructor = match &e {
+            SecretError::NotFound(_) => ApiError::not_found,
+            SecretError::AlreadyExists(_) | SecretError::CreationInProgress(_) => {
+                ApiError::conflict
+            }
+            SecretError::NotConfigured => ApiError::service_unavailable,
+            SecretError::InvalidName(_) => ApiError::bad_request,
+            SecretError::Backend(_) | SecretError::InvalidUtf8 | SecretError::Database(_) => {
+                ApiError::internal_error
+            }
+        };
+        constructor(e.to_string())
     }
 }

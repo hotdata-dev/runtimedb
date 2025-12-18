@@ -1,16 +1,40 @@
 //! Integration tests for datafetch module
 
+use rivetdb::catalog::{CatalogManager, SqliteCatalogManager};
 use rivetdb::datafetch::{DataFetcher, NativeFetcher};
+use rivetdb::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
 use rivetdb::source::Source;
+use std::sync::Arc;
+use tempfile::TempDir;
+
+/// Create a test SecretManager with temporary storage.
+/// The secret manager is required by the API even for sources that don't use credentials.
+async fn test_secret_manager(dir: &TempDir) -> SecretManager {
+    let db_path = dir.path().join("test_catalog.db");
+    let catalog = Arc::new(
+        SqliteCatalogManager::new(db_path.to_str().unwrap())
+            .await
+            .unwrap(),
+    );
+    catalog.run_migrations().await.unwrap();
+
+    let key = [0x42u8; 32];
+    let backend = Arc::new(EncryptedCatalogBackend::new(key, catalog.clone()));
+
+    SecretManager::new(backend, catalog, ENCRYPTED_PROVIDER_TYPE)
+}
 
 #[tokio::test]
 async fn test_duckdb_discovery_empty() {
+    let temp_dir = TempDir::new().unwrap();
+    let secrets = test_secret_manager(&temp_dir).await;
+
     let fetcher = NativeFetcher::new();
     let source = Source::Duckdb {
         path: ":memory:".to_string(),
     };
 
-    let result = fetcher.discover_tables(&source).await;
+    let result = fetcher.discover_tables(&source, &secrets).await;
     assert!(
         result.is_ok(),
         "Discovery should succeed: {:?}",
@@ -23,8 +47,10 @@ async fn test_duckdb_discovery_empty() {
 
 #[tokio::test]
 async fn test_duckdb_discovery_with_table() {
+    let temp_dir = TempDir::new().unwrap();
+    let secrets = test_secret_manager(&temp_dir).await;
+
     // Create a temp file for DuckDB
-    let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("test.duckdb");
 
     // Create table using duckdb crate directly
@@ -43,7 +69,7 @@ async fn test_duckdb_discovery_with_table() {
         path: db_path.to_str().unwrap().to_string(),
     };
 
-    let result = fetcher.discover_tables(&source).await;
+    let result = fetcher.discover_tables(&source, &secrets).await;
     assert!(
         result.is_ok(),
         "Discovery should succeed: {:?}",
@@ -64,18 +90,21 @@ async fn test_duckdb_discovery_with_table() {
 
 #[tokio::test]
 async fn test_unsupported_driver() {
+    let temp_dir = TempDir::new().unwrap();
+    let secrets = test_secret_manager(&temp_dir).await;
+
     let fetcher = NativeFetcher::new();
     // Use a Snowflake source which is not implemented
     let source = Source::Snowflake {
         account: "fake".to_string(),
         user: "fake".to_string(),
-        password: "fake".to_string(),
         warehouse: "fake".to_string(),
         database: "fake".to_string(),
         role: None,
+        credential: rivetdb::source::Credential::None,
     };
 
-    let result = fetcher.discover_tables(&source).await;
+    let result = fetcher.discover_tables(&source, &secrets).await;
     assert!(result.is_err(), "Should fail for unsupported driver");
 }
 
@@ -85,8 +114,10 @@ async fn test_duckdb_fetch_table() {
     use rivetdb::datafetch::StreamingParquetWriter;
     use std::fs::File;
 
+    let temp_dir = TempDir::new().unwrap();
+    let secrets = test_secret_manager(&temp_dir).await;
+
     // Create a temp DuckDB database with test data
-    let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("test.duckdb");
 
     // Populate database with test data (multiple types)
@@ -124,7 +155,14 @@ async fn test_duckdb_fetch_table() {
     let mut writer = StreamingParquetWriter::new(output_path.clone());
 
     let result = fetcher
-        .fetch_table(&source, None, "test_schema", "products", &mut writer)
+        .fetch_table(
+            &source,
+            &secrets,
+            None,
+            "test_schema",
+            "products",
+            &mut writer,
+        )
         .await;
     assert!(result.is_ok(), "Fetch should succeed: {:?}", result.err());
 

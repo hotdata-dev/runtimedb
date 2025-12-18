@@ -4,6 +4,7 @@ use std::sync::Arc;
 use super::native::StreamingParquetWriter;
 use super::DataFetcher;
 use crate::catalog::CatalogManager;
+use crate::secrets::SecretManager;
 use crate::source::Source;
 use crate::storage::StorageManager;
 
@@ -13,6 +14,7 @@ pub struct FetchOrchestrator {
     fetcher: Arc<dyn DataFetcher>,
     storage: Arc<dyn StorageManager>,
     catalog: Arc<dyn CatalogManager>,
+    secret_manager: Arc<SecretManager>,
 }
 
 impl FetchOrchestrator {
@@ -20,11 +22,13 @@ impl FetchOrchestrator {
         fetcher: Arc<dyn DataFetcher>,
         storage: Arc<dyn StorageManager>,
         catalog: Arc<dyn CatalogManager>,
+        secret_manager: Arc<SecretManager>,
     ) -> Self {
         Self {
             fetcher,
             storage,
             catalog,
+            secret_manager,
         }
     }
 
@@ -50,6 +54,7 @@ impl FetchOrchestrator {
         self.fetcher
             .fetch_table(
                 source,
+                &self.secret_manager,
                 None, // catalog
                 schema_name,
                 table_name,

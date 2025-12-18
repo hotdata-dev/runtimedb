@@ -1,14 +1,41 @@
 use crate::catalog::backend::CatalogBackend;
-use crate::catalog::manager::{CatalogManager, ConnectionInfo, TableInfo};
+use crate::catalog::manager::{CatalogManager, ConnectionInfo, OptimisticLock, TableInfo};
 use crate::catalog::migrations::{run_migrations, CatalogMigrations};
+use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
 use async_trait::async_trait;
+use chrono::Utc;
 use sqlx::{Sqlite, SqlitePool};
 use std::fmt::{self, Debug, Formatter};
+use std::str::FromStr;
 
 pub struct SqliteCatalogManager {
     backend: CatalogBackend<Sqlite>,
     catalog_path: String,
+}
+
+/// Row type for secret metadata queries (SQLite stores timestamps as strings)
+#[derive(sqlx::FromRow)]
+struct SecretMetadataRow {
+    name: String,
+    provider: String,
+    provider_ref: Option<String>,
+    status: String,
+    created_at: String,
+    updated_at: String,
+}
+
+impl SecretMetadataRow {
+    fn into_metadata(self) -> SecretMetadata {
+        SecretMetadata {
+            name: self.name,
+            provider: self.provider,
+            provider_ref: self.provider_ref,
+            status: SecretStatus::from_str(&self.status).unwrap_or(SecretStatus::Active),
+            created_at: self.created_at.parse().unwrap_or_else(|_| Utc::now()),
+            updated_at: self.updated_at.parse().unwrap_or_else(|_| Utc::now()),
+        }
+    }
 }
 
 impl Debug for SqliteCatalogManager {
@@ -63,6 +90,32 @@ impl SqliteCatalogManager {
                 UNIQUE (connection_id, schema_name, table_name)
             )
         "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS secrets (
+                name TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                provider_ref TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS encrypted_secret_values (
+                name TEXT PRIMARY KEY,
+                encrypted_value BLOB NOT NULL
+            )
+            "#,
         )
         .execute(pool)
         .await?;
@@ -144,6 +197,145 @@ impl CatalogManager for SqliteCatalogManager {
 
     async fn delete_connection(&self, name: &str) -> Result<()> {
         self.backend.delete_connection(name).await
+    }
+
+    async fn get_secret_metadata(&self, name: &str) -> Result<Option<SecretMetadata>> {
+        let row: Option<SecretMetadataRow> = sqlx::query_as(
+            "SELECT name, provider, provider_ref, status, created_at, updated_at \
+             FROM secrets WHERE name = ? AND status = 'active'",
+        )
+        .bind(name)
+        .fetch_optional(self.backend.pool())
+        .await?;
+
+        Ok(row.map(SecretMetadataRow::into_metadata))
+    }
+
+    async fn get_secret_metadata_any_status(&self, name: &str) -> Result<Option<SecretMetadata>> {
+        let row: Option<SecretMetadataRow> = sqlx::query_as(
+            "SELECT name, provider, provider_ref, status, created_at, updated_at \
+             FROM secrets WHERE name = ?",
+        )
+        .bind(name)
+        .fetch_optional(self.backend.pool())
+        .await?;
+
+        Ok(row.map(SecretMetadataRow::into_metadata))
+    }
+
+    async fn create_secret_metadata(&self, metadata: &SecretMetadata) -> Result<()> {
+        let created_at = metadata.created_at.to_rfc3339();
+        let updated_at = metadata.updated_at.to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO secrets (name, provider, provider_ref, status, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&metadata.name)
+        .bind(&metadata.provider)
+        .bind(&metadata.provider_ref)
+        .bind(metadata.status.as_str())
+        .bind(&created_at)
+        .bind(&updated_at)
+        .execute(self.backend.pool())
+        .await?;
+
+        Ok(())
+    }
+
+    async fn update_secret_metadata(
+        &self,
+        metadata: &SecretMetadata,
+        lock: Option<OptimisticLock>,
+    ) -> Result<bool> {
+        use sqlx::QueryBuilder;
+
+        let updated_at = metadata.updated_at.to_rfc3339();
+
+        let mut qb = QueryBuilder::new("UPDATE secrets SET ");
+        qb.push("provider = ")
+            .push_bind(&metadata.provider)
+            .push(", provider_ref = ")
+            .push_bind(&metadata.provider_ref)
+            .push(", status = ")
+            .push_bind(metadata.status.as_str())
+            .push(", updated_at = ")
+            .push_bind(&updated_at)
+            .push(" WHERE name = ")
+            .push_bind(&metadata.name);
+
+        if let Some(lock) = lock {
+            let expected_created_at = lock.created_at.to_rfc3339();
+            qb.push(" AND created_at = ").push_bind(expected_created_at);
+        }
+
+        let result = qb.build().execute(self.backend.pool()).await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn set_secret_status(&self, name: &str, status: SecretStatus) -> Result<bool> {
+        let result = sqlx::query("UPDATE secrets SET status = ? WHERE name = ?")
+            .bind(status.as_str())
+            .bind(name)
+            .execute(self.backend.pool())
+            .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn delete_secret_metadata(&self, name: &str) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM secrets WHERE name = ?")
+            .bind(name)
+            .execute(self.backend.pool())
+            .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn get_encrypted_secret(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        sqlx::query_scalar("SELECT encrypted_value FROM encrypted_secret_values WHERE name = ?")
+            .bind(name)
+            .fetch_optional(self.backend.pool())
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn put_encrypted_secret_value(&self, name: &str, encrypted_value: &[u8]) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO encrypted_secret_values (name, encrypted_value) \
+             VALUES (?, ?) \
+             ON CONFLICT (name) DO UPDATE SET \
+             encrypted_value = excluded.encrypted_value",
+        )
+        .bind(name)
+        .bind(encrypted_value)
+        .execute(self.backend.pool())
+        .await?;
+
+        Ok(())
+    }
+
+    async fn delete_encrypted_secret_value(&self, name: &str) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM encrypted_secret_values WHERE name = ?")
+            .bind(name)
+            .execute(self.backend.pool())
+            .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
+        let rows: Vec<SecretMetadataRow> = sqlx::query_as(
+            "SELECT name, provider, provider_ref, status, created_at, updated_at \
+             FROM secrets WHERE status = 'active' ORDER BY name",
+        )
+        .fetch_all(self.backend.pool())
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(SecretMetadataRow::into_metadata)
+            .collect())
     }
 }
 
