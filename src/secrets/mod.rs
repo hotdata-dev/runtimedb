@@ -286,9 +286,10 @@ impl SecretManager {
         if !updated {
             // Our Creating record was deleted while we were writing to backend.
             // The backend value is now orphaned (harmless, will be overwritten on next create).
-            return Err(SecretError::Database(
-                "Secret was deleted during creation".to_string(),
-            ));
+            return Err(SecretError::Database(format!(
+                "Secret '{}' was deleted by another process while being created; please retry",
+                normalized
+            )));
         }
 
         Ok(())
