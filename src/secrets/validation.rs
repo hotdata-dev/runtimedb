@@ -6,7 +6,10 @@ pub fn validate_and_normalize_name(name: &str) -> Result<String, ValidationError
     if name.is_empty() || name.len() > 128 {
         return Err(ValidationError::InvalidSecretName(name.to_string()));
     }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
         return Err(ValidationError::InvalidSecretName(name.to_string()));
     }
     Ok(name.to_lowercase())
@@ -14,7 +17,9 @@ pub fn validate_and_normalize_name(name: &str) -> Result<String, ValidationError
 
 #[derive(Debug, thiserror::Error)]
 pub enum ValidationError {
-    #[error("Invalid secret name '{0}': must be 1-128 characters, alphanumeric with _ and - only")]
+    #[error(
+        "Invalid secret name '{0:.128}': must be 1-128 characters, alphanumeric with _ and - only"
+    )]
     InvalidSecretName(String),
 }
 
@@ -24,9 +29,18 @@ mod tests {
 
     #[test]
     fn test_valid_names() {
-        assert_eq!(validate_and_normalize_name("my-secret").unwrap(), "my-secret");
-        assert_eq!(validate_and_normalize_name("MY_SECRET").unwrap(), "my_secret");
-        assert_eq!(validate_and_normalize_name("secret123").unwrap(), "secret123");
+        assert_eq!(
+            validate_and_normalize_name("my-secret").unwrap(),
+            "my-secret"
+        );
+        assert_eq!(
+            validate_and_normalize_name("MY_SECRET").unwrap(),
+            "my_secret"
+        );
+        assert_eq!(
+            validate_and_normalize_name("secret123").unwrap(),
+            "secret123"
+        );
         assert_eq!(validate_and_normalize_name("a").unwrap(), "a");
         assert_eq!(validate_and_normalize_name("A-B_c-1").unwrap(), "a-b_c-1");
     }

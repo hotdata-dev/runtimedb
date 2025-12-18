@@ -4,7 +4,9 @@ mod encryption;
 mod validation;
 
 pub use backend::{BackendError, BackendRead, BackendWrite, SecretBackend, SecretRecord};
-pub use encrypted_catalog_backend::{EncryptedCatalogBackend, PROVIDER_TYPE as ENCRYPTED_PROVIDER_TYPE};
+pub use encrypted_catalog_backend::{
+    EncryptedCatalogBackend, PROVIDER_TYPE as ENCRYPTED_PROVIDER_TYPE,
+};
 pub use encryption::{decrypt, encrypt, DecryptError, EncryptError};
 pub use validation::{validate_and_normalize_name, ValidationError};
 
@@ -65,13 +67,17 @@ pub enum SecretError {
     #[error("Secret '{0}' already exists")]
     AlreadyExists(String),
 
-    #[error("Secret '{0}' is being created by another process; delete it first if you want to retry")]
+    #[error(
+        "Secret '{0}' is being created by another process; delete it first if you want to retry"
+    )]
     CreationInProgress(String),
 
     #[error("Secret manager not configured")]
     NotConfigured,
 
-    #[error("Invalid secret name '{0}': must be 1-128 characters, alphanumeric with _ and - only")]
+    #[error(
+        "Invalid secret name '{0:.128}': must be 1-128 characters, alphanumeric with _ and - only"
+    )]
     InvalidName(String),
 
     #[error("Backend error: {0}")]
@@ -225,7 +231,11 @@ impl SecretManager {
             updated_at: now,
         };
 
-        if let Err(e) = self.catalog.create_secret_metadata(&creating_metadata).await {
+        if let Err(e) = self
+            .catalog
+            .create_secret_metadata(&creating_metadata)
+            .await
+        {
             // Another request likely beat us - check what's there now
             let current = self
                 .catalog
@@ -445,7 +455,10 @@ mod tests {
         let (manager, _dir) = test_manager().await;
         let value = "my-string-secret";
 
-        manager.create("string-secret", value.as_bytes()).await.unwrap();
+        manager
+            .create("string-secret", value.as_bytes())
+            .await
+            .unwrap();
         let retrieved = manager.get_string("string-secret").await.unwrap();
 
         assert_eq!(retrieved, value);
