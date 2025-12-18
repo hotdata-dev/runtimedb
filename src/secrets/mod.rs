@@ -36,13 +36,17 @@ impl SecretStatus {
             SecretStatus::PendingDelete => "pending_delete",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for SecretStatus {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "creating" => Some(SecretStatus::Creating),
-            "active" => Some(SecretStatus::Active),
-            "pending_delete" => Some(SecretStatus::PendingDelete),
-            _ => None,
+            "creating" => Ok(SecretStatus::Creating),
+            "active" => Ok(SecretStatus::Active),
+            "pending_delete" => Ok(SecretStatus::PendingDelete),
+            _ => Err(()),
         }
     }
 }
@@ -162,7 +166,7 @@ impl SecretManager {
             .backend
             .get(&record)
             .await?
-            .ok_or_else(|| SecretError::NotFound(normalized))?;
+            .ok_or(SecretError::NotFound(normalized))?;
 
         Ok(read.value)
     }
@@ -181,7 +185,7 @@ impl SecretManager {
             .get_secret_metadata(&normalized)
             .await
             .map_err(|e| SecretError::Database(e.to_string()))?
-            .ok_or_else(|| SecretError::NotFound(normalized))
+            .ok_or(SecretError::NotFound(normalized))
     }
 
     /// Create a new secret.

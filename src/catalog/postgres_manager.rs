@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres};
 use std::fmt::{self, Debug, Formatter};
+use std::str::FromStr;
 
 pub struct PostgresCatalogManager {
     backend: CatalogBackend<Postgres>,

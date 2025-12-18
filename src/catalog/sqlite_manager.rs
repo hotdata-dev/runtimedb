@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::{Sqlite, SqlitePool};
 use std::fmt::{self, Debug, Formatter};
+use std::str::FromStr;
 
 pub struct SqliteCatalogManager {
     backend: CatalogBackend<Sqlite>,
