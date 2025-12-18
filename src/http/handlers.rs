@@ -1,7 +1,8 @@
 use crate::http::error::ApiError;
 use crate::http::models::{
-    ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse, GetConnectionResponse,
-    ListConnectionsResponse, QueryRequest, QueryResponse, TableInfo, TablesResponse,
+    ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse, DiscoverConnectionResponse,
+    DiscoveryStatus, GetConnectionResponse, ListConnectionsResponse, QueryRequest, QueryResponse,
+    TableInfo, TablesResponse,
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
 use crate::source::Source;
@@ -186,28 +187,33 @@ pub async fn create_connection_handler(
 
     let source_type = source.source_type().to_string();
 
-    // Attempt to connect (discovers tables and registers catalog)
-    engine.connect(&request.name, source).await.map_err(|e| {
-        error!("Failed to connect to database: {}", e);
-        // Extract root cause message only - don't expose full stack trace to clients
-        let root_cause = e.root_cause().to_string();
-        let msg = root_cause.lines().next().unwrap_or("Unknown error");
-
-        if msg.contains("Failed to connect") || msg.contains("connection refused") {
-            ApiError::bad_gateway(format!("Failed to connect to database: {}", msg))
-        } else if msg.contains("Unsupported source type") || msg.contains("Invalid configuration") {
-            ApiError::bad_request(msg.to_string())
-        } else {
-            ApiError::bad_gateway(format!("Failed to connect to database: {}", msg))
-        }
-    })?;
-
-    // Count discovered tables
-    let tables_discovered = engine
-        .list_tables(Some(&request.name))
+    // Step 1: Register the connection
+    engine
+        .register_connection(&request.name, source)
         .await
-        .map(|t| t.len())
-        .unwrap_or(0);
+        .map_err(|e| {
+            error!("Failed to register connection: {}", e);
+            ApiError::internal_error(format!("Failed to register connection: {}", e))
+        })?;
+
+    // Step 2: Attempt discovery - catch errors and return partial success
+    let (tables_discovered, discovery_status, discovery_error) =
+        match engine.discover_connection(&request.name).await {
+            Ok(count) => (count, DiscoveryStatus::Success, None),
+            Err(e) => {
+                let root_cause = e.root_cause().to_string();
+                let msg = root_cause
+                    .lines()
+                    .next()
+                    .unwrap_or("Unknown error")
+                    .to_string();
+                error!(
+                    "Discovery failed for connection '{}': {}",
+                    request.name, msg
+                );
+                (0, DiscoveryStatus::Failed, Some(msg))
+            }
+        };
 
     Ok((
         StatusCode::CREATED,
@@ -215,8 +221,47 @@ pub async fn create_connection_handler(
             name: request.name,
             source_type,
             tables_discovered,
+            discovery_status,
+            discovery_error,
         }),
     ))
+}
+
+/// Handler for POST /connections/{name}/discover
+pub async fn discover_connection_handler(
+    State(engine): State<Arc<RivetEngine>>,
+    Path(name): Path<String>,
+) -> Result<Json<DiscoverConnectionResponse>, ApiError> {
+    // Validate connection exists
+    if engine.catalog().get_connection(&name).await?.is_none() {
+        return Err(ApiError::not_found(format!(
+            "Connection '{}' not found",
+            name
+        )));
+    }
+
+    // Attempt discovery
+    let (tables_discovered, discovery_status, discovery_error) =
+        match engine.discover_connection(&name).await {
+            Ok(count) => (count, DiscoveryStatus::Success, None),
+            Err(e) => {
+                let root_cause = e.root_cause().to_string();
+                let msg = root_cause
+                    .lines()
+                    .next()
+                    .unwrap_or("Unknown error")
+                    .to_string();
+                error!("Discovery failed for connection '{}': {}", name, msg);
+                (0, DiscoveryStatus::Failed, Some(msg))
+            }
+        };
+
+    Ok(Json(DiscoverConnectionResponse {
+        name,
+        tables_discovered,
+        discovery_status,
+        discovery_error,
+    }))
 }
 
 /// Handler for GET /connections

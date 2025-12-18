@@ -210,8 +210,50 @@ impl RivetEngine {
         Ok(())
     }
 
-    /// Connect to a new external data source and register it as a catalog.
-    pub async fn connect(&self, name: &str, source: Source) -> Result<()> {
+    /// Register a connection without discovering tables.
+    ///
+    /// This persists the connection config to the catalog and registers it with DataFusion,
+    /// but does not attempt to connect to the remote database or discover tables.
+    /// Use `discover_connection()` to discover tables after registration.
+    pub async fn register_connection(&self, name: &str, source: Source) -> Result<i32> {
+        let source_type = source.source_type();
+
+        // Store config as JSON (includes "type" from serde tag)
+        let config_json = serde_json::to_string(&source)?;
+        let conn_id = self
+            .catalog
+            .add_connection(name, source_type, &config_json)
+            .await?;
+
+        // Register with DataFusion (empty catalog - no tables yet)
+        let catalog_provider = Arc::new(RivetCatalogProvider::new(
+            conn_id,
+            name.to_string(),
+            Arc::new(source),
+            self.catalog.clone(),
+            self.orchestrator.clone(),
+        )) as Arc<dyn CatalogProvider>;
+
+        self.df_ctx.register_catalog(name, catalog_provider);
+
+        info!("Connection '{}' registered (discovery pending)", name);
+
+        Ok(conn_id)
+    }
+
+    /// Discover tables for an existing connection.
+    ///
+    /// Connects to the remote database, discovers available tables, and stores
+    /// their metadata in the catalog. Returns the number of tables discovered.
+    pub async fn discover_connection(&self, name: &str) -> Result<usize> {
+        // Get connection info
+        let conn = self
+            .catalog
+            .get_connection(name)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", name))?;
+
+        let source: Source = serde_json::from_str(&conn.config_json)?;
         let source_type = source.source_type();
 
         // Discover tables
@@ -224,40 +266,32 @@ impl RivetEngine {
 
         info!("Discovered {} tables", tables.len());
 
-        // Store config as JSON (includes "type" from serde tag)
-        let config_json = serde_json::to_string(&source)?;
-        let conn_id = self
-            .catalog
-            .add_connection(name, source_type, &config_json)
-            .await?;
-
-        // Add discovered tables to catalog with schema in one call
+        // Add discovered tables to catalog with schema
         for table in &tables {
             let schema = table.to_arrow_schema();
             let schema_json = serde_json::to_string(schema.as_ref())
                 .map_err(|e| anyhow::anyhow!("Failed to serialize schema: {}", e))?;
             self.catalog
-                .add_table(conn_id, &table.schema_name, &table.table_name, &schema_json)
+                .add_table(conn.id, &table.schema_name, &table.table_name, &schema_json)
                 .await?;
         }
 
-        // Register with DataFusion
-        let catalog_provider = Arc::new(RivetCatalogProvider::new(
-            conn_id,
-            name.to_string(),
-            Arc::new(source),
-            self.catalog.clone(),
-            self.orchestrator.clone(),
-        )) as Arc<dyn CatalogProvider>;
-
-        self.df_ctx.register_catalog(name, catalog_provider);
-
         info!(
-            "Connection '{}' registered with {} tables",
+            "Connection '{}' discovery complete: {} tables",
             name,
             tables.len()
         );
 
+        Ok(tables.len())
+    }
+
+    /// Connect to a new external data source and register it as a catalog.
+    ///
+    /// This is a convenience method that combines `register_connection()` and
+    /// `discover_connection()`. For more control, use those methods separately.
+    pub async fn connect(&self, name: &str, source: Source) -> Result<()> {
+        self.register_connection(name, source).await?;
+        self.discover_connection(name).await?;
         Ok(())
     }
 

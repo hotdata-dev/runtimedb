@@ -39,12 +39,37 @@ pub struct CreateConnectionRequest {
     pub config: serde_json::Value,
 }
 
+/// Discovery status for connection creation
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryStatus {
+    /// Discovery succeeded
+    Success,
+    /// Discovery was skipped (e.g., skip_discovery=true)
+    Skipped,
+    /// Discovery failed (connection still registered)
+    Failed,
+}
+
 /// Response body for POST /connections
 #[derive(Debug, Serialize)]
 pub struct CreateConnectionResponse {
     pub name: String,
     pub source_type: String,
     pub tables_discovered: usize,
+    pub discovery_status: DiscoveryStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discovery_error: Option<String>,
+}
+
+/// Response body for POST /connections/{name}/discover
+#[derive(Debug, Serialize)]
+pub struct DiscoverConnectionResponse {
+    pub name: String,
+    pub tables_discovered: usize,
+    pub discovery_status: DiscoveryStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discovery_error: Option<String>,
 }
 
 /// Single connection metadata for API responses

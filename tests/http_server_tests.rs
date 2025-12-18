@@ -5,7 +5,9 @@ use axum::{
     http::{Request, StatusCode},
     Router,
 };
-use rivetdb::http::app_server::{AppServer, PATH_CONNECTIONS, PATH_QUERY, PATH_TABLES};
+use rivetdb::http::app_server::{
+    AppServer, PATH_CONNECTIONS, PATH_CONNECTION_DISCOVER, PATH_QUERY, PATH_TABLES,
+};
 use rivetdb::RivetEngine;
 use serde_json::json;
 use tempfile::TempDir;
@@ -445,6 +447,321 @@ async fn test_create_connection_missing_fields() -> Result<()> {
 
     // Axum returns UNPROCESSABLE_ENTITY (422) when required fields are missing
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    Ok(())
+}
+
+// ==================== Decoupled Registration/Discovery Tests ====================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_connection_registers_even_when_discovery_fails() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    // Create a postgres connection with invalid credentials - registration should
+    // succeed but discovery should fail
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_CONNECTIONS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "my_pg",
+                    "source_type": "postgres",
+                    "config": {
+                        "host": "localhost",
+                        "port": 5432,
+                        "user": "nonexistent_user",
+                        "password": "bad_password",
+                        "database": "nonexistent_db"
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    // Should return 201 CREATED (connection was registered)
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Verify response structure
+    assert_eq!(json["name"], "my_pg");
+    assert_eq!(json["source_type"], "postgres");
+    assert_eq!(json["tables_discovered"], 0);
+    assert_eq!(json["discovery_status"], "failed");
+    assert!(json["discovery_error"].is_string());
+
+    // Verify connection exists by listing connections
+    let list_response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(PATH_CONNECTIONS)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(list_response.status(), StatusCode::OK);
+
+    let list_body = axum::body::to_bytes(list_response.into_body(), usize::MAX).await?;
+    let list_json: serde_json::Value = serde_json::from_slice(&list_body)?;
+
+    assert_eq!(list_json["connections"].as_array().unwrap().len(), 1);
+    assert_eq!(list_json["connections"][0]["name"], "my_pg");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_discover_connection_not_found() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    let discover_path = PATH_CONNECTION_DISCOVER.replace("{name}", "nonexistent");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&discover_path)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not found"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_discover_connection_retry_after_failed_discovery() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    // First create a connection with invalid credentials
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_CONNECTIONS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "retry_conn",
+                    "source_type": "postgres",
+                    "config": {
+                        "host": "localhost",
+                        "port": 5432,
+                        "user": "bad_user",
+                        "password": "bad_pass",
+                        "database": "bad_db"
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+
+    // Now try to discover again via the discover endpoint
+    let discover_path = PATH_CONNECTION_DISCOVER.replace("{name}", "retry_conn");
+
+    let discover_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&discover_path)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    // Should return 200 OK (endpoint works, even though discovery fails)
+    assert_eq!(discover_response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(discover_response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Verify response structure for discover endpoint
+    assert_eq!(json["name"], "retry_conn");
+    assert_eq!(json["tables_discovered"], 0);
+    assert_eq!(json["discovery_status"], "failed");
+    assert!(json["discovery_error"].is_string());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_connection_duplicate_name_rejected() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    // Create first connection (will fail discovery but register successfully)
+    let first_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_CONNECTIONS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "dup_conn",
+                    "source_type": "postgres",
+                    "config": {
+                        "host": "localhost",
+                        "port": 5432,
+                        "user": "user1",
+                        "password": "pass1",
+                        "database": "db1"
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(first_response.status(), StatusCode::CREATED);
+
+    // Try to create another connection with the same name
+    let second_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_CONNECTIONS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "dup_conn",
+                    "source_type": "postgres",
+                    "config": {
+                        "host": "localhost",
+                        "port": 5432,
+                        "user": "user2",
+                        "password": "pass2",
+                        "database": "db2"
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    // Should be rejected as conflict
+    assert_eq!(second_response.status(), StatusCode::CONFLICT);
+
+    let body = axum::body::to_bytes(second_response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("already exists"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_connection_successful_discovery() -> Result<()> {
+    let (app, tempdir) = setup_test().await?;
+
+    // Create a DuckDB file with a table
+    let db_path = tempdir.path().join("test.duckdb");
+    {
+        let conn = duckdb::Connection::open(&db_path)?;
+        conn.execute_batch(
+            "CREATE TABLE users (id INTEGER, name VARCHAR);
+             INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob');",
+        )?;
+    }
+
+    // Create connection via API
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_CONNECTIONS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "test_duck",
+                    "source_type": "duckdb",
+                    "config": {
+                        "path": db_path.to_str().unwrap()
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    // Should return 201 CREATED
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Verify successful discovery response
+    assert_eq!(json["name"], "test_duck");
+    assert_eq!(json["source_type"], "duckdb");
+    assert_eq!(json["tables_discovered"], 1);
+    assert_eq!(json["discovery_status"], "success");
+    // discovery_error should not be present on success
+    assert!(json["discovery_error"].is_null());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_discover_connection_successful() -> Result<()> {
+    let (app, tempdir) = setup_test().await?;
+
+    // Create a DuckDB file with a table
+    let db_path = tempdir.path().join("discover_test.duckdb");
+    {
+        let conn = duckdb::Connection::open(&db_path)?;
+        conn.execute_batch("CREATE TABLE orders (id INTEGER, amount DECIMAL);")?;
+    }
+
+    // First create the connection
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_CONNECTIONS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "discover_duck",
+                    "source_type": "duckdb",
+                    "config": {
+                        "path": db_path.to_str().unwrap()
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+
+    // Now call discover endpoint (even though already discovered, it should work)
+    let discover_path = PATH_CONNECTION_DISCOVER.replace("{name}", "discover_duck");
+
+    let discover_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&discover_path)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(discover_response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(discover_response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Verify successful discover response
+    assert_eq!(json["name"], "discover_duck");
+    assert_eq!(json["tables_discovered"], 1);
+    assert_eq!(json["discovery_status"], "success");
+    assert!(json["discovery_error"].is_null());
 
     Ok(())
 }
