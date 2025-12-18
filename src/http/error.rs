@@ -89,33 +89,17 @@ impl From<anyhow::Error> for ApiError {
 impl From<crate::secrets::SecretError> for ApiError {
     fn from(e: crate::secrets::SecretError) -> Self {
         use crate::secrets::SecretError;
-        match e {
-            SecretError::NotFound(name) => {
-                ApiError::not_found(format!("Secret '{}' not found", name))
+        let constructor = match &e {
+            SecretError::NotFound(_) => ApiError::not_found,
+            SecretError::AlreadyExists(_) | SecretError::CreationInProgress(_) => {
+                ApiError::conflict
             }
-            SecretError::AlreadyExists(name) => {
-                ApiError::conflict(format!("Secret '{}' already exists", name))
+            SecretError::NotConfigured => ApiError::service_unavailable,
+            SecretError::InvalidName(_) => ApiError::bad_request,
+            SecretError::Backend(_) | SecretError::InvalidUtf8 | SecretError::Database(_) => {
+                ApiError::internal_error
             }
-            SecretError::CreationInProgress(name) => {
-                ApiError::conflict(format!(
-                    "Secret '{}' is being created by another process; delete it first if you want to retry",
-                    name
-                ))
-            }
-            SecretError::NotConfigured => {
-                ApiError::service_unavailable("Secret manager not configured")
-            }
-            SecretError::InvalidName(name) => ApiError::bad_request(format!(
-                "Invalid secret name '{}': must be 1-128 characters, alphanumeric with _ and - only",
-                name
-            )),
-            SecretError::Backend(msg) => {
-                ApiError::internal_error(format!("Backend error: {}", msg))
-            }
-            SecretError::InvalidUtf8 => ApiError::internal_error("Invalid UTF-8 in secret"),
-            SecretError::Database(msg) => {
-                ApiError::internal_error(format!("Database error: {}", msg))
-            }
-        }
+        };
+        constructor(e.to_string())
     }
 }

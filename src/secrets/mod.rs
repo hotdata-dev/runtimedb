@@ -8,7 +8,7 @@ pub use encrypted_catalog_backend::{
     EncryptedCatalogBackend, PROVIDER_TYPE as ENCRYPTED_PROVIDER_TYPE,
 };
 pub use encryption::{decrypt, encrypt, DecryptError, EncryptError};
-pub use validation::{validate_and_normalize_name, ValidationError};
+pub use validation::validate_and_normalize_name;
 
 use crate::catalog::CatalogManager;
 use chrono::Utc;
@@ -92,14 +92,6 @@ pub enum SecretError {
 
     #[error("Database error: {0}")]
     Database(String),
-}
-
-impl From<ValidationError> for SecretError {
-    fn from(e: ValidationError) -> Self {
-        match e {
-            ValidationError::InvalidSecretName(name) => SecretError::InvalidName(name),
-        }
-    }
 }
 
 impl From<BackendError> for SecretError {
