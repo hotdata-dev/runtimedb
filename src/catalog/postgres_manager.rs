@@ -1,7 +1,7 @@
 use crate::catalog::backend::CatalogBackend;
-use crate::catalog::manager::{CatalogManager, ConnectionInfo, TableInfo};
+use crate::catalog::manager::{CatalogManager, ConnectionInfo, OptimisticLock, TableInfo};
 use crate::catalog::migrations::{run_migrations, CatalogMigrations};
-use crate::secrets::SecretMetadata;
+use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -196,13 +196,16 @@ impl CatalogManager for PostgresCatalogManager {
         #[derive(sqlx::FromRow)]
         struct Row {
             name: String,
+            provider: String,
             provider_ref: Option<String>,
+            status: String,
             created_at: DateTime<Utc>,
             updated_at: DateTime<Utc>,
         }
 
         let row: Option<Row> = sqlx::query_as(
-            "SELECT name, provider_ref, created_at, updated_at FROM secrets WHERE name = $1 AND status = 'active'",
+            "SELECT name, provider, provider_ref, status, created_at, updated_at \
+             FROM secrets WHERE name = $1 AND status = 'active'",
         )
         .bind(name)
         .fetch_optional(self.backend.pool())
@@ -210,7 +213,9 @@ impl CatalogManager for PostgresCatalogManager {
 
         Ok(row.map(|r| SecretMetadata {
             name: r.name,
+            provider: r.provider,
             provider_ref: r.provider_ref,
+            status: SecretStatus::from_str(&r.status).unwrap_or(SecretStatus::Active),
             created_at: r.created_at,
             updated_at: r.updated_at,
         }))
@@ -220,13 +225,16 @@ impl CatalogManager for PostgresCatalogManager {
         #[derive(sqlx::FromRow)]
         struct Row {
             name: String,
+            provider: String,
             provider_ref: Option<String>,
+            status: String,
             created_at: DateTime<Utc>,
             updated_at: DateTime<Utc>,
         }
 
         let row: Option<Row> = sqlx::query_as(
-            "SELECT name, provider_ref, created_at, updated_at FROM secrets WHERE name = $1",
+            "SELECT name, provider, provider_ref, status, created_at, updated_at \
+             FROM secrets WHERE name = $1",
         )
         .bind(name)
         .fetch_optional(self.backend.pool())
@@ -234,28 +242,25 @@ impl CatalogManager for PostgresCatalogManager {
 
         Ok(row.map(|r| SecretMetadata {
             name: r.name,
+            provider: r.provider,
             provider_ref: r.provider_ref,
+            status: SecretStatus::from_str(&r.status).unwrap_or(SecretStatus::Active),
             created_at: r.created_at,
             updated_at: r.updated_at,
         }))
     }
 
-    async fn create_secret_metadata(
-        &self,
-        name: &str,
-        provider: &str,
-        provider_ref: Option<&str>,
-        timestamp: DateTime<Utc>,
-    ) -> Result<()> {
+    async fn create_secret_metadata(&self, metadata: &SecretMetadata) -> Result<()> {
         sqlx::query(
             "INSERT INTO secrets (name, provider, provider_ref, status, created_at, updated_at) \
-             VALUES ($1, $2, $3, 'active', $4, $5)",
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
-        .bind(name)
-        .bind(provider)
-        .bind(provider_ref)
-        .bind(timestamp)
-        .bind(timestamp)
+        .bind(&metadata.name)
+        .bind(&metadata.provider)
+        .bind(&metadata.provider_ref)
+        .bind(metadata.status.as_str())
+        .bind(metadata.created_at)
+        .bind(metadata.updated_at)
         .execute(self.backend.pool())
         .await?;
 
@@ -264,28 +269,45 @@ impl CatalogManager for PostgresCatalogManager {
 
     async fn update_secret_metadata(
         &self,
-        name: &str,
-        provider: &str,
-        provider_ref: Option<&str>,
-        timestamp: DateTime<Utc>,
-    ) -> Result<()> {
-        sqlx::query(
-            "UPDATE secrets SET provider = $1, provider_ref = $2, status = 'active', updated_at = $3 \
-             WHERE name = $4",
-        )
-        .bind(provider)
-        .bind(provider_ref)
-        .bind(timestamp)
-        .bind(name)
-        .execute(self.backend.pool())
-        .await?;
+        metadata: &SecretMetadata,
+        lock: Option<OptimisticLock>,
+    ) -> Result<bool> {
+        let result = match lock {
+            Some(lock) => {
+                sqlx::query(
+                    "UPDATE secrets SET provider = $1, provider_ref = $2, status = $3, updated_at = $4 \
+                     WHERE name = $5 AND created_at = $6",
+                )
+                .bind(&metadata.provider)
+                .bind(&metadata.provider_ref)
+                .bind(metadata.status.as_str())
+                .bind(metadata.updated_at)
+                .bind(&metadata.name)
+                .bind(lock.created_at)
+                .execute(self.backend.pool())
+                .await?
+            }
+            None => {
+                sqlx::query(
+                    "UPDATE secrets SET provider = $1, provider_ref = $2, status = $3, updated_at = $4 \
+                     WHERE name = $5",
+                )
+                .bind(&metadata.provider)
+                .bind(&metadata.provider_ref)
+                .bind(metadata.status.as_str())
+                .bind(metadata.updated_at)
+                .bind(&metadata.name)
+                .execute(self.backend.pool())
+                .await?
+            }
+        };
 
-        Ok(())
+        Ok(result.rows_affected() > 0)
     }
 
-    async fn set_secret_status(&self, name: &str, status: &str) -> Result<bool> {
+    async fn set_secret_status(&self, name: &str, status: SecretStatus) -> Result<bool> {
         let result = sqlx::query("UPDATE secrets SET status = $1 WHERE name = $2")
-            .bind(status)
+            .bind(status.as_str())
             .bind(name)
             .execute(self.backend.pool())
             .await?;
@@ -338,13 +360,16 @@ impl CatalogManager for PostgresCatalogManager {
         #[derive(sqlx::FromRow)]
         struct Row {
             name: String,
+            provider: String,
             provider_ref: Option<String>,
+            status: String,
             created_at: DateTime<Utc>,
             updated_at: DateTime<Utc>,
         }
 
         let rows: Vec<Row> = sqlx::query_as(
-            "SELECT name, provider_ref, created_at, updated_at FROM secrets WHERE status = 'active' ORDER BY name",
+            "SELECT name, provider, provider_ref, status, created_at, updated_at \
+             FROM secrets WHERE status = 'active' ORDER BY name",
         )
         .fetch_all(self.backend.pool())
         .await?;
@@ -353,7 +378,9 @@ impl CatalogManager for PostgresCatalogManager {
             .into_iter()
             .map(|r| SecretMetadata {
                 name: r.name,
+                provider: r.provider,
                 provider_ref: r.provider_ref,
+                status: SecretStatus::from_str(&r.status).unwrap_or(SecretStatus::Active),
                 created_at: r.created_at,
                 updated_at: r.updated_at,
             })

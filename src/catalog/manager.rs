@@ -1,10 +1,22 @@
-use crate::secrets::SecretMetadata;
+use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::fmt::Debug;
+
+/// Used to conditionally update a secret only if it hasn't been modified.
+#[derive(Debug, Clone, Copy)]
+pub struct OptimisticLock {
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<DateTime<Utc>> for OptimisticLock {
+    fn from(created_at: DateTime<Utc>) -> Self {
+        Self { created_at }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ConnectionInfo {
@@ -81,25 +93,19 @@ pub trait CatalogManager: Debug + Send + Sync {
     async fn get_secret_metadata_any_status(&self, name: &str) -> Result<Option<SecretMetadata>>;
 
     /// Create secret metadata. Fails if the secret already exists.
-    async fn create_secret_metadata(
-        &self,
-        name: &str,
-        provider: &str,
-        provider_ref: Option<&str>,
-        timestamp: DateTime<Utc>,
-    ) -> Result<()>;
+    async fn create_secret_metadata(&self, metadata: &SecretMetadata) -> Result<()>;
 
-    /// Update existing secret metadata. Sets status to 'active'.
+    /// Update existing secret metadata.
+    /// If `lock` is Some, only updates if created_at matches (returns false on mismatch).
+    /// If `lock` is None, updates unconditionally.
     async fn update_secret_metadata(
         &self,
-        name: &str,
-        provider: &str,
-        provider_ref: Option<&str>,
-        timestamp: DateTime<Utc>,
-    ) -> Result<()>;
+        metadata: &SecretMetadata,
+        lock: Option<OptimisticLock>,
+    ) -> Result<bool>;
 
-    /// Set the status of a secret ('active' or 'pending_delete').
-    async fn set_secret_status(&self, name: &str, status: &str) -> Result<bool>;
+    /// Set the status of a secret.
+    async fn set_secret_status(&self, name: &str, status: SecretStatus) -> Result<bool>;
 
     /// Delete secret metadata. Returns true if the secret existed.
     async fn delete_secret_metadata(&self, name: &str) -> Result<bool>;

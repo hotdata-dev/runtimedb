@@ -96,6 +96,12 @@ impl From<crate::secrets::SecretError> for ApiError {
             SecretError::AlreadyExists(name) => {
                 ApiError::conflict(format!("Secret '{}' already exists", name))
             }
+            SecretError::CreationInProgress(name) => {
+                ApiError::conflict(format!(
+                    "Secret '{}' is being created by another process; delete it first if you want to retry",
+                    name
+                ))
+            }
             SecretError::NotConfigured => {
                 ApiError::service_unavailable("Secret manager not configured")
             }

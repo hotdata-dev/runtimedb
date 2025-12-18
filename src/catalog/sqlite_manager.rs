@@ -1,10 +1,10 @@
 use crate::catalog::backend::CatalogBackend;
-use crate::catalog::manager::{CatalogManager, ConnectionInfo, TableInfo};
+use crate::catalog::manager::{CatalogManager, ConnectionInfo, OptimisticLock, TableInfo};
 use crate::catalog::migrations::{run_migrations, CatalogMigrations};
-use crate::secrets::SecretMetadata;
+use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use sqlx::{Sqlite, SqlitePool};
 use std::fmt::{self, Debug, Formatter};
 
@@ -178,13 +178,16 @@ impl CatalogManager for SqliteCatalogManager {
         #[derive(sqlx::FromRow)]
         struct Row {
             name: String,
+            provider: String,
             provider_ref: Option<String>,
+            status: String,
             created_at: String,
             updated_at: String,
         }
 
         let row: Option<Row> = sqlx::query_as(
-            "SELECT name, provider_ref, created_at, updated_at FROM secrets WHERE name = ? AND status = 'active'",
+            "SELECT name, provider, provider_ref, status, created_at, updated_at \
+             FROM secrets WHERE name = ? AND status = 'active'",
         )
         .bind(name)
         .fetch_optional(self.backend.pool())
@@ -192,7 +195,9 @@ impl CatalogManager for SqliteCatalogManager {
 
         Ok(row.map(|r| SecretMetadata {
             name: r.name,
+            provider: r.provider,
             provider_ref: r.provider_ref,
+            status: SecretStatus::from_str(&r.status).unwrap_or(SecretStatus::Active),
             created_at: r.created_at.parse().unwrap_or_else(|_| Utc::now()),
             updated_at: r.updated_at.parse().unwrap_or_else(|_| Utc::now()),
         }))
@@ -202,13 +207,16 @@ impl CatalogManager for SqliteCatalogManager {
         #[derive(sqlx::FromRow)]
         struct Row {
             name: String,
+            provider: String,
             provider_ref: Option<String>,
+            status: String,
             created_at: String,
             updated_at: String,
         }
 
         let row: Option<Row> = sqlx::query_as(
-            "SELECT name, provider_ref, created_at, updated_at FROM secrets WHERE name = ?",
+            "SELECT name, provider, provider_ref, status, created_at, updated_at \
+             FROM secrets WHERE name = ?",
         )
         .bind(name)
         .fetch_optional(self.backend.pool())
@@ -216,30 +224,28 @@ impl CatalogManager for SqliteCatalogManager {
 
         Ok(row.map(|r| SecretMetadata {
             name: r.name,
+            provider: r.provider,
             provider_ref: r.provider_ref,
+            status: SecretStatus::from_str(&r.status).unwrap_or(SecretStatus::Active),
             created_at: r.created_at.parse().unwrap_or_else(|_| Utc::now()),
             updated_at: r.updated_at.parse().unwrap_or_else(|_| Utc::now()),
         }))
     }
 
-    async fn create_secret_metadata(
-        &self,
-        name: &str,
-        provider: &str,
-        provider_ref: Option<&str>,
-        timestamp: DateTime<Utc>,
-    ) -> Result<()> {
-        let ts = timestamp.to_rfc3339();
+    async fn create_secret_metadata(&self, metadata: &SecretMetadata) -> Result<()> {
+        let created_at = metadata.created_at.to_rfc3339();
+        let updated_at = metadata.updated_at.to_rfc3339();
 
         sqlx::query(
             "INSERT INTO secrets (name, provider, provider_ref, status, created_at, updated_at) \
-             VALUES (?, ?, ?, 'active', ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
-        .bind(name)
-        .bind(provider)
-        .bind(provider_ref)
-        .bind(&ts)
-        .bind(&ts)
+        .bind(&metadata.name)
+        .bind(&metadata.provider)
+        .bind(&metadata.provider_ref)
+        .bind(metadata.status.as_str())
+        .bind(&created_at)
+        .bind(&updated_at)
         .execute(self.backend.pool())
         .await?;
 
@@ -248,30 +254,48 @@ impl CatalogManager for SqliteCatalogManager {
 
     async fn update_secret_metadata(
         &self,
-        name: &str,
-        provider: &str,
-        provider_ref: Option<&str>,
-        timestamp: DateTime<Utc>,
-    ) -> Result<()> {
-        let ts = timestamp.to_rfc3339();
+        metadata: &SecretMetadata,
+        lock: Option<OptimisticLock>,
+    ) -> Result<bool> {
+        let updated_at = metadata.updated_at.to_rfc3339();
 
-        sqlx::query(
-            "UPDATE secrets SET provider = ?, provider_ref = ?, status = 'active', updated_at = ? \
-             WHERE name = ?",
-        )
-        .bind(provider)
-        .bind(provider_ref)
-        .bind(&ts)
-        .bind(name)
-        .execute(self.backend.pool())
-        .await?;
+        let result = match lock {
+            Some(lock) => {
+                let expected_created_at = lock.created_at.to_rfc3339();
+                sqlx::query(
+                    "UPDATE secrets SET provider = ?, provider_ref = ?, status = ?, updated_at = ? \
+                     WHERE name = ? AND created_at = ?",
+                )
+                .bind(&metadata.provider)
+                .bind(&metadata.provider_ref)
+                .bind(metadata.status.as_str())
+                .bind(&updated_at)
+                .bind(&metadata.name)
+                .bind(&expected_created_at)
+                .execute(self.backend.pool())
+                .await?
+            }
+            None => {
+                sqlx::query(
+                    "UPDATE secrets SET provider = ?, provider_ref = ?, status = ?, updated_at = ? \
+                     WHERE name = ?",
+                )
+                .bind(&metadata.provider)
+                .bind(&metadata.provider_ref)
+                .bind(metadata.status.as_str())
+                .bind(&updated_at)
+                .bind(&metadata.name)
+                .execute(self.backend.pool())
+                .await?
+            }
+        };
 
-        Ok(())
+        Ok(result.rows_affected() > 0)
     }
 
-    async fn set_secret_status(&self, name: &str, status: &str) -> Result<bool> {
+    async fn set_secret_status(&self, name: &str, status: SecretStatus) -> Result<bool> {
         let result = sqlx::query("UPDATE secrets SET status = ? WHERE name = ?")
-            .bind(status)
+            .bind(status.as_str())
             .bind(name)
             .execute(self.backend.pool())
             .await?;
@@ -324,13 +348,16 @@ impl CatalogManager for SqliteCatalogManager {
         #[derive(sqlx::FromRow)]
         struct Row {
             name: String,
+            provider: String,
             provider_ref: Option<String>,
+            status: String,
             created_at: String,
             updated_at: String,
         }
 
         let rows: Vec<Row> = sqlx::query_as(
-            "SELECT name, provider_ref, created_at, updated_at FROM secrets WHERE status = 'active' ORDER BY name",
+            "SELECT name, provider, provider_ref, status, created_at, updated_at \
+             FROM secrets WHERE status = 'active' ORDER BY name",
         )
         .fetch_all(self.backend.pool())
         .await?;
@@ -339,7 +366,9 @@ impl CatalogManager for SqliteCatalogManager {
             .into_iter()
             .map(|r| SecretMetadata {
                 name: r.name,
+                provider: r.provider,
                 provider_ref: r.provider_ref,
+                status: SecretStatus::from_str(&r.status).unwrap_or(SecretStatus::Active),
                 created_at: r.created_at.parse().unwrap_or_else(|_| Utc::now()),
                 updated_at: r.updated_at.parse().unwrap_or_else(|_| Utc::now()),
             })

@@ -15,11 +15,43 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc as ChronoUtc};
 
+/// Status of a secret in its lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretStatus {
+    /// Secret is being created; backend write in progress.
+    Creating,
+    /// Secret is active and available.
+    Active,
+    /// Secret is marked for deletion; cleanup in progress.
+    PendingDelete,
+}
+
+impl SecretStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SecretStatus::Creating => "creating",
+            SecretStatus::Active => "active",
+            SecretStatus::PendingDelete => "pending_delete",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "creating" => Some(SecretStatus::Creating),
+            "active" => Some(SecretStatus::Active),
+            "pending_delete" => Some(SecretStatus::PendingDelete),
+            _ => None,
+        }
+    }
+}
+
 /// Metadata about a stored secret (no sensitive data).
 #[derive(Debug, Clone)]
 pub struct SecretMetadata {
     pub name: String,
+    pub provider: String,
     pub provider_ref: Option<String>,
+    pub status: SecretStatus,
     pub created_at: DateTime<ChronoUtc>,
     pub updated_at: DateTime<ChronoUtc>,
 }
@@ -32,6 +64,9 @@ pub enum SecretError {
 
     #[error("Secret '{0}' already exists")]
     AlreadyExists(String),
+
+    #[error("Secret '{0}' is being created by another process; delete it first if you want to retry")]
+    CreationInProgress(String),
 
     #[error("Secret manager not configured")]
     NotConfigured,
@@ -145,62 +180,109 @@ impl SecretManager {
 
     /// Create a new secret.
     ///
-    /// Fails with `AlreadyExists` if an active secret with this name exists.
-    /// If a `pending_delete` record exists, it will be cleaned up and replaced.
-    /// For updating an existing secret, use `update` instead.
+    /// Uses optimistic locking to handle concurrent creation attempts safely:
+    /// 1. Insert metadata with status=Creating (claims the name)
+    /// 2. Store value in backend
+    /// 3. Update metadata to Active with optimistic lock on created_at
+    ///
+    /// If step 2 fails, the Creating record remains (user must delete to retry).
+    /// If another request races us at step 1, we detect it and return appropriate error.
     pub async fn create(&self, name: &str, value: &[u8]) -> Result<(), SecretError> {
+        use crate::catalog::OptimisticLock;
+
         let normalized = validate_and_normalize_name(name)?;
 
-        // Check if an active secret already exists
-        let existing_active = self
-            .catalog
-            .get_secret_metadata(&normalized)
-            .await
-            .map_err(|e| SecretError::Database(e.to_string()))?;
-
-        if existing_active.is_some() {
-            return Err(SecretError::AlreadyExists(normalized));
-        }
-
-        // Check for stale pending_delete record and clean it up
-        let existing_any = self
+        // Check existing state
+        let existing = self
             .catalog
             .get_secret_metadata_any_status(&normalized)
             .await
             .map_err(|e| SecretError::Database(e.to_string()))?;
 
-        if existing_any.is_some() {
-            // Stale record from failed delete - clean it up
-            tracing::info!(
-                secret = %normalized,
-                "Cleaning up stale pending_delete metadata before create"
-            );
-            let _ = self.catalog.delete_secret_metadata(&normalized).await;
+        if let Some(metadata) = existing {
+            match metadata.status {
+                SecretStatus::Active => return Err(SecretError::AlreadyExists(normalized)),
+                SecretStatus::Creating => return Err(SecretError::CreationInProgress(normalized)),
+                SecretStatus::PendingDelete => {
+                    // Stale record from failed delete - clean it up
+                    tracing::info!(
+                        secret = %normalized,
+                        "Cleaning up stale pending_delete metadata before create"
+                    );
+                    let _ = self.catalog.delete_secret_metadata(&normalized).await;
+                }
+            }
         }
 
-        let record = SecretRecord {
+        // Step 1: Insert metadata with status=Creating to claim the name
+        let now = Utc::now();
+        let creating_metadata = SecretMetadata {
             name: normalized.clone(),
-            provider_ref: None, // New secrets never have a provider_ref
+            provider: self.provider_type.clone(),
+            provider_ref: None,
+            status: SecretStatus::Creating,
+            created_at: now,
+            updated_at: now,
         };
 
-        // Store via backend
-        let write = self.backend.put(&record, value).await?;
+        if let Err(e) = self.catalog.create_secret_metadata(&creating_metadata).await {
+            // Another request likely beat us - check what's there now
+            let current = self
+                .catalog
+                .get_secret_metadata_any_status(&normalized)
+                .await
+                .map_err(|e2| SecretError::Database(e2.to_string()))?;
 
-        // Create metadata
-        let now = Utc::now();
-        if let Err(e) = self
+            return match current.map(|m| m.status) {
+                Some(SecretStatus::Active) => Err(SecretError::AlreadyExists(normalized)),
+                Some(SecretStatus::Creating) => Err(SecretError::CreationInProgress(normalized)),
+                _ => Err(SecretError::Database(e.to_string())),
+            };
+        }
+
+        // Step 2: Store value in backend
+        let record = SecretRecord {
+            name: normalized.clone(),
+            provider_ref: None,
+        };
+
+        let write = match self.backend.put(&record, value).await {
+            Ok(w) => w,
+            Err(e) => {
+                // Backend failed - leave Creating record in place.
+                // User must delete to retry.
+                tracing::error!(
+                    secret = %normalized,
+                    error = %e,
+                    "Backend write failed during create; secret left in Creating state"
+                );
+                return Err(e.into());
+            }
+        };
+
+        // Step 3: Update metadata to Active with optimistic lock
+        let active_metadata = SecretMetadata {
+            name: normalized.clone(),
+            provider: self.provider_type.clone(),
+            provider_ref: write.provider_ref,
+            status: SecretStatus::Active,
+            created_at: now,
+            updated_at: Utc::now(),
+        };
+
+        let lock = OptimisticLock::from(now);
+        let updated = self
             .catalog
-            .create_secret_metadata(
-                &normalized,
-                &self.provider_type,
-                write.provider_ref.as_deref(),
-                now,
-            )
+            .update_secret_metadata(&active_metadata, Some(lock))
             .await
-        {
-            // Rollback: delete the value we just stored
-            let _ = self.backend.delete(&record).await;
-            return Err(SecretError::Database(e.to_string()));
+            .map_err(|e| SecretError::Database(e.to_string()))?;
+
+        if !updated {
+            // Our Creating record was deleted while we were writing to backend.
+            // The backend value is now orphaned (harmless, will be overwritten on next create).
+            return Err(SecretError::Database(
+                "Secret was deleted during creation".to_string(),
+            ));
         }
 
         Ok(())
@@ -234,15 +316,19 @@ impl SecretManager {
         // Use new provider_ref if backend returned one, otherwise preserve existing
         let updated_ref = write.provider_ref.or(existing_ref);
 
-        // Update metadata timestamp
+        // Update metadata timestamp (no optimistic lock for updates - last write wins)
         let now = Utc::now();
+        let updated_metadata = SecretMetadata {
+            name: normalized.clone(),
+            provider: self.provider_type.clone(),
+            provider_ref: updated_ref,
+            status: SecretStatus::Active,
+            created_at: metadata.created_at,
+            updated_at: now,
+        };
+
         self.catalog
-            .update_secret_metadata(
-                &normalized,
-                &self.provider_type,
-                updated_ref.as_deref(),
-                now,
-            )
+            .update_secret_metadata(&updated_metadata, None)
             .await
             .map_err(|e| SecretError::Database(e.to_string()))?;
 
@@ -273,7 +359,7 @@ impl SecretManager {
         // Phase 1: Mark as pending_delete (secret becomes invisible to reads)
         // This is idempotent if already pending_delete.
         self.catalog
-            .set_secret_status(&normalized, "pending_delete")
+            .set_secret_status(&normalized, SecretStatus::PendingDelete)
             .await
             .map_err(|e| SecretError::Database(e.to_string()))?;
 
@@ -483,7 +569,7 @@ mod tests {
 
         // Simulate a failed delete by setting status to pending_delete directly
         catalog
-            .set_secret_status("retry-delete", "pending_delete")
+            .set_secret_status("retry-delete", SecretStatus::PendingDelete)
             .await
             .unwrap();
 
@@ -500,5 +586,49 @@ mod tests {
             .await
             .unwrap();
         assert!(any_status.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_create_blocked_by_creating_status() {
+        // If a secret is stuck in "creating" status (e.g., backend write failed),
+        // subsequent creates should return CreationInProgress error.
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let catalog = Arc::new(
+            SqliteCatalogManager::new(db_path.to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        catalog.run_migrations().await.unwrap();
+
+        let backend = Arc::new(EncryptedCatalogBackend::new(test_key(), catalog.clone()));
+        let manager = SecretManager::new(backend, catalog.clone(), ENCRYPTED_PROVIDER_TYPE);
+
+        // Manually insert a secret in "creating" status (simulating failed backend write)
+        let now = chrono::Utc::now();
+        let creating_metadata = SecretMetadata {
+            name: "stuck-secret".to_string(),
+            provider: ENCRYPTED_PROVIDER_TYPE.to_string(),
+            provider_ref: None,
+            status: SecretStatus::Creating,
+            created_at: now,
+            updated_at: now,
+        };
+        catalog
+            .create_secret_metadata(&creating_metadata)
+            .await
+            .unwrap();
+
+        // Attempt to create the same secret should return CreationInProgress
+        let result = manager.create("stuck-secret", b"value").await;
+        assert!(matches!(result, Err(SecretError::CreationInProgress(_))));
+
+        // User can delete the stuck secret to retry
+        manager.delete("stuck-secret").await.unwrap();
+
+        // Now create should succeed
+        manager.create("stuck-secret", b"value").await.unwrap();
+        let retrieved = manager.get("stuck-secret").await.unwrap();
+        assert_eq!(retrieved, b"value");
     }
 }
