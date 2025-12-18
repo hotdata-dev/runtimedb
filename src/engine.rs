@@ -14,6 +14,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::error;
 
+/// Default insecure encryption key for development use only.
+/// This key is publicly known and provides NO security.
+/// It is a base64-encoded 32-byte key: "INSECURE_DEFAULT_KEY_RIVETDB!!!!"
+const DEFAULT_INSECURE_KEY: &str = "SU5TRUNVUkVfREVGQVVMVF9LRVlfUklWRVREQiEhISE=";
+
 pub struct QueryResponse {
     pub results: Vec<RecordBatch>,
     pub execution_time: Duration,
@@ -566,7 +571,7 @@ impl RivetEngineBuilder {
 
     /// Set the encryption key for the secret manager (base64-encoded 32-byte key).
     /// If not set, falls back to RIVETDB_SECRET_KEY environment variable.
-    /// The secret key is required - build() will fail if neither is set.
+    /// If neither is set, uses a default insecure key (with loud warnings).
     pub fn secret_key(mut self, key: impl Into<String>) -> Self {
         self.secret_key = Some(key.into());
         self
@@ -631,13 +636,28 @@ impl RivetEngineBuilder {
         let df_ctx = SessionContext::new();
         storage.register_with_datafusion(&df_ctx)?;
 
-        // Step 6: Initialize secret manager (required)
-        let secret_key = self.secret_key.ok_or_else(|| {
-            anyhow::anyhow!(
-                "RIVETDB_SECRET_KEY environment variable is required. \
-                Generate one with: openssl rand -base64 32"
-            )
-        })?;
+        // Step 6: Initialize secret manager
+        let (secret_key, using_default_key) = match self.secret_key {
+            Some(key) => (key, false),
+            None => {
+                // Use insecure default key for development convenience
+                (DEFAULT_INSECURE_KEY.to_string(), true)
+            }
+        };
+
+        if using_default_key {
+            warn!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+            warn!("!!!                    SECURITY WARNING                       !!!");
+            warn!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+            warn!("!!! Using DEFAULT INSECURE encryption key for secrets.        !!!");
+            warn!("!!! This key is PUBLICLY KNOWN and provides NO SECURITY.      !!!");
+            warn!("!!!                                                           !!!");
+            warn!("!!! DO NOT USE IN PRODUCTION!                                 !!!");
+            warn!("!!!                                                           !!!");
+            warn!("!!! To fix: Set RIVETDB_SECRET_KEY environment variable       !!!");
+            warn!("!!! Generate a key with: openssl rand -base64 32              !!!");
+            warn!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        }
 
         let backend = Arc::new(
             EncryptedCatalogBackend::from_base64_key(&secret_key, catalog.clone())
@@ -749,8 +769,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_builder_fails_without_secret_key() {
-        // Test that builder fails when no secret key is provided
+    async fn test_builder_uses_default_key_without_secret_key() {
+        // Test that builder uses default insecure key when no secret key is provided
         let temp_dir = TempDir::new().unwrap();
 
         // Temporarily clear the env var if set
@@ -767,13 +787,16 @@ mod tests {
             std::env::set_var("RIVETDB_SECRET_KEY", key);
         }
 
-        assert!(result.is_err(), "Builder should fail without secret key");
-        let err_msg = result.err().unwrap().to_string();
+        // Should succeed with default insecure key (with warnings logged)
         assert!(
-            err_msg.contains("RIVETDB_SECRET_KEY"),
-            "Error should mention RIVETDB_SECRET_KEY: {}",
-            err_msg
+            result.is_ok(),
+            "Builder should succeed with default key: {:?}",
+            result.err()
         );
+
+        let engine = result.unwrap();
+        let connections = engine.list_connections().await;
+        assert!(connections.is_ok(), "Should be able to list connections");
     }
 
     #[tokio::test(flavor = "multi_thread")]
