@@ -14,6 +14,30 @@ pub struct SqliteCatalogManager {
     catalog_path: String,
 }
 
+/// Row type for secret metadata queries (SQLite stores timestamps as strings)
+#[derive(sqlx::FromRow)]
+struct SecretMetadataRow {
+    name: String,
+    provider: String,
+    provider_ref: Option<String>,
+    status: String,
+    created_at: String,
+    updated_at: String,
+}
+
+impl SecretMetadataRow {
+    fn into_metadata(self) -> SecretMetadata {
+        SecretMetadata {
+            name: self.name,
+            provider: self.provider,
+            provider_ref: self.provider_ref,
+            status: SecretStatus::from_str(&self.status).unwrap_or(SecretStatus::Active),
+            created_at: self.created_at.parse().unwrap_or_else(|_| Utc::now()),
+            updated_at: self.updated_at.parse().unwrap_or_else(|_| Utc::now()),
+        }
+    }
+}
+
 impl Debug for SqliteCatalogManager {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("SqliteCatalogManager")
@@ -176,17 +200,7 @@ impl CatalogManager for SqliteCatalogManager {
     }
 
     async fn get_secret_metadata(&self, name: &str) -> Result<Option<SecretMetadata>> {
-        #[derive(sqlx::FromRow)]
-        struct Row {
-            name: String,
-            provider: String,
-            provider_ref: Option<String>,
-            status: String,
-            created_at: String,
-            updated_at: String,
-        }
-
-        let row: Option<Row> = sqlx::query_as(
+        let row: Option<SecretMetadataRow> = sqlx::query_as(
             "SELECT name, provider, provider_ref, status, created_at, updated_at \
              FROM secrets WHERE name = ? AND status = 'active'",
         )
@@ -194,28 +208,11 @@ impl CatalogManager for SqliteCatalogManager {
         .fetch_optional(self.backend.pool())
         .await?;
 
-        Ok(row.map(|r| SecretMetadata {
-            name: r.name,
-            provider: r.provider,
-            provider_ref: r.provider_ref,
-            status: SecretStatus::from_str(&r.status).unwrap_or(SecretStatus::Active),
-            created_at: r.created_at.parse().unwrap_or_else(|_| Utc::now()),
-            updated_at: r.updated_at.parse().unwrap_or_else(|_| Utc::now()),
-        }))
+        Ok(row.map(SecretMetadataRow::into_metadata))
     }
 
     async fn get_secret_metadata_any_status(&self, name: &str) -> Result<Option<SecretMetadata>> {
-        #[derive(sqlx::FromRow)]
-        struct Row {
-            name: String,
-            provider: String,
-            provider_ref: Option<String>,
-            status: String,
-            created_at: String,
-            updated_at: String,
-        }
-
-        let row: Option<Row> = sqlx::query_as(
+        let row: Option<SecretMetadataRow> = sqlx::query_as(
             "SELECT name, provider, provider_ref, status, created_at, updated_at \
              FROM secrets WHERE name = ?",
         )
@@ -223,14 +220,7 @@ impl CatalogManager for SqliteCatalogManager {
         .fetch_optional(self.backend.pool())
         .await?;
 
-        Ok(row.map(|r| SecretMetadata {
-            name: r.name,
-            provider: r.provider,
-            provider_ref: r.provider_ref,
-            status: SecretStatus::from_str(&r.status).unwrap_or(SecretStatus::Active),
-            created_at: r.created_at.parse().unwrap_or_else(|_| Utc::now()),
-            updated_at: r.updated_at.parse().unwrap_or_else(|_| Utc::now()),
-        }))
+        Ok(row.map(SecretMetadataRow::into_metadata))
     }
 
     async fn create_secret_metadata(&self, metadata: &SecretMetadata) -> Result<()> {
@@ -344,17 +334,7 @@ impl CatalogManager for SqliteCatalogManager {
     }
 
     async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
-        #[derive(sqlx::FromRow)]
-        struct Row {
-            name: String,
-            provider: String,
-            provider_ref: Option<String>,
-            status: String,
-            created_at: String,
-            updated_at: String,
-        }
-
-        let rows: Vec<Row> = sqlx::query_as(
+        let rows: Vec<SecretMetadataRow> = sqlx::query_as(
             "SELECT name, provider, provider_ref, status, created_at, updated_at \
              FROM secrets WHERE status = 'active' ORDER BY name",
         )
@@ -363,14 +343,7 @@ impl CatalogManager for SqliteCatalogManager {
 
         Ok(rows
             .into_iter()
-            .map(|r| SecretMetadata {
-                name: r.name,
-                provider: r.provider,
-                provider_ref: r.provider_ref,
-                status: SecretStatus::from_str(&r.status).unwrap_or(SecretStatus::Active),
-                created_at: r.created_at.parse().unwrap_or_else(|_| Utc::now()),
-                updated_at: r.updated_at.parse().unwrap_or_else(|_| Utc::now()),
-            })
+            .map(SecretMetadataRow::into_metadata)
             .collect())
     }
 }
