@@ -44,11 +44,7 @@ async fn build_catalog(
             warehouse,
             ..
         } => (catalog_type, warehouse),
-        _ => {
-            return Err(DataFetchError::Connection(
-                "Expected Iceberg source".to_string(),
-            ))
-        }
+        _ => unreachable!("build_catalog called with non-Iceberg source")
     };
 
     match catalog_type {
@@ -166,7 +162,7 @@ pub async fn discover_tables(
 
             tables.push(TableMetadata {
                 catalog_name: None,
-                schema_name: ns.to_url_string(),
+                schema_name: ns.as_ref().join("."),
                 table_name: table_ident.name().to_string(),
                 table_type: "BASE TABLE".to_string(),
                 columns,
@@ -280,6 +276,9 @@ fn convert_arrow_batch(
     use datafusion::arrow::ipc::reader::StreamReader as DatafusionStreamReader;
 
     // Serialize with arrow 55
+    // Note: IPC serialization temporarily holds both the original batch and serialized
+    // form in memory. For very large batches, consider configuring smaller batch sizes
+    // at the source level.
     let mut buffer = Vec::new();
     {
         let mut stream_writer =
