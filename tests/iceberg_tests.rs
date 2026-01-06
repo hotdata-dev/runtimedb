@@ -139,7 +139,10 @@ impl IcebergTestInfra {
             .await
             .expect("Failed to start Lakekeeper serve");
 
-        let lakekeeper_port = lakekeeper.get_host_port_ipv4(LAKEKEEPER_PORT).await.unwrap();
+        let lakekeeper_port = lakekeeper
+            .get_host_port_ipv4(LAKEKEEPER_PORT)
+            .await
+            .unwrap();
         let lakekeeper_host = lakekeeper.get_host().await.unwrap();
 
         let catalog_uri = format!("http://{}:{}", lakekeeper_host, lakekeeper_port);
@@ -227,7 +230,10 @@ async fn bootstrap_lakekeeper(catalog_uri: &str, minio_endpoint: &str) {
     // Bootstrap may fail if already done - this is expected
     match client.post(&url).json(&bootstrap_payload).send().await {
         Ok(resp) if !resp.status().is_success() => {
-            eprintln!("Bootstrap returned {}: may already be bootstrapped", resp.status());
+            eprintln!(
+                "Bootstrap returned {}: may already be bootstrapped",
+                resp.status()
+            );
         }
         Err(e) => {
             eprintln!("Bootstrap request failed: {} - continuing anyway", e);
@@ -308,10 +314,7 @@ async fn bootstrap_lakekeeper(catalog_uri: &str, minio_endpoint: &str) {
     }
 
     // Try with warehouse name (Lakekeeper requires this)
-    let config_url = format!(
-        "{}/catalog/v1/config?warehouse=test_warehouse",
-        catalog_uri
-    );
+    let config_url = format!("{}/catalog/v1/config?warehouse=test_warehouse", catalog_uri);
     let prefix = match client.get(&config_url).send().await {
         Ok(resp) => {
             let body = resp.text().await.unwrap_or_default();

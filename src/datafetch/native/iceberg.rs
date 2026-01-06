@@ -4,12 +4,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-use std::future::Future;
-use std::pin::Pin;
 use iceberg::spec::{PrimitiveType, Type};
 use iceberg::{Catalog, CatalogBuilder, NamespaceIdent, TableIdent};
 use iceberg_catalog_glue::GlueCatalogBuilder;
 use iceberg_catalog_rest::RestCatalogBuilder;
+use std::future::Future;
+use std::pin::Pin;
 
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::secrets::SecretManager;
@@ -44,7 +44,7 @@ async fn build_catalog(
             warehouse,
             ..
         } => (catalog_type, warehouse),
-        _ => unreachable!("build_catalog called with non-Iceberg source")
+        _ => unreachable!("build_catalog called with non-Iceberg source"),
     };
 
     match catalog_type {
@@ -354,9 +354,7 @@ fn iceberg_type_to_arrow(iceberg_type: &Type) -> DataType {
             let fields: Vec<Field> = struct_type
                 .fields()
                 .iter()
-                .map(|f| {
-                    Field::new(&f.name, iceberg_type_to_arrow(&f.field_type), !f.required)
-                })
+                .map(|f| Field::new(&f.name, iceberg_type_to_arrow(&f.field_type), !f.required))
                 .collect();
             DataType::Struct(fields.into())
         }
