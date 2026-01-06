@@ -1,4 +1,5 @@
 mod duckdb;
+mod iceberg;
 mod parquet_writer;
 mod postgres;
 
@@ -32,6 +33,7 @@ impl DataFetcher for NativeFetcher {
                 duckdb::discover_tables(source, secrets).await
             }
             Source::Postgres { .. } => postgres::discover_tables(source, secrets).await,
+            Source::Iceberg { .. } => iceberg::discover_tables(source, secrets).await,
             Source::Snowflake { .. } => Err(DataFetchError::UnsupportedDriver("Snowflake")),
         }
     }
@@ -51,6 +53,9 @@ impl DataFetcher for NativeFetcher {
             }
             Source::Postgres { .. } => {
                 postgres::fetch_table(source, secrets, catalog, schema, table, writer).await
+            }
+            Source::Iceberg { .. } => {
+                iceberg::fetch_table(source, secrets, catalog, schema, table, writer).await
             }
             Source::Snowflake { .. } => Err(DataFetchError::UnsupportedDriver("Snowflake")),
         }

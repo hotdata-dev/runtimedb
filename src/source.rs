@@ -1,6 +1,31 @@
 use crate::secrets::SecretManager;
 use serde::{Deserialize, Serialize};
 
+/// AWS credentials for services like Glue, S3, etc.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AwsCredentials {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_token: Option<String>,
+}
+
+/// Iceberg catalog type configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum IcebergCatalogType {
+    Rest {
+        uri: String,
+        #[serde(default)]
+        credential: Credential,
+    },
+    Glue {
+        region: String,
+        #[serde(default)]
+        credential: Credential,
+    },
+}
+
 /// Credential storage - either no credential or a reference to a stored secret.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -64,16 +89,25 @@ pub enum Source {
     Duckdb {
         path: String,
     },
+    Iceberg {
+        catalog_type: IcebergCatalogType,
+        /// Warehouse location (e.g., s3://bucket/path)
+        warehouse: String,
+        /// Optional namespace filter (e.g., "db.schema")
+        #[serde(skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
 }
 
 impl Source {
-    /// Returns the source type as a string (e.g., "postgres", "snowflake", "motherduck", "duckdb")
+    /// Returns the source type as a string (e.g., "postgres", "snowflake", "motherduck", "duckdb", "iceberg")
     pub fn source_type(&self) -> &'static str {
         match self {
             Source::Postgres { .. } => "postgres",
             Source::Snowflake { .. } => "snowflake",
             Source::Motherduck { .. } => "motherduck",
             Source::Duckdb { .. } => "duckdb",
+            Source::Iceberg { .. } => "iceberg",
         }
     }
 
@@ -93,6 +127,10 @@ impl Source {
             Source::Snowflake { credential, .. } => credential,
             Source::Motherduck { credential, .. } => credential,
             Source::Duckdb { .. } => &Credential::None,
+            Source::Iceberg { catalog_type, .. } => match catalog_type {
+                IcebergCatalogType::Rest { credential, .. } => credential,
+                IcebergCatalogType::Glue { credential, .. } => credential,
+            },
         }
     }
 }
