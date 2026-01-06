@@ -47,7 +47,8 @@ arrow-array-55 = { package = "arrow-array", version = "55" }
 arrow-ipc-55 = { package = "arrow-ipc", version = "55" }
 
 [dev-dependencies]
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["postgres"] }
+testcontainers = "0.26.3"
+testcontainers-modules = { version = "0.14.0", features = ["postgres", "minio"] }
 proptest = "1.6"
 rand = "0.8"
+reqwest = { version = "0.13.1", features = ["json"] }
