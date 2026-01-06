@@ -297,4 +297,176 @@ mod tests {
         };
         assert!(matches!(duckdb.credential(), Credential::None));
     }
+
+    #[test]
+    fn test_iceberg_rest_serialization() {
+        let source = Source::Iceberg {
+            catalog_type: IcebergCatalogType::Rest {
+                uri: "https://catalog.example.com".to_string(),
+                credential: Credential::SecretRef {
+                    name: "iceberg-token".to_string(),
+                },
+            },
+            warehouse: "s3://my-bucket/warehouse".to_string(),
+            namespace: Some("my_database".to_string()),
+        };
+
+        let json = serde_json::to_string(&source).unwrap();
+        assert!(json.contains(r#""type":"iceberg""#));
+        assert!(json.contains(r#""type":"rest""#));
+        assert!(json.contains(r#""uri":"https://catalog.example.com""#));
+        assert!(json.contains(r#""warehouse":"s3://my-bucket/warehouse""#));
+        assert!(json.contains(r#""namespace":"my_database""#));
+        assert!(json.contains(r#""iceberg-token""#));
+
+        let parsed: Source = serde_json::from_str(&json).unwrap();
+        assert_eq!(source, parsed);
+    }
+
+    #[test]
+    fn test_iceberg_glue_serialization() {
+        let source = Source::Iceberg {
+            catalog_type: IcebergCatalogType::Glue {
+                region: "us-east-1".to_string(),
+                credential: Credential::SecretRef {
+                    name: "aws-creds".to_string(),
+                },
+            },
+            warehouse: "s3://data-lake/iceberg".to_string(),
+            namespace: Some("analytics.events".to_string()),
+        };
+
+        let json = serde_json::to_string(&source).unwrap();
+        assert!(json.contains(r#""type":"iceberg""#));
+        assert!(json.contains(r#""type":"glue""#));
+        assert!(json.contains(r#""region":"us-east-1""#));
+        assert!(json.contains(r#""warehouse":"s3://data-lake/iceberg""#));
+        assert!(json.contains(r#""namespace":"analytics.events""#));
+
+        let parsed: Source = serde_json::from_str(&json).unwrap();
+        assert_eq!(source, parsed);
+    }
+
+    #[test]
+    fn test_iceberg_without_namespace() {
+        let source = Source::Iceberg {
+            catalog_type: IcebergCatalogType::Rest {
+                uri: "http://localhost:8181".to_string(),
+                credential: Credential::None,
+            },
+            warehouse: "s3://bucket/path".to_string(),
+            namespace: None,
+        };
+
+        let json = serde_json::to_string(&source).unwrap();
+        assert!(!json.contains(r#""namespace""#));
+
+        let parsed: Source = serde_json::from_str(&json).unwrap();
+        assert_eq!(source, parsed);
+    }
+
+    #[test]
+    fn test_iceberg_source_type() {
+        let iceberg = Source::Iceberg {
+            catalog_type: IcebergCatalogType::Rest {
+                uri: "http://localhost:8181".to_string(),
+                credential: Credential::None,
+            },
+            warehouse: "s3://bucket/path".to_string(),
+            namespace: None,
+        };
+        assert_eq!(iceberg.source_type(), "iceberg");
+    }
+
+    #[test]
+    fn test_iceberg_catalog_returns_none() {
+        let iceberg = Source::Iceberg {
+            catalog_type: IcebergCatalogType::Glue {
+                region: "us-west-2".to_string(),
+                credential: Credential::None,
+            },
+            warehouse: "s3://bucket/path".to_string(),
+            namespace: Some("my_ns".to_string()),
+        };
+        // Iceberg doesn't use the catalog() method like Motherduck does
+        assert_eq!(iceberg.catalog(), None);
+    }
+
+    #[test]
+    fn test_iceberg_credential_accessor() {
+        // REST catalog with credential
+        let rest_with_cred = Source::Iceberg {
+            catalog_type: IcebergCatalogType::Rest {
+                uri: "http://localhost".to_string(),
+                credential: Credential::SecretRef {
+                    name: "rest-token".to_string(),
+                },
+            },
+            warehouse: "s3://b/p".to_string(),
+            namespace: None,
+        };
+        assert!(matches!(
+            rest_with_cred.credential(),
+            Credential::SecretRef { name } if name == "rest-token"
+        ));
+
+        // Glue catalog with credential
+        let glue_with_cred = Source::Iceberg {
+            catalog_type: IcebergCatalogType::Glue {
+                region: "us-east-1".to_string(),
+                credential: Credential::SecretRef {
+                    name: "aws-secret".to_string(),
+                },
+            },
+            warehouse: "s3://b/p".to_string(),
+            namespace: None,
+        };
+        assert!(matches!(
+            glue_with_cred.credential(),
+            Credential::SecretRef { name } if name == "aws-secret"
+        ));
+
+        // REST catalog without credential
+        let rest_no_cred = Source::Iceberg {
+            catalog_type: IcebergCatalogType::Rest {
+                uri: "http://localhost".to_string(),
+                credential: Credential::None,
+            },
+            warehouse: "s3://b/p".to_string(),
+            namespace: None,
+        };
+        assert!(matches!(rest_no_cred.credential(), Credential::None));
+    }
+
+    #[test]
+    fn test_aws_credentials_serialization() {
+        let creds = AwsCredentials {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            session_token: Some("FwoGZXIvYXdzEB...".to_string()),
+        };
+
+        let json = serde_json::to_string(&creds).unwrap();
+        assert!(json.contains(r#""access_key_id":"AKIAIOSFODNN7EXAMPLE""#));
+        assert!(json.contains(r#""secret_access_key""#));
+        assert!(json.contains(r#""session_token""#));
+
+        let parsed: AwsCredentials = serde_json::from_str(&json).unwrap();
+        assert_eq!(creds, parsed);
+    }
+
+    #[test]
+    fn test_aws_credentials_without_session_token() {
+        let creds = AwsCredentials {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            session_token: None,
+        };
+
+        let json = serde_json::to_string(&creds).unwrap();
+        assert!(!json.contains(r#""session_token""#));
+
+        let parsed: AwsCredentials = serde_json::from_str(&json).unwrap();
+        assert_eq!(creds, parsed);
+    }
 }

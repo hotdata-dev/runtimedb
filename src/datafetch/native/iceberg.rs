@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-use futures::TryStreamExt;
+use std::future::Future;
+use std::pin::Pin;
 use iceberg::spec::{PrimitiveType, Type};
 use iceberg::{Catalog, CatalogBuilder, NamespaceIdent, TableIdent};
 use iceberg_catalog_glue::GlueCatalogBuilder;
@@ -108,13 +109,14 @@ async fn build_catalog(
 }
 
 /// Discover tables and columns from an Iceberg catalog.
+/// Recursively discovers nested namespaces.
 pub async fn discover_tables(
     source: &Source,
     secrets: &SecretManager,
 ) -> Result<Vec<TableMetadata>, DataFetchError> {
     let catalog = build_catalog(source, secrets).await?;
 
-    // Get namespace filter or list all
+    // Get namespace filter or discover all recursively
     let namespaces = match source {
         Source::Iceberg {
             namespace: Some(ns),
@@ -126,10 +128,10 @@ pub async fn discover_tables(
         }
         Source::Iceberg {
             namespace: None, ..
-        } => catalog
-            .list_namespaces(None)
-            .await
-            .map_err(|e| DataFetchError::Query(e.to_string()))?,
+        } => {
+            // Recursively discover all namespaces
+            discover_all_namespaces(&catalog, None).await?
+        }
         _ => unreachable!(),
     };
 
@@ -175,10 +177,37 @@ pub async fn discover_tables(
     Ok(tables)
 }
 
+/// Recursively discover all namespaces in the catalog.
+/// Uses Box::pin to enable async recursion.
+fn discover_all_namespaces<'a>(
+    catalog: &'a Arc<dyn Catalog>,
+    parent: Option<&'a NamespaceIdent>,
+) -> Pin<Box<dyn Future<Output = Result<Vec<NamespaceIdent>, DataFetchError>> + Send + 'a>> {
+    Box::pin(async move {
+        let namespaces = catalog
+            .list_namespaces(parent)
+            .await
+            .map_err(|e| DataFetchError::Query(e.to_string()))?;
+
+        let mut all_namespaces = Vec::new();
+
+        for ns in namespaces {
+            // Add this namespace
+            all_namespaces.push(ns.clone());
+
+            // Recursively discover child namespaces
+            let children = discover_all_namespaces(catalog, Some(&ns)).await?;
+            all_namespaces.extend(children);
+        }
+
+        Ok(all_namespaces)
+    })
+}
+
 /// Fetch table data and write to Parquet using streaming.
 ///
 /// Note: Due to arrow version mismatch between iceberg (arrow 55) and datafusion (arrow 56),
-/// we write directly using iceberg's parquet writer instead of StreamingParquetWriter.
+/// we use IPC serialization to bridge the versions.
 pub async fn fetch_table(
     source: &Source,
     secrets: &SecretManager,
@@ -187,6 +216,8 @@ pub async fn fetch_table(
     table: &str,
     writer: &mut StreamingParquetWriter,
 ) -> Result<(), DataFetchError> {
+    use futures::StreamExt;
+
     let catalog = build_catalog(source, secrets).await?;
 
     let parts: Vec<&str> = schema.split('.').collect();
@@ -205,11 +236,6 @@ pub async fn fetch_table(
         .build()
         .map_err(|e| DataFetchError::Query(e.to_string()))?;
 
-    // Get Arrow schema from Iceberg schema and initialize writer
-    let iceberg_schema = iceberg_table.metadata().current_schema();
-    let arrow_schema = iceberg_schema_to_datafusion_arrow(iceberg_schema)?;
-    writer.init(&arrow_schema)?;
-
     // Stream record batches from the scan
     // Note: iceberg returns arrow 55 RecordBatches, we convert to datafusion's arrow 56
     let batch_stream = scan
@@ -217,15 +243,29 @@ pub async fn fetch_table(
         .await
         .map_err(|e| DataFetchError::Query(e.to_string()))?;
 
-    let batches: Vec<_> = batch_stream
-        .try_collect()
-        .await
-        .map_err(|e| DataFetchError::Query(e.to_string()))?;
+    // Process batches in streaming fashion to avoid loading all data into memory
+    let mut writer_initialized = false;
+    futures::pin_mut!(batch_stream);
 
-    // Convert each batch from iceberg's arrow (55) to datafusion's arrow (56) via IPC
-    for iceberg_batch in batches {
+    while let Some(result) = batch_stream.next().await {
+        let iceberg_batch = result.map_err(|e| DataFetchError::Query(e.to_string()))?;
         let datafusion_batch = convert_arrow_batch(&iceberg_batch)?;
+
+        // Initialize writer with schema from first IPC-deserialized batch
+        // This ensures schema compatibility between IPC output and writer
+        if !writer_initialized {
+            writer.init(datafusion_batch.schema().as_ref())?;
+            writer_initialized = true;
+        }
+
         writer.write_batch(&datafusion_batch)?;
+    }
+
+    // Handle empty tables - initialize writer with manually converted schema
+    if !writer_initialized {
+        let iceberg_schema = iceberg_table.metadata().current_schema();
+        let arrow_schema = iceberg_schema_to_datafusion_arrow(iceberg_schema)?;
+        writer.init(&arrow_schema)?;
     }
 
     Ok(())
@@ -311,10 +351,44 @@ fn iceberg_type_to_arrow(iceberg_type: &Type) -> DataType {
             PrimitiveType::Fixed(len) => DataType::FixedSizeBinary(*len as i32),
             PrimitiveType::Binary => DataType::Binary,
         },
-        // Nested types: fallback to string representation for discovery metadata
-        Type::Struct(_) => DataType::Utf8,
-        Type::List(_) => DataType::Utf8,
-        Type::Map(_) => DataType::Utf8,
+        Type::Struct(struct_type) => {
+            let fields: Vec<Field> = struct_type
+                .fields()
+                .iter()
+                .map(|f| {
+                    Field::new(&f.name, iceberg_type_to_arrow(&f.field_type), !f.required)
+                })
+                .collect();
+            DataType::Struct(fields.into())
+        }
+        Type::List(list_type) => {
+            let element_field = Field::new(
+                "item",
+                iceberg_type_to_arrow(&list_type.element_field.field_type),
+                !list_type.element_field.required,
+            );
+            DataType::List(Arc::new(element_field))
+        }
+        Type::Map(map_type) => {
+            let key_field = Field::new(
+                "key",
+                iceberg_type_to_arrow(&map_type.key_field.field_type),
+                false, // Keys are never nullable in Iceberg
+            );
+            let value_field = Field::new(
+                "value",
+                iceberg_type_to_arrow(&map_type.value_field.field_type),
+                !map_type.value_field.required,
+            );
+            DataType::Map(
+                Arc::new(Field::new(
+                    "entries",
+                    DataType::Struct(vec![key_field, value_field].into()),
+                    false,
+                )),
+                false, // keys_sorted
+            )
+        }
     }
 }
 

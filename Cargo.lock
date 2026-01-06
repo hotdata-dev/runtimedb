@@ -5036,7 +5036,6 @@ dependencies = [
  "arrow-csv",
  "arrow-ipc 55.2.0",
  "arrow-json",
- "arrow-schema 55.2.0",
  "arrow-schema 56.2.0",
  "async-trait",
  "axum",
