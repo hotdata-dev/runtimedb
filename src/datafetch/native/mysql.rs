@@ -2,7 +2,7 @@
 
 use datafusion::arrow::array::{
     ArrayBuilder, BinaryBuilder, BooleanBuilder, Date32Builder, Float32Builder, Float64Builder,
-    Int8Builder, Int16Builder, Int32Builder, Int64Builder, StringBuilder,
+    Int16Builder, Int32Builder, Int64Builder, Int8Builder, StringBuilder,
     TimestampMicrosecondBuilder,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
@@ -519,10 +519,7 @@ mod tests {
         assert!(matches!(mysql_type_to_arrow("integer"), DataType::Int32));
         assert!(matches!(mysql_type_to_arrow("mediumint"), DataType::Int32));
         assert!(matches!(mysql_type_to_arrow("bigint"), DataType::Int64));
-        assert!(matches!(
-            mysql_type_to_arrow("bigint(20)"),
-            DataType::Int64
-        ));
+        assert!(matches!(mysql_type_to_arrow("bigint(20)"), DataType::Int64));
         assert!(matches!(mysql_type_to_arrow("float"), DataType::Float32));
         assert!(matches!(mysql_type_to_arrow("double"), DataType::Float64));
         assert!(matches!(mysql_type_to_arrow("real"), DataType::Float64));
@@ -613,10 +610,7 @@ mod tests {
             mysql_type_to_arrow("unknown_type"),
             DataType::Utf8
         ));
-        assert!(matches!(
-            mysql_type_to_arrow("custom_type"),
-            DataType::Utf8
-        ));
+        assert!(matches!(mysql_type_to_arrow("custom_type"), DataType::Utf8));
     }
 
     #[test]
