@@ -2,7 +2,8 @@
 
 use datafusion::arrow::array::{
     ArrayBuilder, BinaryBuilder, BooleanBuilder, Date32Builder, Float32Builder, Float64Builder,
-    Int16Builder, Int32Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder,
+    Int8Builder, Int16Builder, Int32Builder, Int64Builder, StringBuilder,
+    TimestampMicrosecondBuilder,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -303,15 +304,25 @@ fn mysql_type_to_arrow(mysql_type: &str) -> DataType {
     use datafusion::arrow::datatypes::TimeUnit;
 
     // MySQL COLUMN_TYPE includes size info like "int(11)" or "varchar(255)"
-    // Extract the base type by taking everything before the first parenthesis
     let type_lower = mysql_type.to_lowercase();
+
+    // Special case: TINYINT(1) is conventionally used as boolean in MySQL
+    // Other TINYINT sizes (or bare TINYINT) should be treated as Int8
+    if type_lower.starts_with("tinyint(1)") || type_lower == "tinyint(1) unsigned" {
+        return DataType::Boolean;
+    }
+    if type_lower.starts_with("tinyint") {
+        return DataType::Int8;
+    }
+
+    // Extract the base type by taking everything before the first parenthesis
     let base_type = type_lower.split('(').next().unwrap_or(&type_lower).trim();
 
     // Also handle "unsigned" suffix
     let base_type = base_type.split_whitespace().next().unwrap_or(base_type);
 
     match base_type {
-        "bool" | "boolean" | "tinyint" => DataType::Boolean,
+        "bool" | "boolean" => DataType::Boolean,
         "smallint" => DataType::Int16,
         "mediumint" | "int" | "integer" => DataType::Int32,
         "bigint" => DataType::Int64,
@@ -362,6 +373,7 @@ fn rows_to_batch(
 fn make_builder(data_type: &DataType, capacity: usize) -> Box<dyn ArrayBuilder> {
     match data_type {
         DataType::Boolean => Box::new(BooleanBuilder::with_capacity(capacity)),
+        DataType::Int8 => Box::new(Int8Builder::with_capacity(capacity)),
         DataType::Int16 => Box::new(Int16Builder::with_capacity(capacity)),
         DataType::Int32 => Box::new(Int32Builder::with_capacity(capacity)),
         DataType::Int64 => Box::new(Int64Builder::with_capacity(capacity)),
@@ -387,8 +399,12 @@ fn append_value(
                 .as_any_mut()
                 .downcast_mut::<BooleanBuilder>()
                 .unwrap();
-            // MySQL TINYINT(1) is often used as boolean
+            // MySQL TINYINT(1) is used as boolean
             b.append_option(row.try_get::<bool, _>(idx).ok());
+        }
+        DataType::Int8 => {
+            let b = builder.as_any_mut().downcast_mut::<Int8Builder>().unwrap();
+            b.append_option(row.try_get::<i8, _>(idx).ok());
         }
         DataType::Int16 => {
             let b = builder.as_any_mut().downcast_mut::<Int16Builder>().unwrap();
@@ -477,9 +493,21 @@ mod tests {
     fn test_mysql_type_to_arrow_basic_types() {
         assert!(matches!(mysql_type_to_arrow("bool"), DataType::Boolean));
         assert!(matches!(mysql_type_to_arrow("boolean"), DataType::Boolean));
+        // TINYINT(1) is conventionally boolean
         assert!(matches!(
             mysql_type_to_arrow("tinyint(1)"),
             DataType::Boolean
+        ));
+        assert!(matches!(
+            mysql_type_to_arrow("tinyint(1) unsigned"),
+            DataType::Boolean
+        ));
+        // Other TINYINT sizes are Int8
+        assert!(matches!(mysql_type_to_arrow("tinyint"), DataType::Int8));
+        assert!(matches!(mysql_type_to_arrow("tinyint(4)"), DataType::Int8));
+        assert!(matches!(
+            mysql_type_to_arrow("tinyint unsigned"),
+            DataType::Int8
         ));
         assert!(matches!(mysql_type_to_arrow("smallint"), DataType::Int16));
         assert!(matches!(
