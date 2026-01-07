@@ -112,13 +112,13 @@ pub async fn discover_tables(
     let rows = sqlx::query(
         r#"
         SELECT
-            t.TABLE_CATALOG,
-            t.TABLE_SCHEMA,
-            t.TABLE_NAME,
-            t.TABLE_TYPE,
-            c.COLUMN_NAME,
-            c.COLUMN_TYPE,
-            c.IS_NULLABLE,
+            CAST(t.TABLE_CATALOG AS CHAR(64)) AS TABLE_CATALOG,
+            CAST(t.TABLE_SCHEMA AS CHAR(64)) AS TABLE_SCHEMA,
+            CAST(t.TABLE_NAME AS CHAR(64)) AS TABLE_NAME,
+            CAST(t.TABLE_TYPE AS CHAR(64)) AS TABLE_TYPE,
+            CAST(c.COLUMN_NAME AS CHAR(64)) AS COLUMN_NAME,
+            CAST(c.COLUMN_TYPE AS CHAR(255)) AS COLUMN_TYPE,
+            CAST(c.IS_NULLABLE AS CHAR(3)) AS IS_NULLABLE,
             c.ORDINAL_POSITION
         FROM information_schema.TABLES t
         JOIN information_schema.COLUMNS c
