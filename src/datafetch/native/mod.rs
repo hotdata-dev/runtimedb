@@ -1,5 +1,6 @@
 mod duckdb;
 mod iceberg;
+mod mysql;
 mod parquet_writer;
 mod postgres;
 mod snowflake;
@@ -35,6 +36,7 @@ impl DataFetcher for NativeFetcher {
             }
             Source::Postgres { .. } => postgres::discover_tables(source, secrets).await,
             Source::Iceberg { .. } => iceberg::discover_tables(source, secrets).await,
+            Source::Mysql { .. } => mysql::discover_tables(source, secrets).await,
             Source::Snowflake { .. } => snowflake::discover_tables(source, secrets).await,
         }
     }
@@ -57,6 +59,9 @@ impl DataFetcher for NativeFetcher {
             }
             Source::Iceberg { .. } => {
                 iceberg::fetch_table(source, secrets, catalog, schema, table, writer).await
+            }
+            Source::Mysql { .. } => {
+                mysql::fetch_table(source, secrets, catalog, schema, table, writer).await
             }
             Source::Snowflake { .. } => {
                 snowflake::fetch_table(source, secrets, catalog, schema, table, writer).await

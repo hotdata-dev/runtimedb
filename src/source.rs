@@ -99,10 +99,18 @@ pub enum Source {
         #[serde(skip_serializing_if = "Option::is_none")]
         namespace: Option<String>,
     },
+    Mysql {
+        host: String,
+        port: u16,
+        user: String,
+        database: String,
+        #[serde(default)]
+        credential: Credential,
+    },
 }
 
 impl Source {
-    /// Returns the source type as a string (e.g., "postgres", "snowflake", "motherduck", "duckdb", "iceberg")
+    /// Returns the source type as a string (e.g., "postgres", "snowflake", "motherduck", "duckdb", "iceberg", "mysql")
     pub fn source_type(&self) -> &'static str {
         match self {
             Source::Postgres { .. } => "postgres",
@@ -110,6 +118,7 @@ impl Source {
             Source::Motherduck { .. } => "motherduck",
             Source::Duckdb { .. } => "duckdb",
             Source::Iceberg { .. } => "iceberg",
+            Source::Mysql { .. } => "mysql",
         }
     }
 
@@ -133,6 +142,7 @@ impl Source {
                 IcebergCatalogType::Rest { credential, .. } => credential,
                 IcebergCatalogType::Glue { credential, .. } => credential,
             },
+            Source::Mysql { credential, .. } => credential,
         }
     }
 }
@@ -476,5 +486,67 @@ mod tests {
 
         let parsed: AwsCredentials = serde_json::from_str(&json).unwrap();
         assert_eq!(creds, parsed);
+    }
+
+    #[test]
+    fn test_mysql_serialization() {
+        let source = Source::Mysql {
+            host: "localhost".to_string(),
+            port: 3306,
+            user: "myuser".to_string(),
+            database: "mydb".to_string(),
+            credential: Credential::SecretRef {
+                name: "my-mysql-secret".to_string(),
+            },
+        };
+
+        let json = serde_json::to_string(&source).unwrap();
+        assert!(json.contains(r#""type":"mysql""#));
+        assert!(json.contains(r#""host":"localhost""#));
+        assert!(json.contains(r#""port":3306"#));
+        assert!(json.contains(r#""user":"myuser""#));
+        assert!(json.contains(r#""database":"mydb""#));
+        assert!(json.contains(r#""my-mysql-secret""#));
+
+        let parsed: Source = serde_json::from_str(&json).unwrap();
+        assert_eq!(source, parsed);
+    }
+
+    #[test]
+    fn test_mysql_source_type() {
+        let mysql = Source::Mysql {
+            host: "localhost".to_string(),
+            port: 3306,
+            user: "u".to_string(),
+            database: "d".to_string(),
+            credential: Credential::None,
+        };
+        assert_eq!(mysql.source_type(), "mysql");
+    }
+
+    #[test]
+    fn test_mysql_credential_accessor() {
+        let with_secret = Source::Mysql {
+            host: "h".to_string(),
+            port: 3306,
+            user: "u".to_string(),
+            database: "d".to_string(),
+            credential: Credential::SecretRef {
+                name: "mysql-secret".to_string(),
+            },
+        };
+        assert!(matches!(
+            with_secret.credential(),
+            Credential::SecretRef { name } if name == "mysql-secret"
+        ));
+
+        let without_cred = Source::Mysql {
+            host: "h".to_string(),
+            port: 3306,
+            user: "u".to_string(),
+            database: "d".to_string(),
+            credential: Credential::None,
+        };
+        assert!(matches!(without_cred.credential(), Credential::None));
     }
 }

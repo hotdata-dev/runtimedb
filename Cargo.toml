@@ -10,7 +10,7 @@ path = "src/bin/server.rs"
 [dependencies]
 datafusion = "50.2"
 duckdb = { version = "1.4", features = ["bundled"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "sqlite", "chrono", "tls-rustls"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "sqlite", "mysql", "chrono", "tls-rustls"] }
 tokio = { version = "1.47", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -48,6 +48,6 @@ arrow-ipc-54 = { package = "arrow-ipc", version = "54" }
 
 [dev-dependencies]
 testcontainers = "0.26.3"
-testcontainers-modules = { version = "0.14.0", features = ["postgres", "minio"] }
+testcontainers-modules = { version = "0.14.0", features = ["postgres", "minio", "mysql"] }
 rand = "0.8"
 reqwest = { version = "0.13.1", features = ["json"] }

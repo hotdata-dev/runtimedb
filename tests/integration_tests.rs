@@ -313,6 +313,24 @@ impl TestExecutor for ApiExecutor {
                     json!({ "host": host, "port": port, "user": user, "database": database, "credential": cred_json }),
                 )
             }
+            Source::Mysql {
+                host,
+                port,
+                user,
+                database,
+                credential,
+            } => {
+                let cred_json = match credential {
+                    rivetdb::source::Credential::None => json!({"type": "none"}),
+                    rivetdb::source::Credential::SecretRef { name } => {
+                        json!({"type": "secret_ref", "name": name})
+                    }
+                };
+                (
+                    "mysql",
+                    json!({ "host": host, "port": port, "user": user, "database": database, "credential": cred_json }),
+                )
+            }
             _ => panic!("Unsupported source type"),
         };
 
@@ -858,6 +876,65 @@ mod postgres_fixtures {
     }
 }
 
+mod mysql_fixtures {
+    use super::*;
+    use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
+    use testcontainers_modules::mysql::Mysql;
+
+    /// The password used for test MySQL containers.
+    pub const TEST_PASSWORD: &str = "root";
+
+    pub struct MysqlFixture {
+        #[allow(dead_code)]
+        pub container: ContainerAsync<Mysql>,
+        pub source: Source,
+    }
+
+    async fn start_container() -> (ContainerAsync<Mysql>, String) {
+        let container = Mysql::default()
+            .with_tag("8.0")
+            .with_env_var("MYSQL_ROOT_PASSWORD", TEST_PASSWORD)
+            .start()
+            .await
+            .expect("Failed to start mysql");
+        let port = container.get_host_port_ipv4(3306).await.unwrap();
+        let conn_str = format!("mysql://root:{}@localhost:{}/mysql", TEST_PASSWORD, port);
+        (container, conn_str)
+    }
+
+    pub async fn standard(secret_name: &str) -> MysqlFixture {
+        let (container, conn_str) = start_container().await;
+        let pool = sqlx::MySqlPool::connect(&conn_str).await.unwrap();
+
+        // Create database and schema (MySQL uses database = schema)
+        sqlx::query("CREATE DATABASE IF NOT EXISTS sales")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE sales.orders (order_id INTEGER, customer_name VARCHAR(100), amount DOUBLE, is_paid BOOLEAN)"
+        ).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO sales.orders VALUES (1, 'Alice', 100.50, true), (2, 'Bob', 250.75, false), (3, 'Charlie', 75.25, true), (4, 'David', 500.00, true)"
+        ).execute(&pool).await.unwrap();
+        pool.close().await;
+
+        let port = container.get_host_port_ipv4(3306).await.unwrap();
+        MysqlFixture {
+            container,
+            source: Source::Mysql {
+                host: "localhost".into(),
+                port,
+                user: "root".into(),
+                database: "sales".into(),
+                credential: rivetdb::source::Credential::SecretRef {
+                    name: secret_name.to_string(),
+                },
+            },
+        }
+    }
+}
+
 // ============================================================================
 // Tests - DuckDB
 // ============================================================================
@@ -984,6 +1061,36 @@ mod postgres_tests {
             .await;
         let fixture = postgres_fixtures::multi_schema(PG_SECRET_NAME).await;
         run_multi_schema_test(harness.api(), &fixture.source, "pg_conn").await;
+    }
+}
+
+// ============================================================================
+// Tests - MySQL
+// ============================================================================
+
+mod mysql_tests {
+    use super::*;
+
+    const MYSQL_SECRET_NAME: &str = "mysql-test-password";
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_engine_golden_path() {
+        let harness = TestHarness::new().await;
+        harness
+            .store_secret(MYSQL_SECRET_NAME, mysql_fixtures::TEST_PASSWORD)
+            .await;
+        let fixture = mysql_fixtures::standard(MYSQL_SECRET_NAME).await;
+        run_golden_path_test(harness.engine(), &fixture.source, "mysql_conn").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_api_golden_path() {
+        let harness = TestHarness::new().await;
+        harness
+            .store_secret(MYSQL_SECRET_NAME, mysql_fixtures::TEST_PASSWORD)
+            .await;
+        let fixture = mysql_fixtures::standard(MYSQL_SECRET_NAME).await;
+        run_golden_path_test(harness.api(), &fixture.source, "mysql_conn").await;
     }
 }
 

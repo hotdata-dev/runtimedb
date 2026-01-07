@@ -424,7 +424,7 @@ async fn test_create_connection_unsupported_source_type() -> Result<()> {
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&json!({
                     "name": "test_conn",
-                    "source_type": "mysql",
+                    "source_type": "oracle",
                     "config": {}
                 }))?))?,
         )
@@ -435,10 +435,9 @@ async fn test_create_connection_unsupported_source_type() -> Result<()> {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
     let json: serde_json::Value = serde_json::from_slice(&body)?;
 
-    assert!(json["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("postgres"));
+    // Check that error mentions supported source types
+    let error_msg = json["error"]["message"].as_str().unwrap();
+    assert!(error_msg.contains("postgres") || error_msg.contains("mysql"));
 
     Ok(())
 }
@@ -1175,6 +1174,80 @@ async fn test_discover_connection_successful() -> Result<()> {
     assert_eq!(json["tables_discovered"], 1);
     assert_eq!(json["discovery_status"], "success");
     assert!(json["discovery_error"].is_null());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_connection_with_password_auto_creates_secret() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    // Create a postgres connection with password field (old API format)
+    // Discovery will fail (no postgres server), but the secret should be created
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_CONNECTIONS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "my_pg",
+                    "source_type": "postgres",
+                    "config": {
+                        "host": "localhost",
+                        "port": 5432,
+                        "user": "testuser",
+                        "password": "testpassword123",
+                        "database": "testdb"
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    // Connection should be created (discovery will fail, but that's expected)
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(json["name"], "my_pg");
+    assert_eq!(json["source_type"], "postgres");
+    // Discovery fails because no postgres server, but the important thing is it's not
+    // "no credential configured" - it should be a connection error
+    assert_eq!(json["discovery_status"], "failed");
+    let error = json["discovery_error"].as_str().unwrap();
+    assert!(
+        !error.contains("no credential configured"),
+        "Error should not be 'no credential configured', got: {}",
+        error
+    );
+
+    // Verify the secret was auto-created with the expected name
+    let secrets_response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(PATH_SECRETS)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(secrets_response.status(), StatusCode::OK);
+
+    let secrets_body = axum::body::to_bytes(secrets_response.into_body(), usize::MAX).await?;
+    let secrets_json: serde_json::Value = serde_json::from_slice(&secrets_body)?;
+
+    let secrets = secrets_json["secrets"].as_array().unwrap();
+    assert_eq!(
+        secrets.len(),
+        1,
+        "Expected exactly one secret to be created"
+    );
+    assert_eq!(
+        secrets[0]["name"], "conn-my_pg-password",
+        "Secret should be named 'conn-my_pg-password'"
+    );
 
     Ok(())
 }
