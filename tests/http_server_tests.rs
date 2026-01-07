@@ -424,7 +424,7 @@ async fn test_create_connection_unsupported_source_type() -> Result<()> {
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&json!({
                     "name": "test_conn",
-                    "source_type": "mysql",
+                    "source_type": "oracle",
                     "config": {}
                 }))?))?,
         )
@@ -435,10 +435,9 @@ async fn test_create_connection_unsupported_source_type() -> Result<()> {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
     let json: serde_json::Value = serde_json::from_slice(&body)?;
 
-    assert!(json["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("postgres"));
+    // Check that error mentions supported source types
+    let error_msg = json["error"]["message"].as_str().unwrap();
+    assert!(error_msg.contains("postgres") || error_msg.contains("mysql"));
 
     Ok(())
 }
