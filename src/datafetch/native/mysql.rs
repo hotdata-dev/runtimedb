@@ -8,11 +8,10 @@ use datafusion::arrow::array::{
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use futures::StreamExt;
-use sqlx::mysql::{MySqlColumn, MySqlConnection, MySqlRow};
-use sqlx::{Column, Connection, Row, TypeInfo};
+use sqlx::mysql::{MySqlColumn, MySqlConnectOptions, MySqlConnection, MySqlRow, MySqlSslMode};
+use sqlx::{Column, ConnectOptions, Row, TypeInfo};
 use std::sync::Arc;
 use tracing::warn;
-use urlencoding::encode;
 
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::secrets::SecretManager;
@@ -20,29 +19,28 @@ use crate::source::Source;
 
 use super::StreamingParquetWriter;
 
-/// Build a MySQL connection string from source configuration and resolved password.
-fn build_connection_string(
+/// Build MySQL connection options from source configuration and resolved password.
+/// Uses MySqlConnectOptions to avoid embedding credentials in a URL string.
+fn build_connect_options(
     host: &str,
     port: u16,
     user: &str,
     database: &str,
     password: &str,
-) -> String {
-    format!(
-        "mysql://{}:{}@{}:{}/{}",
-        encode(user),
-        encode(password),
-        encode(host),
-        port,
-        encode(database)
-    )
+) -> MySqlConnectOptions {
+    MySqlConnectOptions::new()
+        .host(host)
+        .port(port)
+        .username(user)
+        .password(password)
+        .database(database)
 }
 
-/// Resolve credentials and build connection string for a MySQL source.
-pub async fn resolve_connection_string(
+/// Resolve credentials and build connection options for a MySQL source.
+pub async fn resolve_connect_options(
     source: &Source,
     secrets: &SecretManager,
-) -> Result<String, DataFetchError> {
+) -> Result<MySqlConnectOptions, DataFetchError> {
     let (host, port, user, database, credential) = match source {
         Source::Mysql {
             host,
@@ -63,28 +61,23 @@ pub async fn resolve_connection_string(
         .await
         .map_err(|e| DataFetchError::Connection(e.to_string()))?;
 
-    Ok(build_connection_string(
-        host, port, user, database, &password,
-    ))
+    Ok(build_connect_options(host, port, user, database, &password))
 }
 
 /// Connect to MySQL with automatic SSL retry.
 /// If the initial connection fails with an SSL-related error,
-/// automatically retries with `ssl-mode=required` appended to the connection string.
-async fn connect_with_ssl_retry(connection_string: &str) -> Result<MySqlConnection, sqlx::Error> {
-    match MySqlConnection::connect(connection_string).await {
+/// automatically retries with SSL mode set to Required.
+async fn connect_with_ssl_retry(
+    options: MySqlConnectOptions,
+) -> Result<MySqlConnection, sqlx::Error> {
+    match options.clone().connect().await {
         Ok(conn) => Ok(conn),
         Err(e) => {
             let error_msg = e.to_string().to_lowercase();
             // Check if the error indicates SSL is required
             if error_msg.contains("ssl") || error_msg.contains("tls") {
-                // Append ssl-mode=required and retry
-                let ssl_connection_string = if connection_string.contains('?') {
-                    format!("{}&ssl-mode=required", connection_string)
-                } else {
-                    format!("{}?ssl-mode=required", connection_string)
-                };
-                MySqlConnection::connect(&ssl_connection_string).await
+                // Retry with SSL mode required
+                options.ssl_mode(MySqlSslMode::Required).connect().await
             } else {
                 Err(e)
             }
@@ -97,8 +90,8 @@ pub async fn discover_tables(
     source: &Source,
     secrets: &SecretManager,
 ) -> Result<Vec<TableMetadata>, DataFetchError> {
-    let connection_string = resolve_connection_string(source, secrets).await?;
-    let mut conn = connect_with_ssl_retry(&connection_string).await?;
+    let options = resolve_connect_options(source, secrets).await?;
+    let mut conn = connect_with_ssl_retry(options).await?;
 
     // Get the database name for filtering
     let database = match source {
@@ -182,8 +175,8 @@ pub async fn fetch_table(
     table: &str,
     writer: &mut StreamingParquetWriter,
 ) -> Result<(), DataFetchError> {
-    let connection_string = resolve_connection_string(source, secrets).await?;
-    let mut conn = connect_with_ssl_retry(&connection_string).await?;
+    let options = resolve_connect_options(source, secrets).await?;
+    let mut conn = connect_with_ssl_retry(options.clone()).await?;
 
     // Build query - use backticks for MySQL identifier escaping
     let query = format!(
@@ -206,7 +199,7 @@ pub async fn fetch_table(
         None => {
             // Empty table: query information_schema for schema
             // Need a new connection since stream borrows conn
-            let mut schema_conn = connect_with_ssl_retry(&connection_string).await?;
+            let mut schema_conn = connect_with_ssl_retry(options).await?;
             let schema_rows = sqlx::query(
                 r#"
                 SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE
@@ -416,11 +409,7 @@ fn make_builder(data_type: &DataType, capacity: usize) -> Box<dyn ArrayBuilder> 
 }
 
 /// Helper to try getting a value and log a warning if conversion fails (but value exists)
-fn try_get_with_warning<'r, T>(
-    row: &'r MySqlRow,
-    idx: usize,
-    type_name: &str,
-) -> Option<T>
+fn try_get_with_warning<'r, T>(row: &'r MySqlRow, idx: usize, type_name: &str) -> Option<T>
 where
     T: sqlx::Decode<'r, sqlx::MySql> + sqlx::Type<sqlx::MySql>,
 {
@@ -519,7 +508,8 @@ fn append_value(
                 .downcast_mut::<TimestampMicrosecondBuilder>()
                 .unwrap();
             // chrono::NaiveDateTime -> microseconds since epoch
-            if let Some(ts) = try_get_with_warning::<chrono::NaiveDateTime>(row, idx, "NaiveDateTime")
+            if let Some(ts) =
+                try_get_with_warning::<chrono::NaiveDateTime>(row, idx, "NaiveDateTime")
             {
                 let micros = ts.and_utc().timestamp_micros();
                 b.append_value(micros);
