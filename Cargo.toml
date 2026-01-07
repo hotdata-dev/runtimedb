@@ -11,7 +11,6 @@ path = "src/bin/server.rs"
 datafusion = "50.2"
 duckdb = { version = "1.4", features = ["bundled"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "sqlite", "chrono", "tls-rustls"] }
-rustyline = "17.0"
 tokio = { version = "1.47", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -21,16 +20,13 @@ async-trait = "0.1"
 tempfile = "3"
 futures = "0.3"
 log = "0.4"
-env_logger = "0.11"
 clap = { version = "4.5", features = ["derive"] }
-arrow-csv = "56.2"
 arrow-json = "56.2"
 arrow-schema = { version = "56.2", features = ["serde"] }
 object_store = { version = "0.12", features = ["aws"] }
 url = "2.5"
 axum = "0.8.7"
 tower = { version = "0.5.2", features = ["util"] }
-tower-http = { version = "0.6.6", features = ["trace", "cors"] }
 config = "0.15.19"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -49,6 +45,5 @@ arrow-ipc-55 = { package = "arrow-ipc", version = "55" }
 [dev-dependencies]
 testcontainers = "0.26.3"
 testcontainers-modules = { version = "0.14.0", features = ["postgres", "minio"] }
-proptest = "1.6"
 rand = "0.8"
 reqwest = { version = "0.13.1", features = ["json"] }
