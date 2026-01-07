@@ -169,12 +169,41 @@ pub async fn create_connection_handler(
         )));
     }
 
-    // Merge source_type into config as "type" for Source enum deserialization
+    // Build config object, handling password-to-secret conversion
     let config_with_type = {
         let mut obj = match request.config {
             serde_json::Value::Object(m) => m,
             _ => return Err(ApiError::bad_request("Configuration must be a JSON object")),
         };
+
+        // If "password" is provided, auto-create a secret and replace with credential ref
+        if let Some(password_value) = obj.remove("password") {
+            if let Some(password) = password_value.as_str() {
+                if !password.is_empty() {
+                    // Generate secret name from connection name
+                    let secret_name = format!("conn-{}-password", request.name);
+
+                    // Create the secret
+                    engine
+                        .secret_manager()
+                        .create(&secret_name, password.as_bytes())
+                        .await
+                        .map_err(|e| {
+                            ApiError::internal_error(format!("Failed to store password: {}", e))
+                        })?;
+
+                    // Replace password with credential reference
+                    obj.insert(
+                        "credential".to_string(),
+                        serde_json::json!({
+                            "type": "secret_ref",
+                            "name": secret_name
+                        }),
+                    );
+                }
+            }
+        }
+
         obj.insert(
             "type".to_string(),
             serde_json::Value::String(request.source_type.clone()),
