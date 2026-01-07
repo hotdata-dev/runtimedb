@@ -108,6 +108,184 @@ async fn test_unsupported_driver() {
     assert!(result.is_err(), "Should fail for unsupported driver");
 }
 
+// MySQL tests using testcontainers
+mod mysql_container_tests {
+    use super::*;
+    use testcontainers::{runners::AsyncRunner, ImageExt};
+    use testcontainers_modules::mysql::Mysql;
+
+    const TEST_PASSWORD: &str = "root";
+
+    async fn create_test_secret_manager_with_password(
+        dir: &TempDir,
+        secret_name: &str,
+        password: &str,
+    ) -> SecretManager {
+        let secrets = test_secret_manager(dir).await;
+        secrets
+            .create(secret_name, password.as_bytes())
+            .await
+            .unwrap();
+        secrets
+    }
+
+    #[tokio::test]
+    async fn test_mysql_discovery() {
+        let temp_dir = TempDir::new().unwrap();
+        let secrets =
+            create_test_secret_manager_with_password(&temp_dir, "mysql-pass", TEST_PASSWORD).await;
+
+        // Start MySQL container
+        let container = Mysql::default()
+            .with_tag("8.0")
+            .start()
+            .await
+            .expect("Failed to start mysql");
+        let port = container.get_host_port_ipv4(3306).await.unwrap();
+
+        // Create test database and table
+        let conn_str = format!("mysql://root:{}@localhost:{}/mysql", TEST_PASSWORD, port);
+        let pool = sqlx::MySqlPool::connect(&conn_str).await.unwrap();
+
+        sqlx::query("CREATE DATABASE IF NOT EXISTS testdb")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE testdb.users (id INT, name VARCHAR(100), active BOOLEAN)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        // Test discovery
+        let fetcher = NativeFetcher::new();
+        let source = Source::Mysql {
+            host: "localhost".to_string(),
+            port,
+            user: "root".to_string(),
+            database: "testdb".to_string(),
+            credential: rivetdb::source::Credential::SecretRef {
+                name: "mysql-pass".to_string(),
+            },
+        };
+
+        let result = fetcher.discover_tables(&source, &secrets).await;
+        assert!(
+            result.is_ok(),
+            "Discovery should succeed: {:?}",
+            result.err()
+        );
+
+        let tables = result.unwrap();
+        assert!(!tables.is_empty(), "Should find the test table");
+
+        let users_table = tables.iter().find(|t| t.table_name == "users");
+        assert!(users_table.is_some(), "Should find users table");
+
+        let users = users_table.unwrap();
+        assert_eq!(users.columns.len(), 3);
+        assert_eq!(users.columns[0].name, "id");
+        assert_eq!(users.columns[1].name, "name");
+        assert_eq!(users.columns[2].name, "active");
+    }
+
+    #[tokio::test]
+    async fn test_mysql_fetch_table() {
+        use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use rivetdb::datafetch::StreamingParquetWriter;
+        use std::fs::File;
+
+        let temp_dir = TempDir::new().unwrap();
+        let secrets =
+            create_test_secret_manager_with_password(&temp_dir, "mysql-pass", TEST_PASSWORD).await;
+
+        // Start MySQL container
+        let container = Mysql::default()
+            .with_tag("8.0")
+            .start()
+            .await
+            .expect("Failed to start mysql");
+        let port = container.get_host_port_ipv4(3306).await.unwrap();
+
+        // Create test database with data
+        let conn_str = format!("mysql://root:{}@localhost:{}/mysql", TEST_PASSWORD, port);
+        let pool = sqlx::MySqlPool::connect(&conn_str).await.unwrap();
+
+        sqlx::query("CREATE DATABASE IF NOT EXISTS testdb")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE testdb.products (
+                id INT,
+                name VARCHAR(100),
+                price DOUBLE,
+                in_stock BOOLEAN
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO testdb.products VALUES
+                (1, 'Widget', 19.99, true),
+                (2, 'Gadget', 29.99, false),
+                (3, 'Doohickey', 39.99, true)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        // Fetch to parquet
+        let fetcher = NativeFetcher::new();
+        let source = Source::Mysql {
+            host: "localhost".to_string(),
+            port,
+            user: "root".to_string(),
+            database: "testdb".to_string(),
+            credential: rivetdb::source::Credential::SecretRef {
+                name: "mysql-pass".to_string(),
+            },
+        };
+
+        let output_path = temp_dir.path().join("mysql_output.parquet");
+        let mut writer = StreamingParquetWriter::new(output_path.clone());
+
+        let result = fetcher
+            .fetch_table(&source, &secrets, None, "testdb", "products", &mut writer)
+            .await;
+        assert!(result.is_ok(), "Fetch should succeed: {:?}", result.err());
+
+        writer.close().unwrap();
+
+        // Verify parquet file
+        let file = File::open(&output_path).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let mut total_rows = 0;
+        let mut batches = Vec::new();
+
+        for batch_result in reader {
+            let batch = batch_result.unwrap();
+            total_rows += batch.num_rows();
+            batches.push(batch);
+        }
+
+        assert_eq!(total_rows, 3, "Should have 3 rows");
+
+        let schema = batches[0].schema();
+        assert_eq!(schema.fields().len(), 4);
+        assert!(schema.field_with_name("id").is_ok());
+        assert!(schema.field_with_name("name").is_ok());
+        assert!(schema.field_with_name("price").is_ok());
+        assert!(schema.field_with_name("in_stock").is_ok());
+    }
+}
+
 #[tokio::test]
 async fn test_duckdb_fetch_table() {
     use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
