@@ -893,6 +893,7 @@ mod mysql_fixtures {
     async fn start_container() -> (ContainerAsync<Mysql>, String) {
         let container = Mysql::default()
             .with_tag("8.0")
+            .with_env_var("MYSQL_ROOT_PASSWORD", TEST_PASSWORD)
             .start()
             .await
             .expect("Failed to start mysql");
