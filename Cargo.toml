@@ -1,5 +1,5 @@
 [package]
-name = "rivetdb"
+name = "runtimedb"
 version = "0.0.0"
 edition = "2021"
 

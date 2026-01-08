@@ -1,4 +1,4 @@
-use rivetdb::catalog::{CatalogManager, PostgresCatalogManager, SqliteCatalogManager};
+use runtimedb::catalog::{CatalogManager, PostgresCatalogManager, SqliteCatalogManager};
 use tempfile::TempDir;
 use testcontainers::{runners::AsyncRunner, ImageExt};
 use testcontainers_modules::postgres::Postgres;
@@ -463,7 +463,7 @@ macro_rules! catalog_manager_tests {
 
             #[tokio::test]
             async fn create_secret_metadata_duplicate_fails() {
-                use rivetdb::secrets::{SecretMetadata, SecretStatus};
+                use runtimedb::secrets::{SecretMetadata, SecretStatus};
 
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();

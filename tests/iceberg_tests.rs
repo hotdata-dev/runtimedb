@@ -10,10 +10,10 @@
 //!
 //! Run these tests with: cargo test --test iceberg_tests
 
-use rivetdb::catalog::{CatalogManager, SqliteCatalogManager};
-use rivetdb::datafetch::{DataFetcher, NativeFetcher, StreamingParquetWriter};
-use rivetdb::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
-use rivetdb::source::{Credential, IcebergCatalogType, Source};
+use runtimedb::catalog::{CatalogManager, SqliteCatalogManager};
+use runtimedb::datafetch::{DataFetcher, NativeFetcher, StreamingParquetWriter};
+use runtimedb::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
+use runtimedb::source::{Credential, IcebergCatalogType, Source};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;

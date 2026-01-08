@@ -1,5 +1,5 @@
 use super::block_on;
-use super::schema_provider::RivetSchemaProvider;
+use super::schema_provider::RuntimeSchemaProvider;
 use crate::catalog::CatalogManager;
 use crate::datafetch::FetchOrchestrator;
 use crate::source::Source;
@@ -11,7 +11,7 @@ use std::sync::{Arc, RwLock};
 /// A catalog provider that represents a single connection.
 /// Lazily creates schema providers as they are accessed.
 #[derive(Debug)]
-pub struct RivetCatalogProvider {
+pub struct RuntimeCatalogProvider {
     connection_id: i32,
     connection_name: String,
     source: Arc<Source>,
@@ -20,7 +20,7 @@ pub struct RivetCatalogProvider {
     schemas: Arc<RwLock<HashMap<String, Arc<dyn SchemaProvider>>>>,
 }
 
-impl RivetCatalogProvider {
+impl RuntimeCatalogProvider {
     pub fn new(
         connection_id: i32,
         connection_name: String,
@@ -57,7 +57,7 @@ impl RivetCatalogProvider {
         }
 
         // Create new schema provider
-        let schema_provider = Arc::new(RivetSchemaProvider::new(
+        let schema_provider = Arc::new(RuntimeSchemaProvider::new(
             self.connection_id,
             self.connection_name.clone(),
             schema_name.to_string(),
@@ -73,7 +73,7 @@ impl RivetCatalogProvider {
 }
 
 #[async_trait]
-impl CatalogProvider for RivetCatalogProvider {
+impl CatalogProvider for RuntimeCatalogProvider {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

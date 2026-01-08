@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use rivetdb::catalog::backend::CatalogBackend;
+//! use runtimedb::catalog::backend::CatalogBackend;
 //! use sqlx::SqlitePool;
 //!
 //! let pool = SqlitePool::connect("sqlite::memory:").await?;

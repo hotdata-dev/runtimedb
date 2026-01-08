@@ -5458,51 +5458,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rivetdb"
-version = "0.0.0"
-dependencies = [
- "aes-gcm-siv",
- "anyhow",
- "arrow-array 54.3.1",
- "arrow-array 55.2.0",
- "arrow-ipc 54.3.1",
- "arrow-ipc 55.2.0",
- "arrow-json 56.2.0",
- "arrow-schema 56.2.0",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "chrono",
- "clap",
- "config",
- "datafusion",
- "duckdb",
- "futures",
- "iceberg",
- "iceberg-catalog-glue",
- "iceberg-catalog-rest",
- "log",
- "object_store 0.12.4",
- "rand 0.8.5",
- "reqwest 0.13.1",
- "serde",
- "serde_json",
- "snowflake-api",
- "sqlx",
- "tempfile",
- "testcontainers",
- "testcontainers-modules",
- "thiserror 2.0.17",
- "tokio",
- "tower",
- "tracing",
- "tracing-subscriber",
- "url",
- "urlencoding",
- "uuid",
-]
-
-[[package]]
 name = "rkyv"
 version = "0.7.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5573,6 +5528,51 @@ dependencies = [
  "spki",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "runtimedb"
+version = "0.0.0"
+dependencies = [
+ "aes-gcm-siv",
+ "anyhow",
+ "arrow-array 54.3.1",
+ "arrow-array 55.2.0",
+ "arrow-ipc 54.3.1",
+ "arrow-ipc 55.2.0",
+ "arrow-json 56.2.0",
+ "arrow-schema 56.2.0",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "config",
+ "datafusion",
+ "duckdb",
+ "futures",
+ "iceberg",
+ "iceberg-catalog-glue",
+ "iceberg-catalog-rest",
+ "log",
+ "object_store 0.12.4",
+ "rand 0.8.5",
+ "reqwest 0.13.1",
+ "serde",
+ "serde_json",
+ "snowflake-api",
+ "sqlx",
+ "tempfile",
+ "testcontainers",
+ "testcontainers-modules",
+ "thiserror 2.0.17",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "urlencoding",
+ "uuid",
 ]
 
 [[package]]

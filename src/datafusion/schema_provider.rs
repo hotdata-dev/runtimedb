@@ -12,7 +12,7 @@ use crate::source::Source;
 /// A schema provider that syncs tables on-demand from remote sources.
 /// Wraps MemorySchemaProvider for caching already-loaded tables.
 #[derive(Debug)]
-pub struct RivetSchemaProvider {
+pub struct RuntimeSchemaProvider {
     connection_id: i32,
     #[allow(dead_code)]
     connection_name: String,
@@ -23,7 +23,7 @@ pub struct RivetSchemaProvider {
     inner: Arc<MemorySchemaProvider>,
 }
 
-impl RivetSchemaProvider {
+impl RuntimeSchemaProvider {
     pub fn new(
         connection_id: i32,
         connection_name: String,
@@ -45,7 +45,7 @@ impl RivetSchemaProvider {
 }
 
 #[async_trait]
-impl SchemaProvider for RivetSchemaProvider {
+impl SchemaProvider for RuntimeSchemaProvider {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

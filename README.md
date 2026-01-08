@@ -1,24 +1,24 @@
 <div align="center">
   <picture>
-    <source srcset="logo/rivetdb-logo-transparent.png">
-    <img alt="Rivet DB logo" src="logo/rivetdb-logo-transparent.png" height="100">
+    <source srcset="logo/runtimedb-logo-transparent.png">
+    <img alt="RuntimeDB logo" src="logo/runtimedb-logo-transparent.png" height="100">
   </picture>
 </div>
 
 
-# RivetDB
+# RuntimeDB
 
 > _Query everything — **instantly**._
 
-RivetDB is a high-performance, federated query engine built on a smart, just-in-time cache.
+RuntimeDB is a high-performance, federated query engine built on a smart, just-in-time cache.
 
 It provides a Trino-style SQL interface for querying remote data sources without needing heavy infrastructure. The goal is to unify data access across systems while still getting fast, reliable performance on a single node.
 
-RivetDB takes inspiration from [DuckDB](https://duckdb.org/) and the Small Data community, which has shown how much you can get out of a single machine when you pair simplicity, vectorized execution, and efficient columnar formats. RivetDB applies that same thinking to federated data, using Arrow-native execution to make remote sources feel local. We think this is going to be especially important as agents query disparate systems and want to avoid scattering data fetching logic.
+RuntimeDB takes inspiration from [DuckDB](https://duckdb.org/) and the Small Data community, which has shown how much you can get out of a single machine when you pair simplicity, vectorized execution, and efficient columnar formats. RuntimeDB applies that same thinking to federated data, using Arrow-native execution to make remote sources feel local. We think this is going to be especially important as agents query disparate systems and want to avoid scattering data fetching logic.
 
-Under the hood, RivetDB is built in Rust and powered by [Apache DataFusion](https://datafusion.apache.org/), providing strong safety guarantees, great performance, and a solid execution engine that plays well with Arrow.
+Under the hood, RuntimeDB is built in Rust and powered by [Apache DataFusion](https://datafusion.apache.org/), providing strong safety guarantees, great performance, and a solid execution engine that plays well with Arrow.
 
-RivetDB is under active development, and the APIs will continue to shift as we move toward a stable 1.0 release.
+RuntimeDB is under active development, and the APIs will continue to shift as we move toward a stable 1.0 release.
 
 > **🚧 Early Development:** We are targeting a public preview with caching, lookup APIs, and a CLI in **Q1 2026**.  
 > Expect breaking changes until the API surface stabilizes.
@@ -27,12 +27,12 @@ RivetDB is under active development, and the APIs will continue to shift as we m
 
 ## Getting Started
 
-RivetDB is evolving quickly and installation instructions will change.  
+RuntimeDB is evolving quickly and installation instructions will change.  
 To experiment with the current engine:
 
 ```bash
-docker pull ghcr.io/hotdata-dev/rivetdb:latest
-docker run -p 3000:3000 ghcr.io/hotdata-dev/rivetdb:latest
+docker pull ghcr.io/hotdata-dev/runtimedb:latest
+docker run -p 3000:3000 ghcr.io/hotdata-dev/runtimedb:latest
 ```
 
 Alternatively/additionally, you can build and run locally: 
@@ -43,7 +43,7 @@ Alternatively/additionally, you can build and run locally:
 ---
 
 
-## What RivetDB does Today
+## What RuntimeDB does Today
 
 - Just-in-time retrieval of remote data  
 - Federated SQL interface inspired by Trino  
@@ -64,7 +64,7 @@ This foundation supports the larger roadmap described below.
 
 ## Vision
 
-RivetDB aims to become a unified query engine that eliminates challenges working with between disparate data systems. The project emphasizes:
+RuntimeDB aims to become a unified query engine that eliminates challenges working with between disparate data systems. The project emphasizes:
 
 - A consistent SQL interface for structured, semi-structured, and remote data sources
 - Millisecond startup times for on-demand ephemeral compute 
@@ -79,11 +79,11 @@ The long-term goal includes distributed caching, additional connectors, real-tim
 ## Roadmap
 
 Roadmap items below correspond directly to open issues in the repository.  
-For the latest view, consult: https://github.com/hotdata-dev/rivetdb/issues
+For the latest view, consult: https://github.com/hotdata-dev/runtimedb/issues
 
 ### **📍 Version 0.1 — Core Feature Set (Current Development)**
 
-These features define the first stable preview of RivetDB:
+These features define the first stable preview of RuntimeDB:
 
 - **Parquet Metadata Cache**  
   Cache Parquet metadata to optimize planning and repeated reads.
@@ -100,7 +100,7 @@ These features define the first stable preview of RivetDB:
 - **Arrow Flight SQL Support**  
   Add high-performance transport for large result sets and client libraries.
 
-- **RivetDB CLI**  
+- **RuntimeDB CLI**  
   Build a command-line interface for running queries, inspecting cache state, and interacting with the engine.
 
 These are high-priority items and represent the minimum surface for an early release.
@@ -146,7 +146,7 @@ These represent emerging priorities after the first public preview:
 | Query Metadata API | Planned |
 | Table Caching | Planned |
 | Arrow Flight SQL | Planned |
-| RivetDB CLI | Planned |
+| RuntimeDB CLI | Planned |
 | Cache | Alpha |
 | Current Connectors: Postgres, MySQL, DuckDB, MotherDuck, Iceberg, Snowflake | Alpha |
 | Observability | Backlog |

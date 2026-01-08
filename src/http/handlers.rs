@@ -7,7 +7,7 @@ use crate::http::models::{
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
 use crate::source::Source;
-use crate::RivetEngine;
+use crate::RuntimeEngine;
 use axum::{
     extract::{Path, Query as QueryParams, State},
     http::StatusCode,
@@ -21,7 +21,7 @@ use tracing::error;
 
 /// Handler for POST /query
 pub async fn query_handler(
-    State(engine): State<Arc<RivetEngine>>,
+    State(engine): State<Arc<RuntimeEngine>>,
     Json(request): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, ApiError> {
     // Validate SQL is not empty
@@ -85,7 +85,7 @@ pub async fn query_handler(
 
 /// Handler for GET /tables
 pub async fn tables_handler(
-    State(engine): State<Arc<RivetEngine>>,
+    State(engine): State<Arc<RuntimeEngine>>,
     QueryParams(params): QueryParams<HashMap<String, String>>,
 ) -> Result<Json<TablesResponse>, ApiError> {
     // Get optional connection filter
@@ -140,14 +140,14 @@ pub async fn health_handler() -> (StatusCode, Json<serde_json::Value>) {
         StatusCode::OK,
         Json(serde_json::json!({
             "status": "ok",
-            "service": "rivet"
+            "service": "runtimedb"
         })),
     )
 }
 
 /// Handler for POST /connections
 pub async fn create_connection_handler(
-    State(engine): State<Arc<RivetEngine>>,
+    State(engine): State<Arc<RuntimeEngine>>,
     Json(request): Json<CreateConnectionRequest>,
 ) -> Result<(StatusCode, Json<CreateConnectionResponse>), ApiError> {
     // Validate name is not empty
@@ -259,7 +259,7 @@ pub async fn create_connection_handler(
 
 /// Handler for POST /connections/{name}/discover
 pub async fn discover_connection_handler(
-    State(engine): State<Arc<RivetEngine>>,
+    State(engine): State<Arc<RuntimeEngine>>,
     Path(name): Path<String>,
 ) -> Result<Json<DiscoverConnectionResponse>, ApiError> {
     // Validate connection exists
@@ -296,7 +296,7 @@ pub async fn discover_connection_handler(
 
 /// Handler for GET /connections
 pub async fn list_connections_handler(
-    State(engine): State<Arc<RivetEngine>>,
+    State(engine): State<Arc<RuntimeEngine>>,
 ) -> Result<Json<ListConnectionsResponse>, ApiError> {
     let connections = engine.list_connections().await?;
 
@@ -316,7 +316,7 @@ pub async fn list_connections_handler(
 
 /// Handler for GET /connections/{name}
 pub async fn get_connection_handler(
-    State(engine): State<Arc<RivetEngine>>,
+    State(engine): State<Arc<RuntimeEngine>>,
     Path(name): Path<String>,
 ) -> Result<Json<GetConnectionResponse>, ApiError> {
     // Get connection info
@@ -342,7 +342,7 @@ pub async fn get_connection_handler(
 
 /// Handler for DELETE /connections/{name}
 pub async fn delete_connection_handler(
-    State(engine): State<Arc<RivetEngine>>,
+    State(engine): State<Arc<RuntimeEngine>>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     engine.remove_connection(&name).await.map_err(|e| {
@@ -358,7 +358,7 @@ pub async fn delete_connection_handler(
 
 /// Handler for DELETE /connections/{name}/cache
 pub async fn purge_connection_cache_handler(
-    State(engine): State<Arc<RivetEngine>>,
+    State(engine): State<Arc<RuntimeEngine>>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     engine.purge_connection(&name).await.map_err(|e| {
@@ -382,7 +382,7 @@ pub struct TableCachePath {
 
 /// Handler for DELETE /connections/{name}/tables/{schema}/{table}/cache
 pub async fn purge_table_cache_handler(
-    State(engine): State<Arc<RivetEngine>>,
+    State(engine): State<Arc<RuntimeEngine>>,
     Path(params): Path<TableCachePath>,
 ) -> Result<StatusCode, ApiError> {
     engine
@@ -404,7 +404,7 @@ pub async fn purge_table_cache_handler(
 
 /// Handler for POST /secrets
 pub async fn create_secret_handler(
-    State(engine): State<Arc<RivetEngine>>,
+    State(engine): State<Arc<RuntimeEngine>>,
     Json(request): Json<CreateSecretRequest>,
 ) -> Result<(StatusCode, Json<CreateSecretResponse>), ApiError> {
     let secret_manager = engine.secret_manager();
@@ -426,7 +426,7 @@ pub async fn create_secret_handler(
 
 /// Handler for PUT /secrets/{name}
 pub async fn update_secret_handler(
-    State(engine): State<Arc<RivetEngine>>,
+    State(engine): State<Arc<RuntimeEngine>>,
     Path(name): Path<String>,
     Json(request): Json<UpdateSecretRequest>,
 ) -> Result<Json<UpdateSecretResponse>, ApiError> {
@@ -446,7 +446,7 @@ pub async fn update_secret_handler(
 
 /// Handler for GET /secrets
 pub async fn list_secrets_handler(
-    State(engine): State<Arc<RivetEngine>>,
+    State(engine): State<Arc<RuntimeEngine>>,
 ) -> Result<Json<ListSecretsResponse>, ApiError> {
     let secret_manager = engine.secret_manager();
 
@@ -462,7 +462,7 @@ pub async fn list_secrets_handler(
 
 /// Handler for GET /secrets/{name}
 pub async fn get_secret_handler(
-    State(engine): State<Arc<RivetEngine>>,
+    State(engine): State<Arc<RuntimeEngine>>,
     Path(name): Path<String>,
 ) -> Result<Json<GetSecretResponse>, ApiError> {
     let secret_manager = engine.secret_manager();
@@ -478,7 +478,7 @@ pub async fn get_secret_handler(
 
 /// Handler for DELETE /secrets/{name}
 pub async fn delete_secret_handler(
-    State(engine): State<Arc<RivetEngine>>,
+    State(engine): State<Arc<RuntimeEngine>>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let secret_manager = engine.secret_manager();

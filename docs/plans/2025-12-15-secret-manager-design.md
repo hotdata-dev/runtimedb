@@ -2,7 +2,7 @@
 
 ## Overview
 
-Rivet stores database credentials as managed secrets rather than embedding plaintext in connection configs. 
+RuntimeDB stores database credentials as managed secrets rather than embedding plaintext in connection configs. 
 A `SecretManager` orchestrates validation, catalog metadata, and encryption, while pluggable `SecretBackend` 
 implementations handle the actual byte storage. 
 
@@ -34,7 +34,7 @@ Secret values never get persisted outside the dedicated storage layer and are re
 ┌────────────────────────────────────────────────────────┐
 │          EncryptedCatalogBackend (v1 implementation)   │
 │  - AES-256-GCM-SIV (nonce-misuse resistant)            │
-│  - Key sourced from RIVETDB_SECRET_KEY (base64)        │
+│  - Key sourced from RUNTIMEDB_SECRET_KEY (base64)        │
 │  - Stores ciphertext in encrypted_secret_values table  │
 └────────────────────────────────────────────────────────┘
 ```
@@ -134,7 +134,7 @@ The default backend encrypts plaintext values with AES-256-GCM-SIV using the nor
 - Key version `0x01` for the current master key
 - Nonce is randomly generated per secret write
 
-All keys are provided via `RIVETDB_SECRET_KEY` (base64-encoded 32-byte key). The builder fails immediately if the env var is missing or invalid. Additional key versions can be supported later without schema changes.
+All keys are provided via `RUNTIMEDB_SECRET_KEY` (base64-encoded 32-byte key). The builder fails immediately if the env var is missing or invalid. Additional key versions can be supported later without schema changes.
 
 ## Source & Credential Representation
 
@@ -235,8 +235,8 @@ Errors are surfaced via `SecretError -> ApiError`, so any new failure modes auto
 
 ## Configuration
 
-- `RIVETDB_SECRET_KEY`: base64-encoded 32-byte key required to enable the encrypted backend.
-- `RivetEngine::builder().secret_key(...)` enforces the presence of this key at startup; the server refuses to boot without it because every HTTP secret operation depends on the manager.
+- `RUNTIMEDB_SECRET_KEY`: base64-encoded 32-byte key required to enable the encrypted backend.
+- `RuntimeDBEngine::builder().secret_key(...)` enforces the presence of this key at startup; the server refuses to boot without it because every HTTP secret operation depends on the manager.
 
 ## Code Organization
 

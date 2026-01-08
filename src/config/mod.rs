@@ -50,8 +50,8 @@ pub struct StorageConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct PathsConfig {
-    /// Base directory for all RivetDB data (catalog.db, cache/).
-    /// Defaults to ~/.hotdata/rivetdb
+    /// Base directory for all RuntimeDB data (catalog.db, cache/).
+    /// Defaults to ~/.hotdata/runtimedb
     pub base_dir: Option<String>,
     /// Cache directory for Parquet files. Defaults to {base_dir}/cache
     pub cache_dir: Option<String>,
@@ -60,7 +60,7 @@ pub struct PathsConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct SecretsConfig {
     /// Encryption key for secrets (base64-encoded 32-byte key).
-    /// Can also be set via RIVETDB_SECRET_KEY environment variable.
+    /// Can also be set via RUNTIMEDB_SECRET_KEY environment variable.
     pub encryption_key: Option<String>,
 }
 
@@ -73,10 +73,10 @@ impl AppConfig {
 
         builder = builder.add_source(config::File::with_name(config_path));
 
-        // Add environment variables with prefix RIVETDB_
-        // Example: RIVETDB_SERVER_PORT=8080
+        // Add environment variables with prefix RUNTIMEDB_
+        // Example: RUNTIMEDB_SERVER_PORT=8080
         builder = builder.add_source(
-            config::Environment::with_prefix("RIVETDB")
+            config::Environment::with_prefix("RUNTIMEDB")
                 .separator("_")
                 .try_parsing(true),
         );
