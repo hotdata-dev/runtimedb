@@ -1,4 +1,4 @@
-//! Golden path integration tests for RivetDB.
+//! Golden path integration tests for RuntimeDB.
 //!
 //! Tests verify the complete workflow: create connection, discover tables, query data.
 //! Uses a unified test harness that runs the same assertions against:
@@ -10,9 +10,9 @@ use axum::{
     http::{Request, StatusCode},
     Router,
 };
-use rivetdb::http::app_server::{AppServer, PATH_CONNECTIONS, PATH_QUERY, PATH_TABLES};
-use rivetdb::source::Source;
-use rivetdb::RivetEngine;
+use runtimedb::http::app_server::{AppServer, PATH_CONNECTIONS, PATH_QUERY, PATH_TABLES};
+use runtimedb::source::Source;
+use runtimedb::RuntimeEngine;
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -29,7 +29,7 @@ struct QueryResult {
 }
 
 impl QueryResult {
-    fn from_engine(response: &rivetdb::QueryResponse) -> Self {
+    fn from_engine(response: &runtimedb::QueryResponse) -> Self {
         let batch = response.results.first();
 
         let (columns, row_count) = match batch {
@@ -84,7 +84,7 @@ struct ConnectionResult {
 }
 
 impl ConnectionResult {
-    fn from_engine(connections: &[rivetdb::catalog::ConnectionInfo]) -> Self {
+    fn from_engine(connections: &[runtimedb::catalog::ConnectionInfo]) -> Self {
         Self {
             count: connections.len(),
             names: connections.iter().map(|c| c.name.clone()).collect(),
@@ -125,7 +125,7 @@ struct TablesResult {
 }
 
 impl TablesResult {
-    fn from_engine(tables: &[rivetdb::catalog::TableInfo]) -> Self {
+    fn from_engine(tables: &[runtimedb::catalog::TableInfo]) -> Self {
         Self {
             tables: tables
                 .iter()
@@ -202,8 +202,8 @@ struct ConnectionDetails {
 
 impl ConnectionDetails {
     fn from_engine(
-        conn: &rivetdb::catalog::ConnectionInfo,
-        tables: &[rivetdb::catalog::TableInfo],
+        conn: &runtimedb::catalog::ConnectionInfo,
+        tables: &[runtimedb::catalog::TableInfo],
     ) -> Self {
         Self {
             id: conn.id,
@@ -242,7 +242,7 @@ trait TestExecutor: Send + Sync {
 
 /// Engine-based test executor.
 struct EngineExecutor {
-    engine: Arc<RivetEngine>,
+    engine: Arc<RuntimeEngine>,
 }
 
 #[async_trait::async_trait]
@@ -303,8 +303,8 @@ impl TestExecutor for ApiExecutor {
                 credential,
             } => {
                 let cred_json = match credential {
-                    rivetdb::source::Credential::None => json!({"type": "none"}),
-                    rivetdb::source::Credential::SecretRef { name } => {
+                    runtimedb::source::Credential::None => json!({"type": "none"}),
+                    runtimedb::source::Credential::SecretRef { name } => {
                         json!({"type": "secret_ref", "name": name})
                     }
                 };
@@ -321,8 +321,8 @@ impl TestExecutor for ApiExecutor {
                 credential,
             } => {
                 let cred_json = match credential {
-                    rivetdb::source::Credential::None => json!({"type": "none"}),
-                    rivetdb::source::Credential::SecretRef { name } => {
+                    runtimedb::source::Credential::None => json!({"type": "none"}),
+                    runtimedb::source::Credential::SecretRef { name } => {
                         json!({"type": "secret_ref", "name": name})
                     }
                 };
@@ -521,7 +521,7 @@ impl TestHarness {
         // Generate a test secret key to enable the secret manager
         let secret_key = generate_test_secret_key();
 
-        let engine = RivetEngine::builder()
+        let engine = RuntimeEngine::builder()
             .base_dir(temp_dir.path())
             .secret_key(secret_key)
             .build()
@@ -823,7 +823,7 @@ mod postgres_fixtures {
                 port,
                 user: "postgres".into(),
                 database: "postgres".into(),
-                credential: rivetdb::source::Credential::SecretRef {
+                credential: runtimedb::source::Credential::SecretRef {
                     name: secret_name.to_string(),
                 },
             },
@@ -868,7 +868,7 @@ mod postgres_fixtures {
                 port,
                 user: "postgres".into(),
                 database: "postgres".into(),
-                credential: rivetdb::source::Credential::SecretRef {
+                credential: runtimedb::source::Credential::SecretRef {
                     name: secret_name.to_string(),
                 },
             },
@@ -927,7 +927,7 @@ mod mysql_fixtures {
                 port,
                 user: "root".into(),
                 database: "sales".into(),
-                credential: rivetdb::source::Credential::SecretRef {
+                credential: runtimedb::source::Credential::SecretRef {
                     name: secret_name.to_string(),
                 },
             },

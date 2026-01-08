@@ -8,5 +8,5 @@ pub mod secrets;
 pub mod source;
 pub mod storage;
 
-pub use engine::{QueryResponse, RivetEngine, RivetEngineBuilder};
+pub use engine::{QueryResponse, RuntimeEngine, RuntimeEngineBuilder};
 pub use source::Source;

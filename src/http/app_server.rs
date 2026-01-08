@@ -4,14 +4,14 @@ use crate::http::handlers::{
     health_handler, list_connections_handler, list_secrets_handler, purge_connection_cache_handler,
     purge_table_cache_handler, query_handler, tables_handler, update_secret_handler,
 };
-use crate::RivetEngine;
+use crate::RuntimeEngine;
 use axum::routing::{delete, get, post};
 use axum::Router;
 use std::sync::Arc;
 
 pub struct AppServer {
     pub router: Router,
-    pub engine: Arc<RivetEngine>,
+    pub engine: Arc<RuntimeEngine>,
 }
 
 pub const PATH_QUERY: &str = "/query";
@@ -26,7 +26,7 @@ pub const PATH_SECRETS: &str = "/secrets";
 pub const PATH_SECRET: &str = "/secrets/{name}";
 
 impl AppServer {
-    pub fn new(engine: RivetEngine) -> Self {
+    pub fn new(engine: RuntimeEngine) -> Self {
         let engine = Arc::new(engine);
         AppServer {
             router: Router::new()

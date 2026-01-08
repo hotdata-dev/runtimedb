@@ -7,11 +7,11 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rand::RngCore;
-use rivetdb::http::app_server::{
+use runtimedb::http::app_server::{
     AppServer, PATH_CONNECTIONS, PATH_CONNECTION_DISCOVER, PATH_QUERY, PATH_SECRET, PATH_SECRETS,
     PATH_TABLES,
 };
-use rivetdb::RivetEngine;
+use runtimedb::RuntimeEngine;
 use serde_json::json;
 use tempfile::TempDir;
 use tower::util::ServiceExt;
@@ -27,7 +27,7 @@ fn generate_test_secret_key() -> String {
 async fn setup_test() -> Result<(Router, TempDir)> {
     let temp_dir = tempfile::tempdir()?;
 
-    let engine = RivetEngine::builder()
+    let engine = RuntimeEngine::builder()
         .base_dir(temp_dir.path())
         .secret_key(generate_test_secret_key())
         .build()
@@ -493,7 +493,7 @@ async fn test_list_secrets_empty() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_create_and_get_secret() -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
-    let engine = RivetEngine::builder()
+    let engine = RuntimeEngine::builder()
         .base_dir(temp_dir.path())
         .secret_key(generate_test_secret_key())
         .build()
@@ -552,7 +552,7 @@ async fn test_create_and_get_secret() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_list_secrets_after_create() -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
-    let engine = RivetEngine::builder()
+    let engine = RuntimeEngine::builder()
         .base_dir(temp_dir.path())
         .secret_key(generate_test_secret_key())
         .build()
@@ -611,7 +611,7 @@ async fn test_list_secrets_after_create() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_delete_secret() -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
-    let engine = RivetEngine::builder()
+    let engine = RuntimeEngine::builder()
         .base_dir(temp_dir.path())
         .secret_key(generate_test_secret_key())
         .build()
@@ -743,7 +743,7 @@ async fn test_create_secret_missing_fields() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_update_secret() -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
-    let engine = RivetEngine::builder()
+    let engine = RuntimeEngine::builder()
         .base_dir(temp_dir.path())
         .secret_key(generate_test_secret_key())
         .build()

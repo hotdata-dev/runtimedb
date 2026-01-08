@@ -1,9 +1,9 @@
 //! Integration tests for datafetch module
 
-use rivetdb::catalog::{CatalogManager, SqliteCatalogManager};
-use rivetdb::datafetch::{DataFetcher, NativeFetcher};
-use rivetdb::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
-use rivetdb::source::Source;
+use runtimedb::catalog::{CatalogManager, SqliteCatalogManager};
+use runtimedb::datafetch::{DataFetcher, NativeFetcher};
+use runtimedb::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
+use runtimedb::source::Source;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -102,7 +102,7 @@ async fn test_unsupported_driver() {
         database: "fake".to_string(),
         schema: None,
         role: None,
-        credential: rivetdb::source::Credential::None,
+        credential: runtimedb::source::Credential::None,
     };
 
     let result = fetcher.discover_tables(&source, &secrets).await;
@@ -166,7 +166,7 @@ mod mysql_container_tests {
             port,
             user: "root".to_string(),
             database: "testdb".to_string(),
-            credential: rivetdb::source::Credential::SecretRef {
+            credential: runtimedb::source::Credential::SecretRef {
                 name: "mysql-pass".to_string(),
             },
         };
@@ -194,7 +194,7 @@ mod mysql_container_tests {
     #[tokio::test]
     async fn test_mysql_fetch_table() {
         use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-        use rivetdb::datafetch::StreamingParquetWriter;
+        use runtimedb::datafetch::StreamingParquetWriter;
         use std::fs::File;
 
         let temp_dir = TempDir::new().unwrap();
@@ -247,7 +247,7 @@ mod mysql_container_tests {
             port,
             user: "root".to_string(),
             database: "testdb".to_string(),
-            credential: rivetdb::source::Credential::SecretRef {
+            credential: runtimedb::source::Credential::SecretRef {
                 name: "mysql-pass".to_string(),
             },
         };
@@ -292,7 +292,7 @@ mod mysql_container_tests {
 #[tokio::test]
 async fn test_duckdb_fetch_table() {
     use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    use rivetdb::datafetch::StreamingParquetWriter;
+    use runtimedb::datafetch::StreamingParquetWriter;
     use std::fs::File;
 
     let temp_dir = TempDir::new().unwrap();

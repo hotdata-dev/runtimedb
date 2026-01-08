@@ -1,7 +1,7 @@
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rand::RngCore;
-use rivetdb::RivetEngine;
+use runtimedb::RuntimeEngine;
 use tempfile::tempdir;
 
 /// Generate a test secret key (base64-encoded 32 bytes)
@@ -17,7 +17,7 @@ fn generate_test_secret_key() -> String {
 async fn test_sync_connection_not_found() -> Result<()> {
     let dir = tempdir()?;
 
-    let engine = RivetEngine::builder()
+    let engine = RuntimeEngine::builder()
         .base_dir(dir.path())
         .secret_key(generate_test_secret_key())
         .build()
@@ -39,7 +39,7 @@ async fn test_sync_connection_not_found() -> Result<()> {
 async fn test_sync_connection_no_tables() -> Result<()> {
     let dir = tempdir()?;
 
-    let engine = RivetEngine::builder()
+    let engine = RuntimeEngine::builder()
         .base_dir(dir.path())
         .secret_key(generate_test_secret_key())
         .build()

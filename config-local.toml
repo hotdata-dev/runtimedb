@@ -9,8 +9,8 @@ type = "sqlite"
 #type = "postgres"
 #host = "localhost"
 #port = 5432
-#database = "rivet"
-#user = "rivetuser"
+#database = "runtime"
+#user = "runtimeuser"
 #password =
 
 [storage]
@@ -18,10 +18,10 @@ type = "filesystem"
 ## S3 Example
 #[storage]
 #type = "s3"
-#bucket = "rivet-cache"
+#bucket = "runtime-cache"
 #region = "us-east-1"
 ## Optional: for MinIO/localstack
 #endpoint = "http://localhost:9000"
 
 [paths]
-#cache_dir = "~/.hotdata/rivetdb/cache"
+#cache_dir = "~/.hotdata/runtimedb/cache"

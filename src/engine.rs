@@ -1,6 +1,6 @@
 use crate::catalog::{CatalogManager, ConnectionInfo, SqliteCatalogManager, TableInfo};
 use crate::datafetch::{DataFetcher, FetchOrchestrator, NativeFetcher};
-use crate::datafusion::{block_on, RivetCatalogProvider};
+use crate::datafusion::{block_on, RuntimeCatalogProvider};
 use crate::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
@@ -16,8 +16,8 @@ use tracing::error;
 
 /// Default insecure encryption key for development use only.
 /// This key is publicly known and provides NO security.
-/// It is a base64-encoded 32-byte key: "INSECURE_DEFAULT_KEY_RIVETDB!!!!"
-const DEFAULT_INSECURE_KEY: &str = "SU5TRUNVUkVfREVGQVVMVF9LRVlfUklWRVREQiEhISE=";
+/// It is a base64-encoded 32-byte key: "INSECURE_DEFAULT_KEY_RUNTIMEDB!!"
+const DEFAULT_INSECURE_KEY: &str = "SU5TRUNVUkVfREVGQVVMVF9LRVlfUlVOVElNRURCISE=";
 
 pub struct QueryResponse {
     pub results: Vec<RecordBatch>,
@@ -25,7 +25,7 @@ pub struct QueryResponse {
 }
 
 /// The main query engine that manages connections, catalogs, and query execution.
-pub struct RivetEngine {
+pub struct RuntimeEngine {
     catalog: Arc<dyn CatalogManager>,
     df_ctx: SessionContext,
     storage: Arc<dyn StorageManager>,
@@ -33,7 +33,7 @@ pub struct RivetEngine {
     secret_manager: Arc<SecretManager>,
 }
 
-impl RivetEngine {
+impl RuntimeEngine {
     // =========================================================================
     // Constructors
     // =========================================================================
@@ -46,8 +46,8 @@ impl RivetEngine {
     }
 
     /// Create a builder for more control over engine configuration.
-    pub fn builder() -> RivetEngineBuilder {
-        RivetEngineBuilder::new()
+    pub fn builder() -> RuntimeEngineBuilder {
+        RuntimeEngineBuilder::new()
     }
 
     /// Create a new engine from application configuration.
@@ -55,7 +55,7 @@ impl RivetEngine {
     /// For sqlite catalog + filesystem storage, the builder handles defaults.
     /// This method only creates explicit catalog/storage for non-default backends (postgres, s3).
     pub async fn from_config(config: &crate::config::AppConfig) -> Result<Self> {
-        let mut builder = RivetEngine::builder();
+        let mut builder = RuntimeEngine::builder();
 
         // Set base_dir if explicitly configured
         if let Some(base) = &config.paths.base_dir {
@@ -144,10 +144,10 @@ impl RivetEngine {
                 if let Some(endpoint) = &config.storage.endpoint {
                     // For custom endpoint, we need credentials from environment
                     let access_key = std::env::var("AWS_ACCESS_KEY_ID")
-                        .or_else(|_| std::env::var("RIVETDB_STORAGE_ACCESS_KEY_ID"))
+                        .or_else(|_| std::env::var("RUNTIMEDB_STORAGE_ACCESS_KEY_ID"))
                         .unwrap_or_else(|_| "minioadmin".to_string());
                     let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")
-                        .or_else(|_| std::env::var("RIVETDB_STORAGE_SECRET_ACCESS_KEY"))
+                        .or_else(|_| std::env::var("RUNTIMEDB_STORAGE_SECRET_ACCESS_KEY"))
                         .unwrap_or_else(|_| "minioadmin".to_string());
 
                     // Allow HTTP for local MinIO
@@ -213,7 +213,7 @@ impl RivetEngine {
         for conn in connections {
             let source: Source = serde_json::from_str(&conn.config_json)?;
 
-            let catalog_provider = Arc::new(RivetCatalogProvider::new(
+            let catalog_provider = Arc::new(RuntimeCatalogProvider::new(
                 conn.id,
                 conn.name.clone(),
                 Arc::new(source),
@@ -243,7 +243,7 @@ impl RivetEngine {
             .await?;
 
         // Register with DataFusion (empty catalog - no tables yet)
-        let catalog_provider = Arc::new(RivetCatalogProvider::new(
+        let catalog_provider = Arc::new(RuntimeCatalogProvider::new(
             conn_id,
             name.to_string(),
             Arc::new(source),
@@ -373,7 +373,7 @@ impl RivetEngine {
         // This causes DataFusion to drop any open file handles to the cached files
         let source: Source = serde_json::from_str(&conn.config_json)?;
 
-        let catalog_provider = Arc::new(RivetCatalogProvider::new(
+        let catalog_provider = Arc::new(RuntimeCatalogProvider::new(
             conn.id,
             conn.name.clone(),
             Arc::new(source),
@@ -415,7 +415,7 @@ impl RivetEngine {
         // This causes DataFusion to drop any open file handles to the cached files
         let source: Source = serde_json::from_str(&conn.config_json)?;
 
-        let catalog_provider = Arc::new(RivetCatalogProvider::new(
+        let catalog_provider = Arc::new(RuntimeCatalogProvider::new(
             conn.id,
             conn.name.clone(),
             Arc::new(source),
@@ -482,41 +482,41 @@ impl RivetEngine {
     }
 }
 
-impl Drop for RivetEngine {
+impl Drop for RuntimeEngine {
     fn drop(&mut self) {
         // Ensure catalog connection is closed when engine is dropped
         let _ = block_on(self.catalog.close());
     }
 }
 
-/// Builder for RivetEngine
+/// Builder for RuntimeEngine
 ///
 /// The builder is responsible for:
-/// - Resolving the base directory (defaults to ~/.hotdata/rivetdb)
+/// - Resolving the base directory (defaults to ~/.hotdata/runtimedb)
 /// - Creating default catalog (SQLite) and storage (filesystem) when not explicitly provided
 /// - Ensuring directories exist before use
 ///
 /// # Example
 ///
 /// ```no_run
-/// use rivetdb::RivetEngine;
+/// use runtimedb::RuntimeEngine;
 /// use std::path::PathBuf;
 ///
-/// // Minimal: uses ~/.hotdata/rivetdb with SQLite + filesystem
-/// // let engine = RivetEngine::builder().build().await.unwrap();
+/// // Minimal: uses ~/.hotdata/runtimedb with SQLite + filesystem
+/// // let engine = RuntimeEngine::builder().build().await.unwrap();
 ///
 /// // Custom base dir with defaults
-/// // let engine = RivetEngine::builder()
-/// //     .base_dir(PathBuf::from("/tmp/rivet"))
+/// // let engine = RuntimeEngine::builder()
+/// //     .base_dir(PathBuf::from("/tmp/runtime"))
 /// //     .build().await.unwrap();
 ///
 /// // Explicit catalog/storage (skips defaults)
-/// // let engine = RivetEngine::builder()
+/// // let engine = RuntimeEngine::builder()
 /// //     .catalog(my_catalog)
 /// //     .storage(my_storage)
 /// //     .build().await.unwrap();
 /// ```
-pub struct RivetEngineBuilder {
+pub struct RuntimeEngineBuilder {
     base_dir: Option<PathBuf>,
     cache_dir: Option<PathBuf>,
     catalog: Option<Arc<dyn CatalogManager>>,
@@ -524,25 +524,25 @@ pub struct RivetEngineBuilder {
     secret_key: Option<String>,
 }
 
-impl Default for RivetEngineBuilder {
+impl Default for RuntimeEngineBuilder {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl RivetEngineBuilder {
+impl RuntimeEngineBuilder {
     pub fn new() -> Self {
         Self {
             base_dir: None,
             cache_dir: None,
             catalog: None,
             storage: None,
-            secret_key: std::env::var("RIVETDB_SECRET_KEY").ok(),
+            secret_key: std::env::var("RUNTIMEDB_SECRET_KEY").ok(),
         }
     }
 
-    /// Set the base directory for all RivetDB data.
-    /// Defaults to ~/.hotdata/rivetdb if not set.
+    /// Set the base directory for all RuntimeDB data.
+    /// Defaults to ~/.hotdata/runtimedb if not set.
     pub fn base_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.base_dir = Some(dir.into());
         self
@@ -570,7 +570,7 @@ impl RivetEngineBuilder {
     }
 
     /// Set the encryption key for the secret manager (base64-encoded 32-byte key).
-    /// If not set, falls back to RIVETDB_SECRET_KEY environment variable.
+    /// If not set, falls back to RUNTIMEDB_SECRET_KEY environment variable.
     /// If neither is set, uses a default insecure key (with loud warnings).
     pub fn secret_key(mut self, key: impl Into<String>) -> Self {
         self.secret_key = Some(key.into());
@@ -583,7 +583,7 @@ impl RivetEngineBuilder {
             let home = std::env::var("HOME")
                 .or_else(|_| std::env::var("USERPROFILE"))
                 .unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(".hotdata").join("rivetdb")
+            PathBuf::from(home).join(".hotdata").join("runtimedb")
         })
     }
 
@@ -594,7 +594,7 @@ impl RivetEngineBuilder {
             .unwrap_or_else(|| base_dir.join("cache"))
     }
 
-    pub async fn build(self) -> Result<RivetEngine> {
+    pub async fn build(self) -> Result<RuntimeEngine> {
         // Step 1: Resolve directories
         let base_dir = self.resolve_base_dir();
         let cache_dir = self.resolve_cache_dir(&base_dir);
@@ -654,7 +654,7 @@ impl RivetEngineBuilder {
             warn!("!!!                                                           !!!");
             warn!("!!! DO NOT USE IN PRODUCTION!                                 !!!");
             warn!("!!!                                                           !!!");
-            warn!("!!! To fix: Set RIVETDB_SECRET_KEY environment variable       !!!");
+            warn!("!!! To fix: Set RUNTIMEDB_SECRET_KEY environment variable       !!!");
             warn!("!!! Generate a key with: openssl rand -base64 32              !!!");
             warn!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
         }
@@ -679,7 +679,7 @@ impl RivetEngineBuilder {
             secret_manager.clone(),
         ));
 
-        let mut engine = RivetEngine {
+        let mut engine = RuntimeEngine {
             catalog,
             df_ctx,
             storage,
@@ -726,7 +726,7 @@ mod tests {
         ));
 
         // Build engine using builder pattern
-        let engine = RivetEngine::builder()
+        let engine = RuntimeEngine::builder()
             .base_dir(base_dir.clone())
             .catalog(catalog)
             .storage(storage)
@@ -752,7 +752,7 @@ mod tests {
     async fn test_builder_with_defaults() {
         // Test that builder creates defaults when only base_dir is provided
         let temp_dir = TempDir::new().unwrap();
-        let result = RivetEngine::builder()
+        let result = RuntimeEngine::builder()
             .base_dir(temp_dir.path().to_path_buf())
             .secret_key(test_secret_key())
             .build()
@@ -774,17 +774,17 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         // Temporarily clear the env var if set
-        let old_key = std::env::var("RIVETDB_SECRET_KEY").ok();
-        std::env::remove_var("RIVETDB_SECRET_KEY");
+        let old_key = std::env::var("RUNTIMEDB_SECRET_KEY").ok();
+        std::env::remove_var("RUNTIMEDB_SECRET_KEY");
 
-        let result = RivetEngine::builder()
+        let result = RuntimeEngine::builder()
             .base_dir(temp_dir.path().to_path_buf())
             .build()
             .await;
 
         // Restore env var if it was set
         if let Some(key) = old_key {
-            std::env::set_var("RIVETDB_SECRET_KEY", key);
+            std::env::set_var("RUNTIMEDB_SECRET_KEY", key);
         }
 
         // Should succeed with default insecure key (with warnings logged)
@@ -836,7 +836,7 @@ mod tests {
             },
         };
 
-        let engine = RivetEngine::from_config(&config).await;
+        let engine = RuntimeEngine::from_config(&config).await;
         assert!(
             engine.is_ok(),
             "from_config should create engine successfully: {:?}",

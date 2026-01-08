@@ -1,12 +1,12 @@
 use anyhow::Result;
 use clap::Parser;
-use rivetdb::config::AppConfig;
-use rivetdb::http::app_server::AppServer;
-use rivetdb::RivetEngine;
+use runtimedb::config::AppConfig;
+use runtimedb::http::app_server::AppServer;
+use runtimedb::RuntimeEngine;
 use std::time::Instant;
 
 #[derive(Parser)]
-#[command(name = "rivet-server", about = "Rivet HTTP Server")]
+#[command(name = "runtime-server", about = "RuntimeDB HTTP Server")]
 struct Cli {
     /// Path to config file
     config: String,
@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    tracing::info!("Starting Rivet HTTP Server");
+    tracing::info!("Starting RuntimeDB HTTP Server");
 
     // Load configuration
     let config = AppConfig::load(&cli.config)?;
@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     tracing::info!("Configuration '{}' loaded successfully", &cli.config);
 
     // Initialize engine from config
-    let engine = RivetEngine::from_config(&config).await?;
+    let engine = RuntimeEngine::from_config(&config).await?;
 
     tracing::info!("Engine initialized");
 

@@ -16,6 +16,6 @@ where
     block_in_place(|| tokio::runtime::Handle::current().block_on(f))
 }
 
-pub use catalog_provider::RivetCatalogProvider;
+pub use catalog_provider::RuntimeCatalogProvider;
 pub use lazy_table_provider::LazyTableProvider;
-pub use schema_provider::RivetSchemaProvider;
+pub use schema_provider::RuntimeSchemaProvider;

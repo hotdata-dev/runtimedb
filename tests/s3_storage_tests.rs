@@ -7,7 +7,7 @@
 //!
 //! Run these tests with: cargo test --test s3_storage_tests -- --ignored
 
-use rivetdb::storage::{S3Credentials, S3Storage, StorageManager};
+use runtimedb::storage::{S3Credentials, S3Storage, StorageManager};
 
 #[tokio::test]
 #[ignore] // Run with --ignored flag when MinIO is available

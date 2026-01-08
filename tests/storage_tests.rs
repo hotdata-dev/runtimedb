@@ -1,4 +1,4 @@
-use rivetdb::storage::{FilesystemStorage, StorageManager};
+use runtimedb::storage::{FilesystemStorage, StorageManager};
 use tempfile::TempDir;
 
 #[test]

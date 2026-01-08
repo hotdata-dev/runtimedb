@@ -119,7 +119,7 @@ pub enum EncryptError {
 pub enum DecryptError {
     #[error("Encrypted data too short")]
     TooShort,
-    #[error("Invalid magic bytes (not a RivetDB secret)")]
+    #[error("Invalid magic bytes (not a RuntimeDB secret)")]
     InvalidMagic,
     #[error("Unsupported encryption scheme: {0}")]
     UnsupportedScheme(u8),
