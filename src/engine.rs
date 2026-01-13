@@ -1,6 +1,6 @@
 use crate::catalog::{CatalogManager, ConnectionInfo, SqliteCatalogManager, TableInfo};
 use crate::datafetch::{DataFetcher, FetchOrchestrator, NativeFetcher};
-use crate::datafusion::{block_on, RuntimeCatalogProvider};
+use crate::datafusion::{block_on, RuntimeCatalogProvider, RuntimeDbCatalogProvider};
 use crate::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
@@ -689,6 +689,12 @@ impl RuntimeEngineBuilder {
 
         // Register all existing connections as DataFusion catalogs
         engine.register_existing_connections().await?;
+
+        // Register the runtimedb virtual catalog for system metadata
+        let runtimedb_catalog = RuntimeDbCatalogProvider::new();
+        engine
+            .df_ctx
+            .register_catalog("runtimedb", Arc::new(runtimedb_catalog));
 
         Ok(engine)
     }
