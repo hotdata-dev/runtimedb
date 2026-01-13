@@ -1,4 +1,5 @@
 mod catalog_provider;
+mod information_schema;
 mod lazy_table_provider;
 mod runtimedb_catalog;
 mod schema_provider;
@@ -18,6 +19,7 @@ where
 }
 
 pub use catalog_provider::RuntimeCatalogProvider;
+pub use information_schema::InformationSchemaProvider;
 pub use lazy_table_provider::LazyTableProvider;
 pub use runtimedb_catalog::RuntimeDbCatalogProvider;
 pub use schema_provider::RuntimeSchemaProvider;

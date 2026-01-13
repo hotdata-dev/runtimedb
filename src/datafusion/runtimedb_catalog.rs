@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use datafusion::catalog::{CatalogProvider, SchemaProvider};
+use datafusion::error::Result;
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// Virtual catalog provider for internal RuntimeDB system objects.
 ///
@@ -11,19 +12,14 @@ use std::sync::Arc;
 /// dynamically via `register_schema()`.
 #[derive(Debug, Default)]
 pub struct RuntimeDbCatalogProvider {
-    schemas: HashMap<String, Arc<dyn SchemaProvider>>,
+    schemas: RwLock<HashMap<String, Arc<dyn SchemaProvider>>>,
 }
 
 impl RuntimeDbCatalogProvider {
     pub fn new() -> Self {
         Self {
-            schemas: HashMap::new(),
+            schemas: RwLock::new(HashMap::new()),
         }
-    }
-
-    /// Register a schema provider under this catalog.
-    pub fn register_schema(&mut self, name: impl Into<String>, provider: Arc<dyn SchemaProvider>) {
-        self.schemas.insert(name.into(), provider);
     }
 }
 
@@ -34,10 +30,28 @@ impl CatalogProvider for RuntimeDbCatalogProvider {
     }
 
     fn schema_names(&self) -> Vec<String> {
-        self.schemas.keys().cloned().collect()
+        self.schemas
+            .read()
+            .expect("schema lock poisoned")
+            .keys()
+            .cloned()
+            .collect()
     }
 
     fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
-        self.schemas.get(name).cloned()
+        self.schemas
+            .read()
+            .expect("schema lock poisoned")
+            .get(name)
+            .cloned()
+    }
+
+    fn register_schema(
+        &self,
+        name: &str,
+        schema: Arc<dyn SchemaProvider>,
+    ) -> Result<Option<Arc<dyn SchemaProvider>>> {
+        let mut schemas = self.schemas.write().expect("schema lock poisoned");
+        Ok(schemas.insert(name.to_string(), schema))
     }
 }

@@ -1,6 +1,8 @@
 use crate::catalog::{CatalogManager, ConnectionInfo, SqliteCatalogManager, TableInfo};
 use crate::datafetch::{DataFetcher, FetchOrchestrator, NativeFetcher};
-use crate::datafusion::{block_on, RuntimeCatalogProvider, RuntimeDbCatalogProvider};
+use crate::datafusion::{
+    block_on, InformationSchemaProvider, RuntimeCatalogProvider, RuntimeDbCatalogProvider,
+};
 use crate::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
@@ -691,10 +693,14 @@ impl RuntimeEngineBuilder {
         engine.register_existing_connections().await?;
 
         // Register the runtimedb virtual catalog for system metadata
-        let runtimedb_catalog = RuntimeDbCatalogProvider::new();
+        let runtimedb_catalog = Arc::new(RuntimeDbCatalogProvider::new());
+        runtimedb_catalog.register_schema(
+            "information_schema",
+            Arc::new(InformationSchemaProvider::new(engine.catalog.clone())),
+        )?;
         engine
             .df_ctx
-            .register_catalog("runtimedb", Arc::new(runtimedb_catalog));
+            .register_catalog("runtimedb", runtimedb_catalog);
 
         Ok(engine)
     }
