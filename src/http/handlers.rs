@@ -3,8 +3,8 @@ use crate::http::error::ApiError;
 use crate::http::models::{
     ColumnInfo, ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse,
     CreateSecretRequest, CreateSecretResponse, DiscoverConnectionResponse, DiscoveryStatus,
-    GetConnectionResponse, GetSecretResponse, ListConnectionsResponse, ListSecretsResponse,
-    QueryRequest, QueryResponse, SecretMetadataResponse, TableInfo, TablesResponse,
+    GetConnectionResponse, GetSecretResponse, InformationSchemaResponse, ListConnectionsResponse,
+    ListSecretsResponse, QueryRequest, QueryResponse, SecretMetadataResponse, TableInfo,
     UpdateSecretRequest, UpdateSecretResponse,
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
@@ -85,11 +85,11 @@ pub async fn query_handler(
     }))
 }
 
-/// Handler for GET /tables
-pub async fn tables_handler(
+/// Handler for GET /information_schema
+pub async fn information_schema_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     QueryParams(params): QueryParams<HashMap<String, String>>,
-) -> Result<Json<TablesResponse>, ApiError> {
+) -> Result<Json<InformationSchemaResponse>, ApiError> {
     // Get optional connection filter
     let connection_filter = params.get("connection").map(|s| s.as_str());
 
@@ -162,7 +162,7 @@ pub async fn tables_handler(
         })
         .collect();
 
-    Ok(Json(TablesResponse {
+    Ok(Json(InformationSchemaResponse {
         tables: table_infos,
     }))
 }

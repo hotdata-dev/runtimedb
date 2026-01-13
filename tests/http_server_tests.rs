@@ -8,8 +8,8 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rand::RngCore;
 use runtimedb::http::app_server::{
-    AppServer, PATH_CONNECTIONS, PATH_CONNECTION_DISCOVER, PATH_QUERY, PATH_SECRET, PATH_SECRETS,
-    PATH_TABLES,
+    AppServer, PATH_CONNECTIONS, PATH_CONNECTION_DISCOVER, PATH_INFORMATION_SCHEMA, PATH_QUERY,
+    PATH_SECRET, PATH_SECRETS,
 };
 use runtimedb::RuntimeEngine;
 use serde_json::json;
@@ -221,14 +221,14 @@ async fn test_query_endpoint_missing_sql_field() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_tables_endpoint_empty() -> Result<()> {
+async fn test_information_schema_endpoint_empty() -> Result<()> {
     let (app, _tempdir) = setup_test().await?;
 
     let response = app
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(PATH_TABLES)
+                .uri(PATH_INFORMATION_SCHEMA)
                 .body(Body::empty())?,
         )
         .await?;
@@ -246,14 +246,17 @@ async fn test_tables_endpoint_empty() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_tables_endpoint_with_connection_filter_not_found() -> Result<()> {
+async fn test_information_schema_endpoint_with_connection_filter_not_found() -> Result<()> {
     let (app, _tempdir) = setup_test().await?;
 
     let response = app
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!("{}?connection=nonexistent", PATH_TABLES))
+                .uri(format!(
+                    "{}?connection=nonexistent",
+                    PATH_INFORMATION_SCHEMA
+                ))
                 .body(Body::empty())?,
         )
         .await?;

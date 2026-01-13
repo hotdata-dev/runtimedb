@@ -1,8 +1,9 @@
 use crate::http::handlers::{
     create_connection_handler, create_secret_handler, delete_connection_handler,
     delete_secret_handler, discover_connection_handler, get_connection_handler, get_secret_handler,
-    health_handler, list_connections_handler, list_secrets_handler, purge_connection_cache_handler,
-    purge_table_cache_handler, query_handler, tables_handler, update_secret_handler,
+    health_handler, information_schema_handler, list_connections_handler, list_secrets_handler,
+    purge_connection_cache_handler, purge_table_cache_handler, query_handler,
+    update_secret_handler,
 };
 use crate::RuntimeEngine;
 use axum::routing::{delete, get, post};
@@ -15,7 +16,7 @@ pub struct AppServer {
 }
 
 pub const PATH_QUERY: &str = "/query";
-pub const PATH_TABLES: &str = "/tables";
+pub const PATH_INFORMATION_SCHEMA: &str = "/information_schema";
 pub const PATH_HEALTH: &str = "/health";
 pub const PATH_CONNECTIONS: &str = "/connections";
 pub const PATH_CONNECTION: &str = "/connections/{name}";
@@ -31,7 +32,7 @@ impl AppServer {
         AppServer {
             router: Router::new()
                 .route(PATH_QUERY, post(query_handler))
-                .route(PATH_TABLES, get(tables_handler))
+                .route(PATH_INFORMATION_SCHEMA, get(information_schema_handler))
                 .route(PATH_HEALTH, get(health_handler))
                 .route(
                     PATH_CONNECTIONS,

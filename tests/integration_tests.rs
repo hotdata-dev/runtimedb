@@ -10,7 +10,9 @@ use axum::{
     http::{Request, StatusCode},
     Router,
 };
-use runtimedb::http::app_server::{AppServer, PATH_CONNECTIONS, PATH_QUERY, PATH_TABLES};
+use runtimedb::http::app_server::{
+    AppServer, PATH_CONNECTIONS, PATH_INFORMATION_SCHEMA, PATH_QUERY,
+};
 use runtimedb::source::Source;
 use runtimedb::RuntimeEngine;
 use serde_json::json;
@@ -378,7 +380,7 @@ impl TestExecutor for ApiExecutor {
     }
 
     async fn list_tables(&self, connection: &str) -> TablesResult {
-        let uri = format!("{}?connection={}", PATH_TABLES, connection);
+        let uri = format!("{}?connection={}", PATH_INFORMATION_SCHEMA, connection);
         let response = self
             .router
             .clone()

@@ -36,9 +36,9 @@ pub struct TableInfo {
     pub columns: Vec<ColumnInfo>,
 }
 
-/// Response body for GET /tables
+/// Response body for GET /information_schema
 #[derive(Debug, Serialize)]
-pub struct TablesResponse {
+pub struct InformationSchemaResponse {
     pub tables: Vec<TableInfo>,
 }
 
