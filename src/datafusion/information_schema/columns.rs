@@ -12,6 +12,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr;
 use std::any::Any;
 use std::sync::Arc;
+use tracing::warn;
 
 /// Virtual table provider for `information_schema.columns`.
 ///
@@ -76,19 +77,27 @@ impl ColumnsTableProvider {
 
             // Deserialize the Arrow schema to get column info
             if let Some(schema_json) = &table.arrow_schema_json {
-                if let Ok(arrow_schema) = deserialize_arrow_schema(schema_json) {
-                    for (ordinal, field) in arrow_schema.fields().iter().enumerate() {
-                        catalog_builder.append_value(&catalog_name);
-                        schema_builder.append_value(&table.schema_name);
-                        table_builder.append_value(&table.table_name);
-                        column_builder.append_value(field.name());
-                        ordinal_builder.append_value((ordinal + 1) as i32);
-                        type_builder.append_value(&format!("{}", field.data_type()));
-                        nullable_builder.append_value(if field.is_nullable() {
-                            "YES"
-                        } else {
-                            "NO"
-                        });
+                match deserialize_arrow_schema(schema_json) {
+                    Ok(arrow_schema) => {
+                        for (ordinal, field) in arrow_schema.fields().iter().enumerate() {
+                            catalog_builder.append_value(&catalog_name);
+                            schema_builder.append_value(&table.schema_name);
+                            table_builder.append_value(&table.table_name);
+                            column_builder.append_value(field.name());
+                            ordinal_builder.append_value((ordinal + 1) as i32);
+                            type_builder.append_value(format!("{}", field.data_type()));
+                            nullable_builder.append_value(if field.is_nullable() {
+                                "YES"
+                            } else {
+                                "NO"
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to deserialize schema for {}.{}: {}",
+                            table.schema_name, table.table_name, e
+                        );
                     }
                 }
             }
