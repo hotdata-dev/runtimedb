@@ -17,6 +17,14 @@ pub struct QueryResponse {
     pub execution_time_ms: u64,
 }
 
+/// Column metadata for API responses
+#[derive(Debug, Serialize)]
+pub struct ColumnInfo {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
+}
+
 /// Single table metadata
 #[derive(Debug, Serialize)]
 pub struct TableInfo {
@@ -25,6 +33,7 @@ pub struct TableInfo {
     pub table: String,
     pub synced: bool,
     pub last_sync: Option<String>,
+    pub columns: Vec<ColumnInfo>,
 }
 
 /// Response body for GET /tables

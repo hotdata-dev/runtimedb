@@ -1,9 +1,11 @@
+use crate::datafetch::deserialize_arrow_schema;
 use crate::http::error::ApiError;
 use crate::http::models::{
-    ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse, CreateSecretRequest,
-    CreateSecretResponse, DiscoverConnectionResponse, DiscoveryStatus, GetConnectionResponse,
-    GetSecretResponse, ListConnectionsResponse, ListSecretsResponse, QueryRequest, QueryResponse,
-    SecretMetadataResponse, TableInfo, TablesResponse, UpdateSecretRequest, UpdateSecretResponse,
+    ColumnInfo, ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse,
+    CreateSecretRequest, CreateSecretResponse, DiscoverConnectionResponse, DiscoveryStatus,
+    GetConnectionResponse, GetSecretResponse, ListConnectionsResponse, ListSecretsResponse,
+    QueryRequest, QueryResponse, SecretMetadataResponse, TableInfo, TablesResponse,
+    UpdateSecretRequest, UpdateSecretResponse,
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
 use crate::source::Source;
@@ -117,15 +119,46 @@ pub async fn tables_handler(
         .into_iter()
         .filter_map(|t| {
             // Look up connection name from connection_id
-            connection_map
-                .get(&t.connection_id)
-                .map(|conn_name| TableInfo {
+            connection_map.get(&t.connection_id).map(|conn_name| {
+                // Parse arrow schema to extract column information
+                let columns = t
+                    .arrow_schema_json
+                    .as_ref()
+                    .and_then(|json| {
+                        deserialize_arrow_schema(json)
+                            .map_err(|e| {
+                                tracing::warn!(
+                                    table = %t.table_name,
+                                    schema = %t.schema_name,
+                                    error = %e,
+                                    "Failed to parse arrow schema JSON"
+                                );
+                                e
+                            })
+                            .ok()
+                    })
+                    .map(|schema| {
+                        schema
+                            .fields()
+                            .iter()
+                            .map(|field| ColumnInfo {
+                                name: field.name().clone(),
+                                data_type: format!("{}", field.data_type()),
+                                nullable: field.is_nullable(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                TableInfo {
                     connection: conn_name.clone(),
                     schema: t.schema_name,
                     table: t.table_name,
                     synced: t.parquet_path.is_some(),
                     last_sync: t.last_sync,
-                })
+                    columns,
+                }
+            })
         })
         .collect();
 
