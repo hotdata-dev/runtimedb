@@ -278,9 +278,17 @@ pub async fn create_connection_handler(
             }
         };
 
+    // Fetch the created connection to get external_id
+    let conn = engine
+        .catalog()
+        .get_connection(&request.name)
+        .await?
+        .ok_or_else(|| ApiError::internal_error("Failed to retrieve created connection"))?;
+
     Ok((
         StatusCode::CREATED,
         Json(CreateConnectionResponse {
+            id: conn.external_id,
             name: request.name,
             source_type,
             tables_discovered,
@@ -336,7 +344,7 @@ pub async fn list_connections_handler(
     let connection_infos: Vec<ConnectionInfo> = connections
         .into_iter()
         .map(|c| ConnectionInfo {
-            id: c.id,
+            id: c.external_id,
             name: c.name,
             source_type: c.source_type,
         })
