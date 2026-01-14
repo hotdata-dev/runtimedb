@@ -87,7 +87,7 @@ where
 {
     pub async fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
         query_as::<DB, ConnectionInfo>(
-            "SELECT id, name, source_type, config_json FROM connections ORDER BY name",
+            "SELECT id, external_id, name, source_type, config_json FROM connections ORDER BY name",
         )
         .fetch_all(&self.pool)
         .await
@@ -100,14 +100,17 @@ where
         source_type: &str,
         config_json: &str,
     ) -> Result<i32> {
+        let external_id = crate::catalog::manager::generate_connection_id();
         let insert_sql = format!(
-            "INSERT INTO connections (name, source_type, config_json) VALUES ({}, {}, {})",
+            "INSERT INTO connections (external_id, name, source_type, config_json) VALUES ({}, {}, {}, {})",
             DB::bind_param(1),
             DB::bind_param(2),
-            DB::bind_param(3)
+            DB::bind_param(3),
+            DB::bind_param(4)
         );
 
         query(&insert_sql)
+            .bind(external_id.as_str())
             .bind(name)
             .bind(source_type)
             .bind(config_json)
@@ -128,12 +131,28 @@ where
 
     pub async fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>> {
         let sql = format!(
-            "SELECT id, name, source_type, config_json FROM connections WHERE name = {}",
+            "SELECT id, external_id, name, source_type, config_json FROM connections WHERE name = {}",
             DB::bind_param(1)
         );
 
         query_as::<DB, ConnectionInfo>(&sql)
             .bind(name)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn get_connection_by_external_id(
+        &self,
+        external_id: &str,
+    ) -> Result<Option<ConnectionInfo>> {
+        let sql = format!(
+            "SELECT id, external_id, name, source_type, config_json FROM connections WHERE external_id = {}",
+            DB::bind_param(1)
+        );
+
+        query_as::<DB, ConnectionInfo>(&sql)
+            .bind(external_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(Into::into)
