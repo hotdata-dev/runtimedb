@@ -393,8 +393,33 @@ impl CatalogMigrations for SqliteMigrationBackend {
         .fetch_one(pool)
         .await?;
 
+        // Check if NOT NULL is already enforced (fresh v1 schema has it)
+        let has_not_null: bool = if has_external_id {
+            sqlx::query_scalar(
+                "SELECT \"notnull\" FROM pragma_table_info('connections') WHERE name = 'external_id'",
+            )
+            .fetch_one(pool)
+            .await?
+        } else {
+            false
+        };
+
+        if has_external_id && has_not_null {
+            // Fresh database with v1 schema already has external_id NOT NULL
+            // Just ensure the index exists
+            sqlx::query(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_external_id ON connections(external_id)",
+            )
+            .execute(pool)
+            .await?;
+            return Ok(());
+        }
+
+        // For existing databases, we need to do a table rebuild to add NOT NULL constraint
+        // SQLite doesn't support ALTER COLUMN, so we create a new table and migrate data
+
         if !has_external_id {
-            // Add external_id column
+            // Add external_id column first (without NOT NULL, will rebuild after backfill)
             sqlx::query("ALTER TABLE connections ADD COLUMN external_id TEXT")
                 .execute(pool)
                 .await?;
@@ -415,7 +440,7 @@ impl CatalogMigrations for SqliteMigrationBackend {
                 .await?;
         }
 
-        // Verify no NULL external_ids remain (safety check)
+        // Verify no NULL external_ids remain before rebuild
         let null_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM connections WHERE external_id IS NULL")
                 .fetch_one(pool)
@@ -428,7 +453,42 @@ impl CatalogMigrations for SqliteMigrationBackend {
             ));
         }
 
-        // Create unique index (IF NOT EXISTS makes this idempotent)
+        // Now rebuild the table to enforce NOT NULL constraint
+        // 1. Create new table with proper constraints
+        sqlx::query(
+            r#"
+            CREATE TABLE connections_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                external_id TEXT UNIQUE NOT NULL,
+                name TEXT UNIQUE NOT NULL,
+                source_type TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        // 2. Copy data (preserving id values)
+        sqlx::query(
+            r#"
+            INSERT INTO connections_new (id, external_id, name, source_type, config_json, created_at)
+            SELECT id, external_id, name, source_type, config_json, created_at FROM connections
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        // 3. Drop old table
+        sqlx::query("DROP TABLE connections").execute(pool).await?;
+
+        // 4. Rename new table
+        sqlx::query("ALTER TABLE connections_new RENAME TO connections")
+            .execute(pool)
+            .await?;
+
+        // 5. Create unique index
         sqlx::query(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_external_id ON connections(external_id)",
         )

@@ -150,6 +150,29 @@ impl CatalogMigrations for PostgresMigrationBackend {
         .fetch_one(pool)
         .await?;
 
+        // Check if NOT NULL is already enforced
+        let has_not_null: bool = if has_external_id {
+            sqlx::query_scalar(
+                "SELECT is_nullable = 'NO' FROM information_schema.columns WHERE table_name = 'connections' AND column_name = 'external_id'",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap_or(false)
+        } else {
+            false
+        };
+
+        if has_external_id && has_not_null {
+            // Fresh database with v1 schema already has external_id NOT NULL
+            // Just ensure the index exists
+            sqlx::query(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_external_id ON connections(external_id)",
+            )
+            .execute(pool)
+            .await?;
+            return Ok(());
+        }
+
         if !has_external_id {
             // Add external_id column
             sqlx::query("ALTER TABLE connections ADD COLUMN external_id TEXT")
@@ -184,6 +207,11 @@ impl CatalogMigrations for PostgresMigrationBackend {
                 null_count
             ));
         }
+
+        // Enforce NOT NULL constraint (Postgres supports ALTER COLUMN SET NOT NULL)
+        sqlx::query("ALTER TABLE connections ALTER COLUMN external_id SET NOT NULL")
+            .execute(pool)
+            .await?;
 
         // Create unique index (IF NOT EXISTS makes this idempotent)
         sqlx::query(

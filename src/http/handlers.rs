@@ -389,10 +389,14 @@ pub async fn delete_connection_handler(
         .await?
         .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", connection_id)))?;
 
-    engine
-        .remove_connection(&conn.name)
-        .await
-        .map_err(|e| ApiError::internal_error(e.to_string()))?;
+    engine.remove_connection(&conn.name).await.map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("not found") {
+            ApiError::not_found(msg)
+        } else {
+            ApiError::internal_error(msg)
+        }
+    })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -409,10 +413,14 @@ pub async fn purge_connection_cache_handler(
         .await?
         .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", connection_id)))?;
 
-    engine
-        .purge_connection(&conn.name)
-        .await
-        .map_err(|e| ApiError::internal_error(e.to_string()))?;
+    engine.purge_connection(&conn.name).await.map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("not found") {
+            ApiError::not_found(msg)
+        } else {
+            ApiError::internal_error(msg)
+        }
+    })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
