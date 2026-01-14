@@ -35,9 +35,6 @@ pub trait CatalogMigrations {
 
     /// Applies the v1 schema migration (initial schema setup).
     async fn migrate_v1(pool: &Self::Pool) -> Result<()>;
-
-    /// Applies the v2 schema migration (adds external_id to connections).
-    async fn migrate_v2(pool: &Self::Pool) -> Result<()>;
 }
 
 /// Runs all pending migrations for a catalog backend.
@@ -63,11 +60,6 @@ pub async fn run_migrations<M: CatalogMigrations>(pool: &M::Pool) -> Result<()> 
     if current_version < 1 {
         M::migrate_v1(pool).await?;
         M::record_version(pool, 1).await?;
-    }
-
-    if current_version < 2 {
-        M::migrate_v2(pool).await?;
-        M::record_version(pool, 2).await?;
     }
 
     Ok(())
