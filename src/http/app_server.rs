@@ -19,10 +19,10 @@ pub const PATH_QUERY: &str = "/query";
 pub const PATH_INFORMATION_SCHEMA: &str = "/information_schema";
 pub const PATH_HEALTH: &str = "/health";
 pub const PATH_CONNECTIONS: &str = "/connections";
-pub const PATH_CONNECTION: &str = "/connections/{name}";
-pub const PATH_CONNECTION_DISCOVER: &str = "/connections/{name}/discover";
-pub const PATH_CONNECTION_CACHE: &str = "/connections/{name}/cache";
-pub const PATH_TABLE_CACHE: &str = "/connections/{name}/tables/{schema}/{table}/cache";
+pub const PATH_CONNECTION: &str = "/connections/{connection_id}";
+pub const PATH_CONNECTION_DISCOVER: &str = "/connections/{connection_id}/discover";
+pub const PATH_CONNECTION_CACHE: &str = "/connections/{connection_id}/cache";
+pub const PATH_TABLE_CACHE: &str = "/connections/{connection_id}/tables/{schema}/{table}/cache";
 pub const PATH_SECRETS: &str = "/secrets";
 pub const PATH_SECRET: &str = "/secrets/{name}";
 

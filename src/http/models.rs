@@ -65,6 +65,7 @@ pub enum DiscoveryStatus {
 /// Response body for POST /connections
 #[derive(Debug, Serialize)]
 pub struct CreateConnectionResponse {
+    pub id: String,
     pub name: String,
     pub source_type: String,
     pub tables_discovered: usize,
@@ -73,9 +74,10 @@ pub struct CreateConnectionResponse {
     pub discovery_error: Option<String>,
 }
 
-/// Response body for POST /connections/{name}/discover
+/// Response body for POST /connections/{connection_id}/discover
 #[derive(Debug, Serialize)]
 pub struct DiscoverConnectionResponse {
+    pub id: String,
     pub name: String,
     pub tables_discovered: usize,
     pub discovery_status: DiscoveryStatus,
@@ -86,7 +88,7 @@ pub struct DiscoverConnectionResponse {
 /// Single connection metadata for API responses
 #[derive(Debug, Serialize)]
 pub struct ConnectionInfo {
-    pub id: i32,
+    pub id: String,
     pub name: String,
     pub source_type: String,
 }
@@ -97,10 +99,10 @@ pub struct ListConnectionsResponse {
     pub connections: Vec<ConnectionInfo>,
 }
 
-/// Response body for GET /connections/{name}
+/// Response body for GET /connections/{connection_id}
 #[derive(Debug, Serialize)]
 pub struct GetConnectionResponse {
-    pub id: i32,
+    pub id: String,
     pub name: String,
     pub source_type: String,
     pub table_count: usize,

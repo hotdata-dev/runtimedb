@@ -90,24 +90,20 @@ pub async fn information_schema_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     QueryParams(params): QueryParams<HashMap<String, String>>,
 ) -> Result<Json<InformationSchemaResponse>, ApiError> {
-    // Get optional connection filter
-    let connection_filter = params.get("connection").map(|s| s.as_str());
+    // Get optional connection_id filter and resolve to name
+    let connection_filter = if let Some(conn_id) = params.get("connection_id") {
+        let conn = engine
+            .catalog()
+            .get_connection_by_external_id(conn_id)
+            .await?
+            .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", conn_id)))?;
+        Some(conn.name)
+    } else {
+        None
+    };
 
-    // Validate connection exists if filter provided
-    // todo: add exists method to engine/catalog;
-    // todo: consider accepting connection_id instead?
-    if let Some(conn_name) = connection_filter {
-        let connections = engine.list_connections().await?;
-        if !connections.iter().any(|c| c.name == conn_name) {
-            return Err(ApiError::not_found(format!(
-                "Connection '{}' not found",
-                conn_name
-            )));
-        }
-    }
-
-    // Get tables from engine
-    let tables = engine.list_tables(connection_filter).await?;
+    // Get tables from engine (uses connection name internally)
+    let tables = engine.list_tables(connection_filter.as_deref()).await?;
 
     // Get all connections to map connection_id to connection name
     let connections = engine.list_connections().await?;
@@ -278,9 +274,17 @@ pub async fn create_connection_handler(
             }
         };
 
+    // Fetch the created connection to get external_id
+    let conn = engine
+        .catalog()
+        .get_connection(&request.name)
+        .await?
+        .ok_or_else(|| ApiError::internal_error("Failed to retrieve created connection"))?;
+
     Ok((
         StatusCode::CREATED,
         Json(CreateConnectionResponse {
+            id: conn.external_id,
             name: request.name,
             source_type,
             tables_discovered,
@@ -290,22 +294,21 @@ pub async fn create_connection_handler(
     ))
 }
 
-/// Handler for POST /connections/{name}/discover
+/// Handler for POST /connections/{connection_id}/discover
 pub async fn discover_connection_handler(
     State(engine): State<Arc<RuntimeEngine>>,
-    Path(name): Path<String>,
+    Path(connection_id): Path<String>,
 ) -> Result<Json<DiscoverConnectionResponse>, ApiError> {
-    // Validate connection exists
-    if engine.catalog().get_connection(&name).await?.is_none() {
-        return Err(ApiError::not_found(format!(
-            "Connection '{}' not found",
-            name
-        )));
-    }
+    // Look up connection by external_id
+    let conn = engine
+        .catalog()
+        .get_connection_by_external_id(&connection_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", connection_id)))?;
 
-    // Attempt discovery
+    // Attempt discovery using connection name
     let (tables_discovered, discovery_status, discovery_error) =
-        match engine.discover_connection(&name).await {
+        match engine.discover_connection(&conn.name).await {
             Ok(count) => (count, DiscoveryStatus::Success, None),
             Err(e) => {
                 let root_cause = e.root_cause().to_string();
@@ -314,13 +317,14 @@ pub async fn discover_connection_handler(
                     .next()
                     .unwrap_or("Unknown error")
                     .to_string();
-                error!("Discovery failed for connection '{}': {}", name, msg);
+                error!("Discovery failed for connection '{}': {}", conn.name, msg);
                 (0, DiscoveryStatus::Failed, Some(msg))
             }
         };
 
     Ok(Json(DiscoverConnectionResponse {
-        name,
+        id: conn.external_id,
+        name: conn.name,
         tables_discovered,
         discovery_status,
         discovery_error,
@@ -336,7 +340,7 @@ pub async fn list_connections_handler(
     let connection_infos: Vec<ConnectionInfo> = connections
         .into_iter()
         .map(|c| ConnectionInfo {
-            id: c.id,
+            id: c.external_id,
             name: c.name,
             source_type: c.source_type,
         })
@@ -347,25 +351,25 @@ pub async fn list_connections_handler(
     }))
 }
 
-/// Handler for GET /connections/{name}
+/// Handler for GET /connections/{connection_id}
 pub async fn get_connection_handler(
     State(engine): State<Arc<RuntimeEngine>>,
-    Path(name): Path<String>,
+    Path(connection_id): Path<String>,
 ) -> Result<Json<GetConnectionResponse>, ApiError> {
-    // Get connection info
+    // Look up connection by external_id
     let conn = engine
         .catalog()
-        .get_connection(&name)
+        .get_connection_by_external_id(&connection_id)
         .await?
-        .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", name)))?;
+        .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", connection_id)))?;
 
-    // Get table counts
-    let tables = engine.list_tables(Some(&name)).await?;
+    // Get table counts using connection name
+    let tables = engine.list_tables(Some(&conn.name)).await?;
     let table_count = tables.len();
     let synced_table_count = tables.iter().filter(|t| t.parquet_path.is_some()).count();
 
     Ok(Json(GetConnectionResponse {
-        id: conn.id,
+        id: conn.external_id,
         name: conn.name,
         source_type: conn.source_type,
         table_count,
@@ -373,32 +377,48 @@ pub async fn get_connection_handler(
     }))
 }
 
-/// Handler for DELETE /connections/{name}
+/// Handler for DELETE /connections/{connection_id}
 pub async fn delete_connection_handler(
     State(engine): State<Arc<RuntimeEngine>>,
-    Path(name): Path<String>,
+    Path(connection_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    engine.remove_connection(&name).await.map_err(|e| {
-        if e.to_string().contains("not found") {
-            ApiError::not_found(format!("Connection '{}' not found", name))
+    // Look up connection by external_id to get name for deletion
+    let conn = engine
+        .catalog()
+        .get_connection_by_external_id(&connection_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", connection_id)))?;
+
+    engine.remove_connection(&conn.name).await.map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("not found") {
+            ApiError::not_found(msg)
         } else {
-            ApiError::internal_error(e.to_string())
+            ApiError::internal_error(msg)
         }
     })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Handler for DELETE /connections/{name}/cache
+/// Handler for DELETE /connections/{connection_id}/cache
 pub async fn purge_connection_cache_handler(
     State(engine): State<Arc<RuntimeEngine>>,
-    Path(name): Path<String>,
+    Path(connection_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    engine.purge_connection(&name).await.map_err(|e| {
-        if e.to_string().contains("not found") {
-            ApiError::not_found(format!("Connection '{}' not found", name))
+    // Look up connection by external_id
+    let conn = engine
+        .catalog()
+        .get_connection_by_external_id(&connection_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", connection_id)))?;
+
+    engine.purge_connection(&conn.name).await.map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("not found") {
+            ApiError::not_found(msg)
         } else {
-            ApiError::internal_error(e.to_string())
+            ApiError::internal_error(msg)
         }
     })?;
 
@@ -408,18 +428,27 @@ pub async fn purge_connection_cache_handler(
 /// Path parameters for table cache operations
 #[derive(Deserialize)]
 pub struct TableCachePath {
-    name: String,
+    connection_id: String,
     schema: String,
     table: String,
 }
 
-/// Handler for DELETE /connections/{name}/tables/{schema}/{table}/cache
+/// Handler for DELETE /connections/{connection_id}/tables/{schema}/{table}/cache
 pub async fn purge_table_cache_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(params): Path<TableCachePath>,
 ) -> Result<StatusCode, ApiError> {
+    // Look up connection by external_id
+    let conn = engine
+        .catalog()
+        .get_connection_by_external_id(&params.connection_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::not_found(format!("Connection '{}' not found", params.connection_id))
+        })?;
+
     engine
-        .purge_table(&params.name, &params.schema, &params.table)
+        .purge_table(&conn.name, &params.schema, &params.table)
         .await
         .map_err(|e| {
             let msg = e.to_string();

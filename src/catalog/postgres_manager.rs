@@ -51,8 +51,9 @@ impl PostgresCatalogManager {
 
     async fn initialize_schema(pool: &PgPool) -> Result<()> {
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS connections (
+            "CREATE TABLE connections (
                 id SERIAL PRIMARY KEY,
+                external_id TEXT UNIQUE NOT NULL,
                 name TEXT UNIQUE NOT NULL,
                 source_type TEXT NOT NULL,
                 config_json TEXT NOT NULL,
@@ -63,7 +64,7 @@ impl PostgresCatalogManager {
         .await?;
 
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS tables (
+            "CREATE TABLE tables (
                 id SERIAL PRIMARY KEY,
                 connection_id INTEGER NOT NULL,
                 schema_name TEXT NOT NULL,
@@ -80,7 +81,7 @@ impl PostgresCatalogManager {
         .await?;
 
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS secrets (
+            "CREATE TABLE secrets (
                 name TEXT PRIMARY KEY,
                 provider TEXT NOT NULL,
                 provider_ref TEXT,
@@ -93,7 +94,7 @@ impl PostgresCatalogManager {
         .await?;
 
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS encrypted_secret_values (
+            "CREATE TABLE encrypted_secret_values (
                 name TEXT PRIMARY KEY,
                 encrypted_value BYTEA NOT NULL
             )",
@@ -165,6 +166,15 @@ impl CatalogManager for PostgresCatalogManager {
 
     async fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>> {
         self.backend.get_connection(name).await
+    }
+
+    async fn get_connection_by_external_id(
+        &self,
+        external_id: &str,
+    ) -> Result<Option<ConnectionInfo>> {
+        self.backend
+            .get_connection_by_external_id(external_id)
+            .await
     }
 
     async fn add_table(

@@ -254,7 +254,7 @@ async fn test_information_schema_endpoint_with_connection_filter_not_found() -> 
             Request::builder()
                 .method("GET")
                 .uri(format!(
-                    "{}?connection=nonexistent",
+                    "{}?connection_id=nonexistent",
                     PATH_INFORMATION_SCHEMA
                 ))
                 .body(Body::empty())?,
@@ -933,7 +933,8 @@ async fn test_create_connection_registers_even_when_discovery_fails() -> Result<
 async fn test_discover_connection_not_found() -> Result<()> {
     let (app, _tempdir) = setup_test().await?;
 
-    let discover_path = PATH_CONNECTION_DISCOVER.replace("{name}", "nonexistent");
+    let discover_path =
+        PATH_CONNECTION_DISCOVER.replace("{connection_id}", "con_nonexistent_fake_id");
 
     let response = app
         .oneshot(
@@ -985,8 +986,13 @@ async fn test_discover_connection_retry_after_failed_discovery() -> Result<()> {
 
     assert_eq!(create_response.status(), StatusCode::CREATED);
 
+    // Extract the connection id from the create response
+    let body = axum::body::to_bytes(create_response.into_body(), usize::MAX).await?;
+    let create_json: serde_json::Value = serde_json::from_slice(&body)?;
+    let connection_id = create_json["id"].as_str().unwrap();
+
     // Now try to discover again via the discover endpoint
-    let discover_path = PATH_CONNECTION_DISCOVER.replace("{name}", "retry_conn");
+    let discover_path = PATH_CONNECTION_DISCOVER.replace("{connection_id}", connection_id);
 
     let discover_response = app
         .oneshot(
@@ -1004,6 +1010,7 @@ async fn test_discover_connection_retry_after_failed_discovery() -> Result<()> {
     let json: serde_json::Value = serde_json::from_slice(&body)?;
 
     // Verify response structure for discover endpoint
+    assert!(json["id"].is_string());
     assert_eq!(json["name"], "retry_conn");
     assert_eq!(json["tables_discovered"], 0);
     assert_eq!(json["discovery_status"], "failed");
@@ -1155,8 +1162,13 @@ async fn test_discover_connection_successful() -> Result<()> {
 
     assert_eq!(create_response.status(), StatusCode::CREATED);
 
+    // Extract the connection id from the create response
+    let body = axum::body::to_bytes(create_response.into_body(), usize::MAX).await?;
+    let create_json: serde_json::Value = serde_json::from_slice(&body)?;
+    let connection_id = create_json["id"].as_str().unwrap();
+
     // Now call discover endpoint (even though already discovered, it should work)
-    let discover_path = PATH_CONNECTION_DISCOVER.replace("{name}", "discover_duck");
+    let discover_path = PATH_CONNECTION_DISCOVER.replace("{connection_id}", connection_id);
 
     let discover_response = app
         .oneshot(
@@ -1173,6 +1185,7 @@ async fn test_discover_connection_successful() -> Result<()> {
     let json: serde_json::Value = serde_json::from_slice(&body)?;
 
     // Verify successful discover response
+    assert!(json["id"].is_string());
     assert_eq!(json["name"], "discover_duck");
     assert_eq!(json["tables_discovered"], 1);
     assert_eq!(json["discovery_status"], "success");

@@ -21,9 +21,15 @@ impl From<DateTime<Utc>> for OptimisticLock {
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ConnectionInfo {
     pub id: i32,
+    pub external_id: String,
     pub name: String,
     pub source_type: String,
     pub config_json: String,
+}
+
+/// Generates a connection external ID: "conn" + 26-char nanoid (30 chars total)
+pub fn generate_connection_id() -> String {
+    format!("conn{}", nanoid::nanoid!(26))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -53,6 +59,10 @@ pub trait CatalogManager: Debug + Send + Sync {
     async fn add_connection(&self, name: &str, source_type: &str, config_json: &str)
         -> Result<i32>;
     async fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>>;
+    async fn get_connection_by_external_id(
+        &self,
+        external_id: &str,
+    ) -> Result<Option<ConnectionInfo>>;
     async fn add_table(
         &self,
         connection_id: i32,

@@ -87,7 +87,7 @@ where
 {
     pub async fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
         query_as::<DB, ConnectionInfo>(
-            "SELECT id, name, source_type, config_json FROM connections ORDER BY name",
+            "SELECT id, external_id, name, source_type, config_json FROM connections ORDER BY name",
         )
         .fetch_all(&self.pool)
         .await
@@ -100,40 +100,103 @@ where
         source_type: &str,
         config_json: &str,
     ) -> Result<i32> {
-        let insert_sql = format!(
-            "INSERT INTO connections (name, source_type, config_json) VALUES ({}, {}, {})",
-            DB::bind_param(1),
-            DB::bind_param(2),
-            DB::bind_param(3)
-        );
+        // Retry logic handles the astronomically rare case of nanoid collision.
+        // With 26-char nanoid (alphabet of 64 chars), collision probability is < 1 in 10^40.
+        const MAX_RETRIES: usize = 3;
 
-        query(&insert_sql)
-            .bind(name)
-            .bind(source_type)
-            .bind(config_json)
-            .execute(&self.pool)
-            .await?;
+        for attempt in 0..MAX_RETRIES {
+            let external_id = crate::catalog::manager::generate_connection_id();
+            let insert_sql = format!(
+                "INSERT INTO connections (external_id, name, source_type, config_json) VALUES ({}, {}, {}, {})",
+                DB::bind_param(1),
+                DB::bind_param(2),
+                DB::bind_param(3),
+                DB::bind_param(4)
+            );
 
-        let select_sql = format!(
-            "SELECT id FROM connections WHERE name = {}",
-            DB::bind_param(1)
-        );
+            let result = query(&insert_sql)
+                .bind(external_id.as_str())
+                .bind(name)
+                .bind(source_type)
+                .bind(config_json)
+                .execute(&self.pool)
+                .await;
 
-        query_scalar::<DB, i32>(&select_sql)
-            .bind(name)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(Into::into)
+            match result {
+                Ok(_) => {
+                    // Success - fetch and return the ID
+                    let select_sql = format!(
+                        "SELECT id FROM connections WHERE name = {}",
+                        DB::bind_param(1)
+                    );
+
+                    return query_scalar::<DB, i32>(&select_sql)
+                        .bind(name)
+                        .fetch_one(&self.pool)
+                        .await
+                        .map_err(Into::into);
+                }
+                Err(sqlx::Error::Database(db_err)) => {
+                    // Check for unique constraint violation using structured error inspection
+                    let is_unique_violation = match db_err.code().map(|c| c.to_string()).as_deref()
+                    {
+                        // Postgres: 23505 = unique_violation
+                        Some("23505") => true,
+                        // SQLite: 2067 = SQLITE_CONSTRAINT_UNIQUE (returned as string "2067")
+                        Some("2067") => true,
+                        // SQLite may also report 1555 for SQLITE_CONSTRAINT_PRIMARYKEY
+                        Some("1555") => true,
+                        _ => false,
+                    };
+
+                    if is_unique_violation {
+                        // Check if the violation is on external_id (retry) or name (conflict error)
+                        let msg = db_err.message().to_lowercase();
+                        if msg.contains("external_id") && attempt < MAX_RETRIES - 1 {
+                            // Retry with new ID
+                            continue;
+                        }
+                        // Violation on name or max retries - return the error
+                    }
+                    return Err(sqlx::Error::Database(db_err).into());
+                }
+                Err(e) => {
+                    // Other error types - don't retry
+                    return Err(e.into());
+                }
+            }
+        }
+
+        Err(anyhow!(
+            "Failed to generate unique connection ID after {} attempts",
+            MAX_RETRIES
+        ))
     }
 
     pub async fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>> {
         let sql = format!(
-            "SELECT id, name, source_type, config_json FROM connections WHERE name = {}",
+            "SELECT id, external_id, name, source_type, config_json FROM connections WHERE name = {}",
             DB::bind_param(1)
         );
 
         query_as::<DB, ConnectionInfo>(&sql)
             .bind(name)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn get_connection_by_external_id(
+        &self,
+        external_id: &str,
+    ) -> Result<Option<ConnectionInfo>> {
+        let sql = format!(
+            "SELECT id, external_id, name, source_type, config_json FROM connections WHERE external_id = {}",
+            DB::bind_param(1)
+        );
+
+        query_as::<DB, ConnectionInfo>(&sql)
+            .bind(external_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(Into::into)
