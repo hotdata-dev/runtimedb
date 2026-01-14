@@ -401,18 +401,22 @@ pub async fn delete_connection_handler(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Handler for DELETE /connections/{name}/cache
+/// Handler for DELETE /connections/{connection_id}/cache
 pub async fn purge_connection_cache_handler(
     State(engine): State<Arc<RuntimeEngine>>,
-    Path(name): Path<String>,
+    Path(connection_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    engine.purge_connection(&name).await.map_err(|e| {
-        if e.to_string().contains("not found") {
-            ApiError::not_found(format!("Connection '{}' not found", name))
-        } else {
-            ApiError::internal_error(e.to_string())
-        }
-    })?;
+    // Look up connection by external_id
+    let conn = engine
+        .catalog()
+        .get_connection_by_external_id(&connection_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", connection_id)))?;
+
+    engine
+        .purge_connection(&conn.name)
+        .await
+        .map_err(|e| ApiError::internal_error(e.to_string()))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -420,18 +424,27 @@ pub async fn purge_connection_cache_handler(
 /// Path parameters for table cache operations
 #[derive(Deserialize)]
 pub struct TableCachePath {
-    name: String,
+    connection_id: String,
     schema: String,
     table: String,
 }
 
-/// Handler for DELETE /connections/{name}/tables/{schema}/{table}/cache
+/// Handler for DELETE /connections/{connection_id}/tables/{schema}/{table}/cache
 pub async fn purge_table_cache_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(params): Path<TableCachePath>,
 ) -> Result<StatusCode, ApiError> {
+    // Look up connection by external_id
+    let conn = engine
+        .catalog()
+        .get_connection_by_external_id(&params.connection_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::not_found(format!("Connection '{}' not found", params.connection_id))
+        })?;
+
     engine
-        .purge_table(&params.name, &params.schema, &params.table)
+        .purge_table(&conn.name, &params.schema, &params.table)
         .await
         .map_err(|e| {
             let msg = e.to_string();
