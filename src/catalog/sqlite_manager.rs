@@ -150,6 +150,15 @@ impl CatalogManager for SqliteCatalogManager {
         self.backend.get_connection(name).await
     }
 
+    async fn get_connection_by_external_id(
+        &self,
+        external_id: &str,
+    ) -> Result<Option<ConnectionInfo>> {
+        self.backend
+            .get_connection_by_external_id(external_id)
+            .await
+    }
+
     async fn add_table(
         &self,
         connection_id: i32,

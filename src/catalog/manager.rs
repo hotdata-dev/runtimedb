@@ -59,6 +59,10 @@ pub trait CatalogManager: Debug + Send + Sync {
     async fn add_connection(&self, name: &str, source_type: &str, config_json: &str)
         -> Result<i32>;
     async fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>>;
+    async fn get_connection_by_external_id(
+        &self,
+        external_id: &str,
+    ) -> Result<Option<ConnectionInfo>>;
     async fn add_table(
         &self,
         connection_id: i32,
