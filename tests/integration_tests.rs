@@ -83,6 +83,7 @@ impl QueryResult {
 struct ConnectionResult {
     count: usize,
     names: Vec<String>,
+    ids: Vec<String>,
 }
 
 impl ConnectionResult {
@@ -90,6 +91,7 @@ impl ConnectionResult {
         Self {
             count: connections.len(),
             names: connections.iter().map(|c| c.name.clone()).collect(),
+            ids: connections.iter().map(|c| c.external_id.clone()).collect(),
         }
     }
 
@@ -101,6 +103,13 @@ impl ConnectionResult {
                 .map(|a| {
                     a.iter()
                         .filter_map(|c| c["name"].as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            ids: arr
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|c| c["id"].as_str().map(String::from))
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -118,6 +127,14 @@ impl ConnectionResult {
 
     fn assert_count(&self, expected: usize) {
         assert_eq!(self.count, expected, "Expected {} connections", expected);
+    }
+
+    #[allow(dead_code)]
+    fn get_id_by_name(&self, name: &str) -> Option<String> {
+        self.names
+            .iter()
+            .position(|n| n == name)
+            .and_then(|idx| self.ids.get(idx).cloned())
     }
 }
 
@@ -195,7 +212,7 @@ impl TablesResult {
 /// Single connection details from get operations.
 #[allow(dead_code)]
 struct ConnectionDetails {
-    id: i32,
+    id: String,
     name: String,
     source_type: String,
     table_count: usize,
@@ -208,7 +225,7 @@ impl ConnectionDetails {
         tables: &[runtimedb::catalog::TableInfo],
     ) -> Self {
         Self {
-            id: conn.id,
+            id: conn.external_id.clone(),
             name: conn.name.clone(),
             source_type: conn.source_type.clone(),
             table_count: tables.len(),
@@ -218,7 +235,7 @@ impl ConnectionDetails {
 
     fn from_api(json: &serde_json::Value) -> Self {
         Self {
-            id: json["id"].as_i64().unwrap_or(0) as i32,
+            id: json["id"].as_str().unwrap_or("").to_string(),
             name: json["name"].as_str().unwrap_or("").to_string(),
             source_type: json["source_type"].as_str().unwrap_or("").to_string(),
             table_count: json["table_count"].as_u64().unwrap_or(0) as usize,
@@ -230,16 +247,17 @@ impl ConnectionDetails {
 /// Trait for test execution - allows same test logic for engine vs API.
 #[async_trait::async_trait]
 trait TestExecutor: Send + Sync {
-    async fn connect(&self, name: &str, source: &Source);
+    /// Connect and return an identifier (name for engine, connection_id for API)
+    async fn connect(&self, name: &str, source: &Source) -> String;
     async fn list_connections(&self) -> ConnectionResult;
-    async fn list_tables(&self, connection: &str) -> TablesResult;
+    async fn list_tables(&self, connection_name: &str) -> TablesResult;
     async fn query(&self, sql: &str) -> QueryResult;
 
-    // New methods for CRUD operations
-    async fn get_connection(&self, name: &str) -> Option<ConnectionDetails>;
-    async fn delete_connection(&self, name: &str) -> bool;
-    async fn purge_connection_cache(&self, name: &str) -> bool;
-    async fn purge_table_cache(&self, conn: &str, schema: &str, table: &str) -> bool;
+    // CRUD operations - identifier is name for engine, connection_id for API
+    async fn get_connection(&self, identifier: &str) -> Option<ConnectionDetails>;
+    async fn delete_connection(&self, identifier: &str) -> bool;
+    async fn purge_connection_cache(&self, identifier: &str) -> bool;
+    async fn purge_table_cache(&self, identifier: &str, schema: &str, table: &str) -> bool;
 }
 
 /// Engine-based test executor.
@@ -249,41 +267,60 @@ struct EngineExecutor {
 
 #[async_trait::async_trait]
 impl TestExecutor for EngineExecutor {
-    async fn connect(&self, name: &str, source: &Source) {
+    async fn connect(&self, name: &str, source: &Source) -> String {
         self.engine
             .connect(name, source.clone())
             .await
             .expect("Engine connect failed");
+        name.to_string() // Engine uses name as identifier
     }
 
     async fn list_connections(&self) -> ConnectionResult {
         ConnectionResult::from_engine(&self.engine.list_connections().await.unwrap())
     }
 
-    async fn list_tables(&self, connection: &str) -> TablesResult {
-        TablesResult::from_engine(&self.engine.list_tables(Some(connection)).await.unwrap())
+    async fn list_tables(&self, connection_name: &str) -> TablesResult {
+        TablesResult::from_engine(
+            &self
+                .engine
+                .list_tables(Some(connection_name))
+                .await
+                .unwrap(),
+        )
     }
 
     async fn query(&self, sql: &str) -> QueryResult {
         QueryResult::from_engine(&self.engine.execute_query(sql).await.unwrap())
     }
 
-    async fn get_connection(&self, name: &str) -> Option<ConnectionDetails> {
-        let conn = self.engine.catalog().get_connection(name).await.ok()??;
-        let tables = self.engine.list_tables(Some(name)).await.ok()?;
+    async fn get_connection(&self, identifier: &str) -> Option<ConnectionDetails> {
+        // For engine, identifier is the name
+        let conn = self
+            .engine
+            .catalog()
+            .get_connection(identifier)
+            .await
+            .ok()??;
+        let tables = self.engine.list_tables(Some(identifier)).await.ok()?;
         Some(ConnectionDetails::from_engine(&conn, &tables))
     }
 
-    async fn delete_connection(&self, name: &str) -> bool {
-        self.engine.remove_connection(name).await.is_ok()
+    async fn delete_connection(&self, identifier: &str) -> bool {
+        // For engine, identifier is the name
+        self.engine.remove_connection(identifier).await.is_ok()
     }
 
-    async fn purge_connection_cache(&self, name: &str) -> bool {
-        self.engine.purge_connection(name).await.is_ok()
+    async fn purge_connection_cache(&self, identifier: &str) -> bool {
+        // For engine, identifier is the name
+        self.engine.purge_connection(identifier).await.is_ok()
     }
 
-    async fn purge_table_cache(&self, conn: &str, schema: &str, table: &str) -> bool {
-        self.engine.purge_table(conn, schema, table).await.is_ok()
+    async fn purge_table_cache(&self, identifier: &str, schema: &str, table: &str) -> bool {
+        // For engine, identifier is the name
+        self.engine
+            .purge_table(identifier, schema, table)
+            .await
+            .is_ok()
     }
 }
 
@@ -294,7 +331,7 @@ struct ApiExecutor {
 
 #[async_trait::async_trait]
 impl TestExecutor for ApiExecutor {
-    async fn connect(&self, name: &str, source: &Source) {
+    async fn connect(&self, name: &str, source: &Source) -> String {
         let (source_type, config) = match source {
             Source::Duckdb { path } => ("duckdb", json!({ "path": path })),
             Source::Postgres {
@@ -358,6 +395,13 @@ impl TestExecutor for ApiExecutor {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::CREATED, "API connect failed");
+
+        // Extract and return connection_id from response
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        json["id"].as_str().unwrap_or("").to_string()
     }
 
     async fn list_connections(&self) -> ConnectionResult {
@@ -379,8 +423,8 @@ impl TestExecutor for ApiExecutor {
         ConnectionResult::from_api(&serde_json::from_slice(&body).unwrap())
     }
 
-    async fn list_tables(&self, connection: &str) -> TablesResult {
-        let uri = format!("{}?connection={}", PATH_INFORMATION_SCHEMA, connection);
+    async fn list_tables(&self, connection_name: &str) -> TablesResult {
+        let uri = format!("{}?connection={}", PATH_INFORMATION_SCHEMA, connection_name);
         let response = self
             .router
             .clone()
@@ -422,8 +466,9 @@ impl TestExecutor for ApiExecutor {
         QueryResult::from_api(&serde_json::from_slice(&body).unwrap())
     }
 
-    async fn get_connection(&self, name: &str) -> Option<ConnectionDetails> {
-        let uri = format!("/connections/{}", name);
+    async fn get_connection(&self, identifier: &str) -> Option<ConnectionDetails> {
+        // For API, identifier is connection_id
+        let uri = format!("/connections/{}", identifier);
         let response = self
             .router
             .clone()
@@ -449,8 +494,9 @@ impl TestExecutor for ApiExecutor {
         ))
     }
 
-    async fn delete_connection(&self, name: &str) -> bool {
-        let uri = format!("/connections/{}", name);
+    async fn delete_connection(&self, identifier: &str) -> bool {
+        // For API, identifier is connection_id
+        let uri = format!("/connections/{}", identifier);
         let response = self
             .router
             .clone()
@@ -466,8 +512,9 @@ impl TestExecutor for ApiExecutor {
         response.status() == StatusCode::NO_CONTENT
     }
 
-    async fn purge_connection_cache(&self, name: &str) -> bool {
-        let uri = format!("/connections/{}/cache", name);
+    async fn purge_connection_cache(&self, identifier: &str) -> bool {
+        // For API, identifier is connection_id
+        let uri = format!("/connections/{}/cache", identifier);
         let response = self
             .router
             .clone()
@@ -483,8 +530,12 @@ impl TestExecutor for ApiExecutor {
         response.status() == StatusCode::NO_CONTENT
     }
 
-    async fn purge_table_cache(&self, conn: &str, schema: &str, table: &str) -> bool {
-        let uri = format!("/connections/{}/tables/{}/{}/cache", conn, schema, table);
+    async fn purge_table_cache(&self, identifier: &str, schema: &str, table: &str) -> bool {
+        // For API, identifier is connection_id
+        let uri = format!(
+            "/connections/{}/tables/{}/{}/cache",
+            identifier, schema, table
+        );
         let response = self
             .router
             .clone()
@@ -581,20 +632,20 @@ mod queries {
 
 /// Run the golden path test scenario against any executor and source.
 async fn run_golden_path_test(executor: &dyn TestExecutor, source: &Source, conn_name: &str) {
-    // Connect
-    executor.connect(conn_name, source).await;
+    // Connect and get identifier
+    let _conn_id = executor.connect(conn_name, source).await;
 
     // Verify connection exists
     let connections = executor.list_connections().await;
     connections.assert_count(1);
     connections.assert_has_connection(conn_name);
 
-    // Verify tables discovered
+    // Verify tables discovered (uses connection name for filter)
     let tables = executor.list_tables(conn_name).await;
     tables.assert_not_empty();
     tables.assert_has_table("sales", "orders");
 
-    // Query and verify
+    // Query and verify (uses connection name in SQL)
     let result = executor.query(&queries::select_orders(conn_name)).await;
     result.assert_row_count(4);
     result.assert_columns(&["order_id", "customer_name", "amount"]);
@@ -606,7 +657,7 @@ async fn run_golden_path_test(executor: &dyn TestExecutor, source: &Source, conn
 
 /// Run multi-schema test scenario.
 async fn run_multi_schema_test(executor: &dyn TestExecutor, source: &Source, conn_name: &str) {
-    executor.connect(conn_name, source).await;
+    let _conn_id = executor.connect(conn_name, source).await;
 
     let tables = executor.list_tables(conn_name).await;
     tables.assert_has_table("sales", "orders");
@@ -625,23 +676,23 @@ async fn run_multi_schema_test(executor: &dyn TestExecutor, source: &Source, con
 
 /// Run delete connection test scenario.
 async fn run_delete_connection_test(executor: &dyn TestExecutor, source: &Source, conn_name: &str) {
-    // Create connection
-    executor.connect(conn_name, source).await;
+    // Create connection and get identifier
+    let conn_id = executor.connect(conn_name, source).await;
 
-    // Verify it exists
-    let conn = executor.get_connection(conn_name).await;
+    // Verify it exists using identifier
+    let conn = executor.get_connection(&conn_id).await;
     assert!(conn.is_some(), "Connection should exist after creation");
 
-    // Delete it
-    let deleted = executor.delete_connection(conn_name).await;
+    // Delete using identifier
+    let deleted = executor.delete_connection(&conn_id).await;
     assert!(deleted, "Delete should succeed");
 
     // Verify it's gone
-    let conn = executor.get_connection(conn_name).await;
+    let conn = executor.get_connection(&conn_id).await;
     assert!(conn.is_none(), "Connection should not exist after deletion");
 
     // Verify delete of non-existent returns false
-    let deleted_again = executor.delete_connection(conn_name).await;
+    let deleted_again = executor.delete_connection(&conn_id).await;
     assert!(!deleted_again, "Delete of non-existent should fail");
 }
 
@@ -651,21 +702,21 @@ async fn run_purge_connection_cache_test(
     source: &Source,
     conn_name: &str,
 ) {
-    // Create connection
-    executor.connect(conn_name, source).await;
+    // Create connection and get identifier
+    let conn_id = executor.connect(conn_name, source).await;
 
-    // Query to trigger sync
+    // Query to trigger sync (uses connection name in SQL)
     let _ = executor.query(&queries::select_orders(conn_name)).await;
 
-    // Verify tables are synced
+    // Verify tables are synced (uses connection name for filter)
     let tables = executor.list_tables(conn_name).await;
     assert!(
         tables.synced_count() > 0,
         "Should have synced tables after query"
     );
 
-    // Purge cache
-    let purged = executor.purge_connection_cache(conn_name).await;
+    // Purge cache using identifier
+    let purged = executor.purge_connection_cache(&conn_id).await;
     assert!(purged, "Purge should succeed");
 
     // Verify tables still exist but not synced
@@ -674,7 +725,7 @@ async fn run_purge_connection_cache_test(
     tables.assert_none_synced();
 
     // Connection should still exist
-    let conn = executor.get_connection(conn_name).await;
+    let conn = executor.get_connection(&conn_id).await;
     assert!(
         conn.is_some(),
         "Connection should still exist after cache purge"
@@ -683,22 +734,22 @@ async fn run_purge_connection_cache_test(
 
 /// Run purge table cache test scenario.
 async fn run_purge_table_cache_test(executor: &dyn TestExecutor, source: &Source, conn_name: &str) {
-    // Create connection
-    executor.connect(conn_name, source).await;
+    // Create connection and get identifier
+    let conn_id = executor.connect(conn_name, source).await;
 
-    // Query to trigger sync of orders table
+    // Query to trigger sync of orders table (uses connection name in SQL)
     let _ = executor.query(&queries::select_orders(conn_name)).await;
 
-    // Verify orders table is synced
+    // Verify orders table is synced (uses connection name for filter)
     let tables = executor.list_tables(conn_name).await;
     assert!(
         tables.is_table_synced("sales", "orders"),
         "orders should be synced"
     );
 
-    // Purge just the orders table cache
+    // Purge just the orders table cache using identifier
     let purged = executor
-        .purge_table_cache(conn_name, "sales", "orders")
+        .purge_table_cache(&conn_id, "sales", "orders")
         .await;
     assert!(purged, "Purge table should succeed");
 
