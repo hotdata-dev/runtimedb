@@ -129,7 +129,6 @@ impl ConnectionResult {
         assert_eq!(self.count, expected, "Expected {} connections", expected);
     }
 
-    #[allow(dead_code)]
     fn get_id_by_name(&self, name: &str) -> Option<String> {
         self.names
             .iter()

@@ -100,6 +100,8 @@ where
         source_type: &str,
         config_json: &str,
     ) -> Result<i32> {
+        // Retry logic handles the astronomically rare case of nanoid collision.
+        // With 26-char nanoid (alphabet of 64 chars), collision probability is < 1 in 10^40.
         const MAX_RETRIES: usize = 3;
 
         for attempt in 0..MAX_RETRIES {
@@ -134,17 +136,32 @@ where
                         .await
                         .map_err(Into::into);
                 }
-                Err(e) => {
-                    // Check if it's a unique constraint violation on external_id
-                    let err_str = e.to_string().to_lowercase();
-                    if err_str.contains("unique")
-                        && err_str.contains("external_id")
-                        && attempt < MAX_RETRIES - 1
+                Err(sqlx::Error::Database(db_err)) => {
+                    // Check for unique constraint violation using structured error inspection
+                    let is_unique_violation = match db_err.code().map(|c| c.to_string()).as_deref()
                     {
-                        // Retry with new ID
-                        continue;
+                        // Postgres: 23505 = unique_violation
+                        Some("23505") => true,
+                        // SQLite: 2067 = SQLITE_CONSTRAINT_UNIQUE (returned as string "2067")
+                        Some("2067") => true,
+                        // SQLite may also report 1555 for SQLITE_CONSTRAINT_PRIMARYKEY
+                        Some("1555") => true,
+                        _ => false,
+                    };
+
+                    if is_unique_violation {
+                        // Check if the violation is on external_id (retry) or name (conflict error)
+                        let msg = db_err.message().to_lowercase();
+                        if msg.contains("external_id") && attempt < MAX_RETRIES - 1 {
+                            // Retry with new ID
+                            continue;
+                        }
+                        // Violation on name or max retries - return the error
                     }
-                    // Other error or max retries exceeded
+                    return Err(sqlx::Error::Database(db_err).into());
+                }
+                Err(e) => {
+                    // Other error types - don't retry
                     return Err(e.into());
                 }
             }
