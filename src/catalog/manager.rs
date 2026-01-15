@@ -43,6 +43,14 @@ pub struct TableInfo {
     pub arrow_schema_json: Option<String>,
 }
 
+/// Record for deferred file deletion (survives restarts)
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct PendingDeletion {
+    pub id: i32,
+    pub path: String,
+    pub delete_after: DateTime<Utc>,
+}
+
 /// Async interface for catalog operations.
 #[async_trait]
 pub trait CatalogManager: Debug + Send + Sync {
@@ -92,6 +100,26 @@ pub trait CatalogManager: Debug + Send + Sync {
 
     /// Delete connection and all associated table rows from metadata.
     async fn delete_connection(&self, name: &str) -> Result<()>;
+
+    /// Get connection by internal ID.
+    async fn get_connection_by_id(&self, id: i32) -> Result<Option<ConnectionInfo>>;
+
+    /// Delete tables for a connection that are NOT in the provided list.
+    /// Returns the deleted TableInfo records (for cache cleanup).
+    async fn delete_stale_tables(
+        &self,
+        connection_id: i32,
+        current_tables: &[(String, String)],
+    ) -> Result<Vec<TableInfo>>;
+
+    /// Schedule a file path for deletion after a grace period.
+    async fn schedule_file_deletion(&self, path: &str, delete_after: DateTime<Utc>) -> Result<()>;
+
+    /// Get all pending file deletions that are due.
+    async fn get_due_deletions(&self) -> Result<Vec<PendingDeletion>>;
+
+    /// Remove a pending deletion record after successful delete.
+    async fn remove_pending_deletion(&self, id: i32) -> Result<()>;
 
     // Secret management methods - metadata (used by all secret providers)
 
