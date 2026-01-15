@@ -97,4 +97,64 @@ impl FetchOrchestrator {
             .discover_tables(source, &self.secret_manager)
             .await
     }
+
+    /// Refresh table data with atomic swap semantics.
+    /// Writes to new versioned path, then atomically updates catalog.
+    /// Returns (new_url, old_path).
+    pub async fn refresh_table(
+        &self,
+        source: &Source,
+        connection_id: i32,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<(String, Option<String>)> {
+        // 1. Get current path (will be deleted after grace period)
+        let old_info = self
+            .catalog
+            .get_table(connection_id, schema_name, table_name)
+            .await?;
+        let old_path = old_info.as_ref().and_then(|i| i.parquet_path.clone());
+
+        // 2. Generate versioned new path
+        let new_local_path =
+            self.storage
+                .prepare_versioned_cache_write(connection_id, schema_name, table_name);
+
+        // 3. Fetch and write to new path
+        let mut writer = StreamingParquetWriter::new(new_local_path.clone());
+        self.fetcher
+            .fetch_table(
+                source,
+                &self.secret_manager,
+                None,
+                schema_name,
+                table_name,
+                &mut writer,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch table: {}", e))?;
+
+        // 4. Close writer
+        writer
+            .close()
+            .map_err(|e| anyhow::anyhow!("Failed to close writer: {}", e))?;
+
+        // 5. Finalize (upload to S3 if needed)
+        let new_url = self
+            .storage
+            .finalize_cache_write(&new_local_path, connection_id, schema_name, table_name)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to finalize cache write: {}", e))?;
+
+        // 6. Atomic catalog update
+        if let Some(info) = self
+            .catalog
+            .get_table(connection_id, schema_name, table_name)
+            .await?
+        {
+            let _ = self.catalog.update_table_sync(info.id, &new_url).await;
+        }
+
+        Ok((new_url, old_path))
+    }
 }
