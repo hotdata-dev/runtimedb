@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use super::native::StreamingParquetWriter;
-use super::DataFetcher;
+use super::{DataFetchError, DataFetcher, TableMetadata};
 use crate::catalog::CatalogManager;
 use crate::secrets::SecretManager;
 use crate::source::Source;
@@ -85,5 +85,16 @@ impl FetchOrchestrator {
         }
 
         Ok(parquet_url)
+    }
+
+    /// Discover tables from a remote source.
+    /// Delegates to the underlying fetcher.
+    pub async fn discover_tables(
+        &self,
+        source: &Source,
+    ) -> Result<Vec<TableMetadata>, DataFetchError> {
+        self.fetcher
+            .discover_tables(source, &self.secret_manager)
+            .await
     }
 }
