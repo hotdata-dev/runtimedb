@@ -3,7 +3,9 @@ use crate::datafetch::{DataFetcher, FetchOrchestrator, NativeFetcher};
 use crate::datafusion::{
     block_on, InformationSchemaProvider, RuntimeCatalogProvider, RuntimeDbCatalogProvider,
 };
-use crate::http::models::SchemaRefreshResult;
+use crate::http::models::{
+    ConnectionRefreshResult, SchemaRefreshResult, TableRefreshError, TableRefreshResult,
+};
 use crate::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
@@ -17,6 +19,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 use tracing::error;
 
 /// Default insecure encryption key for development use only.
@@ -580,6 +583,128 @@ impl RuntimeEngine {
 
         result.tables_discovered = self.catalog.list_tables(None).await?.len();
         Ok(result)
+    }
+
+    /// Refresh data for a single table using atomic swap.
+    pub async fn refresh_table_data(
+        &self,
+        connection_id: i32,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<TableRefreshResult> {
+        let start = std::time::Instant::now();
+
+        let conn = self
+            .catalog
+            .get_connection_by_id(connection_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Connection not found"))?;
+        let source: Source = serde_json::from_str(&conn.config_json)?;
+
+        let (_, old_path) = self
+            .orchestrator
+            .refresh_table(&source, connection_id, schema_name, table_name)
+            .await?;
+
+        if let Some(path) = old_path {
+            self.schedule_file_deletion(&path).await?;
+        }
+
+        Ok(TableRefreshResult {
+            connection_id,
+            schema_name: schema_name.to_string(),
+            table_name: table_name.to_string(),
+            rows_synced: 0, // Row count not tracked by parquet writer
+            duration_ms: start.elapsed().as_millis() as u64,
+        })
+    }
+
+    /// Refresh data for all tables in a connection.
+    pub async fn refresh_connection_data(
+        &self,
+        connection_id: i32,
+    ) -> Result<ConnectionRefreshResult> {
+        let start = std::time::Instant::now();
+        let tables = self.catalog.list_tables(Some(connection_id)).await?;
+
+        let conn = self
+            .catalog
+            .get_connection_by_id(connection_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Connection not found"))?;
+        let source: Source = serde_json::from_str(&conn.config_json)?;
+
+        let mut result = ConnectionRefreshResult {
+            connection_id,
+            tables_refreshed: 0,
+            tables_failed: 0,
+            total_rows: 0,
+            duration_ms: 0,
+            errors: vec![],
+        };
+
+        let semaphore = Arc::new(Semaphore::new(4));
+        let mut handles = vec![];
+
+        for table in tables {
+            let permit = semaphore.clone().acquire_owned().await?;
+            let orchestrator = self.orchestrator.clone();
+            let source = source.clone();
+            let schema_name = table.schema_name.clone();
+            let table_name = table.table_name.clone();
+
+            let handle = tokio::spawn(async move {
+                let result = orchestrator
+                    .refresh_table(&source, connection_id, &schema_name, &table_name)
+                    .await;
+                drop(permit);
+                (schema_name, table_name, result)
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            let (schema_name, table_name, refresh_result) = handle.await?;
+            match refresh_result {
+                Ok((_, old_path)) => {
+                    result.tables_refreshed += 1;
+                    if let Some(path) = old_path {
+                        self.schedule_file_deletion(&path).await?;
+                    }
+                }
+                Err(e) => {
+                    result.tables_failed += 1;
+                    result.errors.push(TableRefreshError {
+                        schema_name,
+                        table_name,
+                        error: e.to_string(),
+                    });
+                }
+            }
+        }
+
+        result.duration_ms = start.elapsed().as_millis() as u64;
+        Ok(result)
+    }
+
+    /// Process any pending file deletions that are due.
+    pub async fn process_pending_deletions(&self) -> Result<usize> {
+        let pending = self.catalog.get_due_deletions().await?;
+        let mut deleted = 0;
+
+        for deletion in pending {
+            match self.storage.delete(&deletion.path).await {
+                Ok(_) => {
+                    self.catalog.remove_pending_deletion(deletion.id).await?;
+                    deleted += 1;
+                }
+                Err(e) => {
+                    warn!("Failed to delete {}: {}", deletion.path, e);
+                }
+            }
+        }
+
+        Ok(deleted)
     }
 }
 
