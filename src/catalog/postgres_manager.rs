@@ -141,6 +141,28 @@ impl CatalogMigrations for PostgresMigrationBackend {
     async fn migrate_v1(pool: &Self::Pool) -> Result<()> {
         PostgresCatalogManager::initialize_schema(pool).await
     }
+
+    async fn migrate_v2(pool: &Self::Pool) -> Result<()> {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS pending_deletions (
+                id SERIAL PRIMARY KEY,
+                path TEXT NOT NULL,
+                delete_after TIMESTAMPTZ NOT NULL
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_pending_deletions_due ON pending_deletions(delete_after)",
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
 }
 
 #[async_trait]
