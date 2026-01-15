@@ -21,8 +21,9 @@
 //! let connections = backend.list_connections().await?;
 //! ```
 
-use crate::catalog::manager::{ConnectionInfo, TableInfo};
+use crate::catalog::manager::{ConnectionInfo, PendingDeletion, TableInfo};
 use anyhow::{anyhow, Result};
+use chrono::{DateTime, Utc};
 use sqlx::{
     query, query_as, query_scalar, ColumnIndex, Database, Decode, Encode, Executor, FromRow,
     IntoArguments, Pool, Postgres, Sqlite, Type,
@@ -78,7 +79,9 @@ where
     DB: CatalogDatabase,
     ConnectionInfo: for<'r> FromRow<'r, DB::Row>,
     TableInfo: for<'r> FromRow<'r, DB::Row>,
+    PendingDeletion: for<'r> FromRow<'r, DB::Row>,
     for<'q> &'q str: Encode<'q, DB> + Type<DB>,
+    for<'q> String: Encode<'q, DB> + Type<DB>,
     for<'q> i32: Encode<'q, DB> + Type<DB>,
     for<'r> i32: Decode<'r, DB>,
     for<'q> <DB as Database>::Arguments<'q>: IntoArguments<'q, DB> + Send,
@@ -369,6 +372,81 @@ where
             .execute(&self.pool)
             .await?;
 
+        Ok(())
+    }
+
+    pub async fn get_connection_by_id(&self, id: i32) -> Result<Option<ConnectionInfo>> {
+        let sql = format!(
+            "SELECT id, external_id, name, source_type, config_json FROM connections WHERE id = {}",
+            DB::bind_param(1)
+        );
+        query_as::<DB, ConnectionInfo>(&sql)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn delete_stale_tables(
+        &self,
+        connection_id: i32,
+        current_tables: &[(String, String)],
+    ) -> Result<Vec<TableInfo>> {
+        // Get all existing tables for this connection
+        let existing = self.list_tables(Some(connection_id)).await?;
+
+        // Find tables not in current_tables (tuple is schema_name, table_name)
+        let current_set: std::collections::HashSet<_> = current_tables.iter().collect();
+        let stale: Vec<_> = existing
+            .into_iter()
+            .filter(|t| !current_set.contains(&(t.schema_name.clone(), t.table_name.clone())))
+            .collect();
+
+        // Delete each stale table
+        for table in &stale {
+            let sql = format!("DELETE FROM tables WHERE id = {}", DB::bind_param(1));
+            query(&sql).bind(table.id).execute(&self.pool).await?;
+        }
+
+        Ok(stale)
+    }
+
+    pub async fn schedule_file_deletion(
+        &self,
+        path: &str,
+        delete_after: DateTime<Utc>,
+    ) -> Result<()> {
+        let sql = format!(
+            "INSERT INTO pending_deletions (path, delete_after) VALUES ({}, {})",
+            DB::bind_param(1),
+            DB::bind_param(2)
+        );
+        query(&sql)
+            .bind(path)
+            .bind(delete_after.to_rfc3339())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_due_deletions(&self) -> Result<Vec<PendingDeletion>> {
+        let sql = format!(
+            "SELECT id, path, delete_after FROM pending_deletions WHERE delete_after <= {}",
+            DB::bind_param(1)
+        );
+        query_as::<DB, PendingDeletion>(&sql)
+            .bind(Utc::now().to_rfc3339())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn remove_pending_deletion(&self, id: i32) -> Result<()> {
+        let sql = format!(
+            "DELETE FROM pending_deletions WHERE id = {}",
+            DB::bind_param(1)
+        );
+        query(&sql).bind(id).execute(&self.pool).await?;
         Ok(())
     }
 }
