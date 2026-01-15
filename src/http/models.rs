@@ -175,7 +175,7 @@ pub struct GetSecretResponse {
 /// Request body for POST /refresh
 #[derive(Debug, Deserialize)]
 pub struct RefreshRequest {
-    pub connection_id: Option<i32>,
+    pub connection_id: Option<String>,
     pub schema_name: Option<String>,
     pub table_name: Option<String>,
     #[serde(default)]
