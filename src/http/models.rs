@@ -169,3 +169,63 @@ pub struct GetSecretResponse {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+// Refresh endpoint models
+
+/// Request body for POST /refresh
+#[derive(Debug, Deserialize)]
+pub struct RefreshRequest {
+    pub connection_id: Option<i32>,
+    pub schema_name: Option<String>,
+    pub table_name: Option<String>,
+    #[serde(default)]
+    pub data: bool,
+}
+
+/// Response for schema refresh operations
+#[derive(Debug, Serialize)]
+pub struct SchemaRefreshResult {
+    pub connections_refreshed: usize,
+    pub tables_discovered: usize,
+    pub tables_added: usize,
+    pub tables_removed: usize,
+    pub tables_modified: usize,
+}
+
+/// Response for single table data refresh
+#[derive(Debug, Serialize)]
+pub struct TableRefreshResult {
+    pub connection_id: i32,
+    pub schema_name: String,
+    pub table_name: String,
+    pub rows_synced: usize,
+    pub duration_ms: u64,
+}
+
+/// Error details for a failed table refresh
+#[derive(Debug, Serialize)]
+pub struct TableRefreshError {
+    pub schema_name: String,
+    pub table_name: String,
+    pub error: String,
+}
+
+/// Response for connection-wide data refresh
+#[derive(Debug, Serialize)]
+pub struct ConnectionRefreshResult {
+    pub connection_id: i32,
+    pub tables_refreshed: usize,
+    pub tables_failed: usize,
+    pub total_rows: usize,
+    pub duration_ms: u64,
+    pub errors: Vec<TableRefreshError>,
+}
+
+/// Unified response type for refresh operations
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum RefreshResponse {
+    Schema(SchemaRefreshResult),
+    Table(TableRefreshResult),
+    Connection(ConnectionRefreshResult),
+}
