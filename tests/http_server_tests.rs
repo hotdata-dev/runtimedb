@@ -8,8 +8,8 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rand::RngCore;
 use runtimedb::http::app_server::{
-    AppServer, PATH_CONNECTIONS, PATH_CONNECTION_DISCOVER, PATH_INFORMATION_SCHEMA, PATH_QUERY,
-    PATH_SECRET, PATH_SECRETS,
+    AppServer, PATH_CONNECTIONS, PATH_INFORMATION_SCHEMA, PATH_QUERY, PATH_REFRESH, PATH_SECRET,
+    PATH_SECRETS,
 };
 use runtimedb::RuntimeEngine;
 use serde_json::json;
@@ -930,18 +930,19 @@ async fn test_create_connection_registers_even_when_discovery_fails() -> Result<
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_discover_connection_not_found() -> Result<()> {
+async fn test_refresh_schema_connection_not_found() -> Result<()> {
     let (app, _tempdir) = setup_test().await?;
 
-    let discover_path =
-        PATH_CONNECTION_DISCOVER.replace("{connection_id}", "con_nonexistent_fake_id");
-
+    // Use the /refresh endpoint with a non-existent connection_id
     let response = app
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&discover_path)
-                .body(Body::empty())?,
+                .uri(PATH_REFRESH)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "connection_id": "con_nonexistent_fake_id"
+                }))?))?,
         )
         .await?;
 
@@ -959,7 +960,7 @@ async fn test_discover_connection_not_found() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_discover_connection_retry_after_failed_discovery() -> Result<()> {
+async fn test_refresh_schema_retry_after_failed_discovery() -> Result<()> {
     let (app, _tempdir) = setup_test().await?;
 
     // First create a connection with invalid credentials
@@ -991,30 +992,28 @@ async fn test_discover_connection_retry_after_failed_discovery() -> Result<()> {
     let create_json: serde_json::Value = serde_json::from_slice(&body)?;
     let connection_id = create_json["id"].as_str().unwrap();
 
-    // Now try to discover again via the discover endpoint
-    let discover_path = PATH_CONNECTION_DISCOVER.replace("{connection_id}", connection_id);
-
-    let discover_response = app
+    // Now try to refresh schema via the /refresh endpoint
+    let refresh_response = app
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&discover_path)
-                .body(Body::empty())?,
+                .uri(PATH_REFRESH)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "connection_id": connection_id
+                }))?))?,
         )
         .await?;
 
-    // Should return 200 OK (endpoint works, even though discovery fails)
-    assert_eq!(discover_response.status(), StatusCode::OK);
+    // Should return 500 Internal Server Error because schema refresh fails on bad credentials
+    assert_eq!(refresh_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
-    let body = axum::body::to_bytes(discover_response.into_body(), usize::MAX).await?;
+    let body = axum::body::to_bytes(refresh_response.into_body(), usize::MAX).await?;
     let json: serde_json::Value = serde_json::from_slice(&body)?;
 
-    // Verify response structure for discover endpoint
-    assert!(json["id"].is_string());
-    assert_eq!(json["name"], "retry_conn");
-    assert_eq!(json["tables_discovered"], 0);
-    assert_eq!(json["discovery_status"], "failed");
-    assert!(json["discovery_error"].is_string());
+    // Verify error response structure
+    assert!(json["error"]["message"].is_string());
+    assert_eq!(json["error"]["code"], "INTERNAL_SERVER_ERROR");
 
     Ok(())
 }
@@ -1132,7 +1131,7 @@ async fn test_create_connection_successful_discovery() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_discover_connection_successful() -> Result<()> {
+async fn test_refresh_schema_successful() -> Result<()> {
     let (app, tempdir) = setup_test().await?;
 
     // Create a DuckDB file with a table
@@ -1167,29 +1166,27 @@ async fn test_discover_connection_successful() -> Result<()> {
     let create_json: serde_json::Value = serde_json::from_slice(&body)?;
     let connection_id = create_json["id"].as_str().unwrap();
 
-    // Now call discover endpoint (even though already discovered, it should work)
-    let discover_path = PATH_CONNECTION_DISCOVER.replace("{connection_id}", connection_id);
-
-    let discover_response = app
+    // Now call refresh endpoint (even though already discovered, it should work)
+    let refresh_response = app
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&discover_path)
-                .body(Body::empty())?,
+                .uri(PATH_REFRESH)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "connection_id": connection_id
+                }))?))?,
         )
         .await?;
 
-    assert_eq!(discover_response.status(), StatusCode::OK);
+    assert_eq!(refresh_response.status(), StatusCode::OK);
 
-    let body = axum::body::to_bytes(discover_response.into_body(), usize::MAX).await?;
+    let body = axum::body::to_bytes(refresh_response.into_body(), usize::MAX).await?;
     let json: serde_json::Value = serde_json::from_slice(&body)?;
 
-    // Verify successful discover response
-    assert!(json["id"].is_string());
-    assert_eq!(json["name"], "discover_duck");
+    // Verify successful refresh response (schema refresh result)
+    assert_eq!(json["connections_refreshed"], 1);
     assert_eq!(json["tables_discovered"], 1);
-    assert_eq!(json["discovery_status"], "success");
-    assert!(json["discovery_error"].is_null());
 
     Ok(())
 }

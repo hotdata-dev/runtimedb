@@ -2,11 +2,10 @@ use crate::datafetch::deserialize_arrow_schema;
 use crate::http::error::ApiError;
 use crate::http::models::{
     ColumnInfo, ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse,
-    CreateSecretRequest, CreateSecretResponse, DiscoverConnectionResponse, DiscoveryStatus,
-    GetConnectionResponse, GetSecretResponse, InformationSchemaResponse, ListConnectionsResponse,
-    ListSecretsResponse, QueryRequest, QueryResponse, RefreshRequest, RefreshResponse,
-    SchemaRefreshResult, SecretMetadataResponse, TableInfo, UpdateSecretRequest,
-    UpdateSecretResponse,
+    CreateSecretRequest, CreateSecretResponse, DiscoveryStatus, GetConnectionResponse,
+    GetSecretResponse, InformationSchemaResponse, ListConnectionsResponse, ListSecretsResponse,
+    QueryRequest, QueryResponse, RefreshRequest, RefreshResponse, SchemaRefreshResult,
+    SecretMetadataResponse, TableInfo, UpdateSecretRequest, UpdateSecretResponse,
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
 use crate::source::Source;
@@ -293,43 +292,6 @@ pub async fn create_connection_handler(
             discovery_error,
         }),
     ))
-}
-
-/// Handler for POST /connections/{connection_id}/discover
-pub async fn discover_connection_handler(
-    State(engine): State<Arc<RuntimeEngine>>,
-    Path(connection_id): Path<String>,
-) -> Result<Json<DiscoverConnectionResponse>, ApiError> {
-    // Look up connection by external_id
-    let conn = engine
-        .catalog()
-        .get_connection_by_external_id(&connection_id)
-        .await?
-        .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", connection_id)))?;
-
-    // Attempt discovery using connection id
-    let (tables_discovered, discovery_status, discovery_error) =
-        match engine.refresh_schema(conn.id).await {
-            Ok((added, _, _)) => (added, DiscoveryStatus::Success, None),
-            Err(e) => {
-                let root_cause = e.root_cause().to_string();
-                let msg = root_cause
-                    .lines()
-                    .next()
-                    .unwrap_or("Unknown error")
-                    .to_string();
-                error!("Discovery failed for connection '{}': {}", conn.name, msg);
-                (0, DiscoveryStatus::Failed, Some(msg))
-            }
-        };
-
-    Ok(Json(DiscoverConnectionResponse {
-        id: conn.external_id,
-        name: conn.name,
-        tables_discovered,
-        discovery_status,
-        discovery_error,
-    }))
 }
 
 /// Handler for GET /connections

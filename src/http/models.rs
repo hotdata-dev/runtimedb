@@ -74,17 +74,6 @@ pub struct CreateConnectionResponse {
     pub discovery_error: Option<String>,
 }
 
-/// Response body for POST /connections/{connection_id}/discover
-#[derive(Debug, Serialize)]
-pub struct DiscoverConnectionResponse {
-    pub id: String,
-    pub name: String,
-    pub tables_discovered: usize,
-    pub discovery_status: DiscoveryStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub discovery_error: Option<String>,
-}
-
 /// Single connection metadata for API responses
 #[derive(Debug, Serialize)]
 pub struct ConnectionInfo {
