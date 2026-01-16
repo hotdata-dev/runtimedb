@@ -896,9 +896,10 @@ impl RuntimeEngineBuilder {
 
     /// Set the number of parallel table refreshes for connection-wide data refresh.
     /// Higher values may speed up refresh for connections with many small tables,
-    /// but could overwhelm the source database. Defaults to 4.
+    /// but could overwhelm the source database. Defaults to 4. Minimum value is 1
+    /// (values less than 1 are clamped to 1 to prevent deadlock).
     pub fn parallel_refresh_count(mut self, count: usize) -> Self {
-        self.parallel_refresh_count = count;
+        self.parallel_refresh_count = count.max(1);
         self
     }
 
@@ -1307,5 +1308,23 @@ mod tests {
         // Verify we can list connections
         let connections = engine.list_connections().await;
         assert!(connections.is_ok(), "Should be able to list connections");
+    }
+
+    #[test]
+    fn test_parallel_refresh_count_clamps_to_minimum_one() {
+        // Test that parallel_refresh_count is clamped to at least 1
+        // to prevent deadlock on semaphore acquisition
+        let builder = RuntimeEngineBuilder::new().parallel_refresh_count(0);
+        assert_eq!(
+            builder.parallel_refresh_count, 1,
+            "parallel_refresh_count should be clamped to 1 when set to 0"
+        );
+
+        // Values >= 1 should be preserved
+        let builder = RuntimeEngineBuilder::new().parallel_refresh_count(5);
+        assert_eq!(builder.parallel_refresh_count, 5);
+
+        let builder = RuntimeEngineBuilder::new().parallel_refresh_count(1);
+        assert_eq!(builder.parallel_refresh_count, 1);
     }
 }
