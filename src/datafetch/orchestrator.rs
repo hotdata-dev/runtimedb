@@ -155,10 +155,10 @@ impl FetchOrchestrator {
             .await;
 
         if let Err(e) = catalog_result {
-            // Clean up orphaned file - delete the newly written data
-            if let Err(cleanup_err) = self.storage.delete(&new_url).await {
+            // Clean up orphaned versioned directory - delete the newly written data
+            if let Err(cleanup_err) = self.storage.delete_prefix(&new_url).await {
                 tracing::warn!(
-                    "Failed to clean up orphaned file {} after catalog update failure: {}",
+                    "Failed to clean up orphaned directory {} after catalog update failure: {}",
                     new_url,
                     cleanup_err
                 );
@@ -331,7 +331,15 @@ mod tests {
             Ok(())
         }
 
-        async fn delete_prefix(&self, _prefix: &str) -> Result<()> {
+        async fn delete_prefix(&self, prefix: &str) -> Result<()> {
+            self.deleted_urls.lock().unwrap().push(prefix.to_string());
+            // Also delete the actual directory if it exists
+            if let Some(path) = prefix.strip_prefix("file://") {
+                let path = std::path::Path::new(path);
+                if path.exists() && path.is_dir() {
+                    let _ = std::fs::remove_dir_all(path);
+                }
+            }
             Ok(())
         }
 

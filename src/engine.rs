@@ -212,12 +212,12 @@ impl RuntimeEngine {
         Ok(())
     }
 
-    /// Delete parquet and state files for a specific table.
+    /// Delete cache directory for a specific table.
     async fn delete_table_files(&self, table_info: &TableInfo) -> Result<()> {
-        // Delete parquet file if it exists
+        // Delete versioned cache directory if it exists
         if let Some(parquet_path) = &table_info.parquet_path {
-            if let Err(e) = self.storage.delete(parquet_path).await {
-                warn!("Failed to delete parquet file {}: {}", parquet_path, e);
+            if let Err(e) = self.storage.delete_prefix(parquet_path).await {
+                warn!("Failed to delete cache directory {}: {}", parquet_path, e);
             }
         }
 
@@ -680,13 +680,13 @@ impl RuntimeEngine {
         Ok(result)
     }
 
-    /// Process any pending file deletions that are due.
+    /// Process any pending directory deletions that are due.
     pub async fn process_pending_deletions(&self) -> Result<usize> {
         let pending = self.catalog.get_pending_deletions().await?;
         let mut deleted = 0;
 
         for deletion in pending {
-            match self.storage.delete(&deletion.path).await {
+            match self.storage.delete_prefix(&deletion.path).await {
                 Ok(_) => {
                     self.catalog.remove_pending_deletion(deletion.id).await?;
                     deleted += 1;
@@ -726,7 +726,7 @@ impl RuntimeEngine {
                         };
 
                         for deletion in pending {
-                            match storage.delete(&deletion.path).await {
+                            match storage.delete_prefix(&deletion.path).await {
                                 Ok(_) => {
                                     // Successfully deleted - remove the record
                                     if let Err(e) = catalog.remove_pending_deletion(deletion.id).await {

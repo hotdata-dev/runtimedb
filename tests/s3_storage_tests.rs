@@ -151,12 +151,11 @@ async fn s3_storage_path_construction() {
     assert_eq!(cache_prefix, format!("s3://{}/cache/1", MINIO_BUCKET));
 }
 
-/// Test that deleting a versioned directory URL removes all contents.
-/// This tests the fix for: S3Storage::delete was only deleting a single object,
-/// but finalize_cache_write returns directory URLs like s3://bucket/.../version
-/// which need to delete the data.parquet file inside.
+/// Test that delete_prefix removes versioned directory contents.
+/// finalize_cache_write returns directory URLs like s3://bucket/.../version
+/// and delete_prefix should delete the data.parquet file inside.
 #[tokio::test]
-async fn s3_storage_delete_versioned_directory() {
+async fn s3_storage_delete_prefix_removes_versioned_directory() {
     let infra = MinioTestInfra::start().await;
     let storage = &infra.storage;
 
@@ -185,13 +184,13 @@ async fn s3_storage_delete_versioned_directory() {
         file_url
     );
 
-    // Now delete using the directory URL (this is what the deletion worker does)
-    storage.delete(&versioned_dir_url).await.unwrap();
+    // Use delete_prefix to remove the versioned directory (this is what the deletion worker uses)
+    storage.delete_prefix(&versioned_dir_url).await.unwrap();
 
     // The data.parquet file should be gone
     assert!(
         !storage.exists(&file_url).await.unwrap(),
-        "data.parquet should be deleted when deleting directory URL"
+        "data.parquet should be deleted when using delete_prefix on directory URL"
     );
 }
 
