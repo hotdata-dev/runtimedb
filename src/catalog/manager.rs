@@ -49,6 +49,9 @@ pub struct PendingDeletion {
     pub id: i32,
     pub path: String,
     pub delete_after: DateTime<Utc>,
+    /// Number of failed deletion attempts. After MAX_DELETION_RETRIES,
+    /// the record is removed to prevent indefinite accumulation.
+    pub retry_count: i32,
 }
 
 /// Async interface for catalog operations.
@@ -115,7 +118,10 @@ pub trait CatalogManager: Debug + Send + Sync {
     /// Get all pending file deletions that are due for cleanup.
     async fn get_pending_deletions(&self) -> Result<Vec<PendingDeletion>>;
 
-    /// Remove a pending deletion record after successful delete.
+    /// Increment the retry count for a failed deletion. Returns the new count.
+    async fn increment_deletion_retry(&self, id: i32) -> Result<i32>;
+
+    /// Remove a pending deletion record after successful delete or max retries.
     async fn remove_pending_deletion(&self, id: i32) -> Result<()>;
 
     // Secret management methods - metadata (used by all secret providers)

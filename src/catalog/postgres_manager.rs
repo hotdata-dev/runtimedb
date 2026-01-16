@@ -160,12 +160,22 @@ impl CatalogManager for PostgresCatalogManager {
     async fn get_pending_deletions(&self) -> Result<Vec<PendingDeletion>> {
         // Use native TIMESTAMPTZ comparison for Postgres (not RFC3339 string)
         sqlx::query_as(
-            "SELECT id, path, delete_after FROM pending_deletions WHERE delete_after <= $1",
+            "SELECT id, path, delete_after, retry_count FROM pending_deletions WHERE delete_after <= $1",
         )
         .bind(Utc::now())
         .fetch_all(self.backend.pool())
         .await
         .map_err(Into::into)
+    }
+
+    async fn increment_deletion_retry(&self, id: i32) -> Result<i32> {
+        let new_count: (i32,) = sqlx::query_as(
+            "UPDATE pending_deletions SET retry_count = retry_count + 1 WHERE id = $1 RETURNING retry_count",
+        )
+        .bind(id)
+        .fetch_one(self.backend.pool())
+        .await?;
+        Ok(new_count.0)
     }
 
     async fn remove_pending_deletion(&self, id: i32) -> Result<()> {

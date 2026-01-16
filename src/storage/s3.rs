@@ -6,6 +6,7 @@ use futures::TryStreamExt;
 use object_store::aws::AmazonS3Builder;
 use object_store::{path::Path as ObjectPath, ObjectStore};
 use std::sync::Arc;
+use tracing::warn;
 use url::Url;
 
 use super::{CacheWriteHandle, S3Credentials, StorageManager};
@@ -185,7 +186,16 @@ impl StorageManager for S3Storage {
         let file_url = format!("{}/data.parquet", versioned_dir_url);
 
         self.write(&file_url, &data).await?;
-        std::fs::remove_file(&handle.local_path)?;
+
+        // Clean up local temp file - log warning but don't fail if removal fails
+        // since the S3 upload succeeded and that's what matters
+        if let Err(e) = std::fs::remove_file(&handle.local_path) {
+            warn!(
+                path = %handle.local_path.display(),
+                error = %e,
+                "Failed to remove local temp file after S3 upload; file may be orphaned"
+            );
+        }
 
         Ok(versioned_dir_url)
     }

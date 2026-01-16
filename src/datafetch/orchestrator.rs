@@ -519,6 +519,10 @@ mod tests {
             Ok(vec![])
         }
 
+        async fn increment_deletion_retry(&self, _id: i32) -> Result<i32> {
+            Ok(1)
+        }
+
         async fn remove_pending_deletion(&self, _id: i32) -> Result<()> {
             Ok(())
         }

@@ -49,6 +49,7 @@ struct PendingDeletionRow {
     id: i32,
     path: String,
     delete_after: String,
+    retry_count: i32,
 }
 
 impl PendingDeletionRow {
@@ -68,6 +69,7 @@ impl PendingDeletionRow {
             id: self.id,
             path: self.path,
             delete_after,
+            retry_count: self.retry_count,
         }
     }
 }
@@ -336,7 +338,7 @@ impl CatalogManager for SqliteCatalogManager {
     async fn get_pending_deletions(&self) -> Result<Vec<PendingDeletion>> {
         // Use RFC3339 string comparison for SQLite TEXT column
         let rows: Vec<PendingDeletionRow> = sqlx::query_as(
-            "SELECT id, path, delete_after FROM pending_deletions WHERE delete_after <= ?",
+            "SELECT id, path, delete_after, retry_count FROM pending_deletions WHERE delete_after <= ?",
         )
         .bind(Utc::now().to_rfc3339())
         .fetch_all(self.backend.pool())
@@ -346,6 +348,16 @@ impl CatalogManager for SqliteCatalogManager {
             .into_iter()
             .map(PendingDeletionRow::into_pending_deletion)
             .collect())
+    }
+
+    async fn increment_deletion_retry(&self, id: i32) -> Result<i32> {
+        let new_count: (i32,) = sqlx::query_as(
+            "UPDATE pending_deletions SET retry_count = retry_count + 1 WHERE id = ? RETURNING retry_count",
+        )
+        .bind(id)
+        .fetch_one(self.backend.pool())
+        .await?;
+        Ok(new_count.0)
     }
 
     async fn remove_pending_deletion(&self, id: i32) -> Result<()> {

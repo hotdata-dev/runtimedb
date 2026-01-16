@@ -28,6 +28,18 @@ use tracing::error;
 /// It is a base64-encoded 32-byte key: "INSECURE_DEFAULT_KEY_RUNTIMEDB!!"
 const DEFAULT_INSECURE_KEY: &str = "SU5TRUNVUkVfREVGQVVMVF9LRVlfUlVOVElNRURCISE=";
 
+/// Maximum number of retries for file deletion before giving up.
+/// After this many failures, the pending deletion record is removed
+/// and a warning is logged. This prevents indefinite accumulation
+/// of stuck deletion records.
+const MAX_DELETION_RETRIES: i32 = 5;
+
+/// Default number of parallel table refreshes for connection-wide data refresh.
+const DEFAULT_PARALLEL_REFRESH_COUNT: usize = 4;
+
+/// Default interval (in seconds) between deletion worker runs.
+const DEFAULT_DELETION_WORKER_INTERVAL_SECS: u64 = 30;
+
 pub struct QueryResponse {
     pub results: Vec<RecordBatch>,
     pub execution_time: Duration,
@@ -43,6 +55,10 @@ pub struct RuntimeEngine {
     shutdown_token: CancellationToken,
     deletion_worker_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     deletion_grace_period: Duration,
+    /// Stored for potential future restart capability; interval is passed to worker at start
+    #[allow(dead_code)]
+    deletion_worker_interval: Duration,
+    parallel_refresh_count: usize,
 }
 
 impl RuntimeEngine {
@@ -623,7 +639,7 @@ impl RuntimeEngine {
             errors: vec![],
         };
 
-        let semaphore = Arc::new(Semaphore::new(4));
+        let semaphore = Arc::new(Semaphore::new(self.parallel_refresh_count));
         let mut handles = vec![];
 
         for table in tables {
@@ -688,15 +704,16 @@ impl RuntimeEngine {
         Ok(deleted)
     }
 
-    /// Start background task that processes pending deletions every 30 seconds.
+    /// Start background task that processes pending deletions periodically.
     /// Returns the JoinHandle for the spawned task.
     fn start_deletion_worker(
         catalog: Arc<dyn CatalogManager>,
         storage: Arc<dyn StorageManager>,
         shutdown_token: CancellationToken,
+        interval_duration: Duration,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            let mut interval = tokio::time::interval(interval_duration);
             loop {
                 tokio::select! {
                     _ = shutdown_token.cancelled() => {
@@ -713,12 +730,41 @@ impl RuntimeEngine {
                         };
 
                         for deletion in pending {
-                            if let Err(e) = storage.delete(&deletion.path).await {
-                                warn!("Failed to delete {}: {}", deletion.path, e);
-                                continue;
-                            }
-                            if let Err(e) = catalog.remove_pending_deletion(deletion.id).await {
-                                warn!("Failed to remove deletion record {}: {}", deletion.id, e);
+                            match storage.delete(&deletion.path).await {
+                                Ok(_) => {
+                                    // Successfully deleted - remove the record
+                                    if let Err(e) = catalog.remove_pending_deletion(deletion.id).await {
+                                        warn!("Failed to remove deletion record {}: {}", deletion.id, e);
+                                    }
+                                }
+                                Err(e) => {
+                                    // Failed to delete - increment retry count
+                                    warn!(
+                                        "Failed to delete {} (attempt {}): {}",
+                                        deletion.path,
+                                        deletion.retry_count + 1,
+                                        e
+                                    );
+
+                                    match catalog.increment_deletion_retry(deletion.id).await {
+                                        Ok(new_count) if new_count >= MAX_DELETION_RETRIES => {
+                                            // Max retries reached - give up and remove record
+                                            warn!(
+                                                "Giving up on deleting {} after {} failed attempts",
+                                                deletion.path, new_count
+                                            );
+                                            if let Err(e) = catalog.remove_pending_deletion(deletion.id).await {
+                                                warn!("Failed to remove stuck deletion record {}: {}", deletion.id, e);
+                                            }
+                                        }
+                                        Ok(_) => {
+                                            // Will retry on next interval
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to increment retry count for {}: {}", deletion.id, e);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -772,6 +818,8 @@ pub struct RuntimeEngineBuilder {
     storage: Option<Arc<dyn StorageManager>>,
     secret_key: Option<String>,
     deletion_grace_period: Duration,
+    deletion_worker_interval: Duration,
+    parallel_refresh_count: usize,
 }
 
 impl Default for RuntimeEngineBuilder {
@@ -792,6 +840,8 @@ impl RuntimeEngineBuilder {
             storage: None,
             secret_key: std::env::var("RUNTIMEDB_SECRET_KEY").ok(),
             deletion_grace_period: DEFAULT_DELETION_GRACE_PERIOD,
+            deletion_worker_interval: Duration::from_secs(DEFAULT_DELETION_WORKER_INTERVAL_SECS),
+            parallel_refresh_count: DEFAULT_PARALLEL_REFRESH_COUNT,
         }
     }
 
@@ -837,6 +887,22 @@ impl RuntimeEngineBuilder {
     /// queries to complete. Defaults to 60 seconds.
     pub fn deletion_grace_period(mut self, duration: Duration) -> Self {
         self.deletion_grace_period = duration;
+        self
+    }
+
+    /// Set the interval between deletion worker runs.
+    /// The deletion worker processes pending file deletions periodically.
+    /// Defaults to 30 seconds.
+    pub fn deletion_worker_interval(mut self, duration: Duration) -> Self {
+        self.deletion_worker_interval = duration;
+        self
+    }
+
+    /// Set the number of parallel table refreshes for connection-wide data refresh.
+    /// Higher values may speed up refresh for connections with many small tables,
+    /// but could overwhelm the source database. Defaults to 4.
+    pub fn parallel_refresh_count(mut self, count: usize) -> Self {
+        self.parallel_refresh_count = count;
         self
     }
 
@@ -950,6 +1016,7 @@ impl RuntimeEngineBuilder {
             catalog.clone(),
             storage.clone(),
             shutdown_token.clone(),
+            self.deletion_worker_interval,
         );
 
         let mut engine = RuntimeEngine {
@@ -961,6 +1028,8 @@ impl RuntimeEngineBuilder {
             shutdown_token,
             deletion_worker_handle: Mutex::new(Some(deletion_worker_handle)),
             deletion_grace_period: self.deletion_grace_period,
+            deletion_worker_interval: self.deletion_worker_interval,
+            parallel_refresh_count: self.parallel_refresh_count,
         };
 
         // Register all existing connections as DataFusion catalogs
