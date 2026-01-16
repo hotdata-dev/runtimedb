@@ -477,6 +477,149 @@ async fn test_refresh_data_connection_wide() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_refresh_data_skips_uncached_tables_by_default() -> Result<()> {
+    let harness = RefreshTestHarness::new().await?;
+
+    // Create a DuckDB with multiple tables
+    let db_path = harness.create_duckdb_multi_table("skip_uncached_test");
+
+    // Create connection (discovers both tables but doesn't cache them)
+    let connection_id = harness.create_connection("test_conn", &db_path).await?;
+
+    // Query only ONE table to trigger sync (orders gets cached, products does not)
+    harness
+        .engine
+        .execute_query("SELECT * FROM test_conn.sales.orders")
+        .await?;
+
+    // Verify only orders is cached
+    let tables = harness.engine.list_tables(Some("test_conn")).await?;
+    let orders_cached = tables
+        .iter()
+        .find(|t| t.table_name == "orders")
+        .and_then(|t| t.parquet_path.as_ref())
+        .is_some();
+    let products_cached = tables
+        .iter()
+        .find(|t| t.table_name == "products")
+        .and_then(|t| t.parquet_path.as_ref())
+        .is_some();
+    assert!(orders_cached, "orders should be cached");
+    assert!(!products_cached, "products should NOT be cached");
+
+    // Refresh all data in connection (default: include_uncached=false)
+    let response = harness
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_REFRESH)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "connection_id": connection_id,
+                    "data": true
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Should only refresh the cached table (orders), not products
+    assert_eq!(
+        json["tables_refreshed"], 1,
+        "Should only refresh cached tables"
+    );
+    assert_eq!(json["tables_failed"], 0);
+
+    // Verify products is still not cached
+    let tables = harness.engine.list_tables(Some("test_conn")).await?;
+    let products_still_uncached = tables
+        .iter()
+        .find(|t| t.table_name == "products")
+        .and_then(|t| t.parquet_path.as_ref())
+        .is_none();
+    assert!(
+        products_still_uncached,
+        "products should still be uncached after default refresh"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_refresh_data_includes_uncached_tables_when_requested() -> Result<()> {
+    let harness = RefreshTestHarness::new().await?;
+
+    // Create a DuckDB with multiple tables
+    let db_path = harness.create_duckdb_multi_table("include_uncached_test");
+
+    // Create connection (discovers both tables but doesn't cache them)
+    let connection_id = harness.create_connection("test_conn", &db_path).await?;
+
+    // Query only ONE table to trigger sync (orders gets cached, products does not)
+    harness
+        .engine
+        .execute_query("SELECT * FROM test_conn.sales.orders")
+        .await?;
+
+    // Verify only orders is cached initially
+    let tables = harness.engine.list_tables(Some("test_conn")).await?;
+    let products_cached = tables
+        .iter()
+        .find(|t| t.table_name == "products")
+        .and_then(|t| t.parquet_path.as_ref())
+        .is_some();
+    assert!(!products_cached, "products should NOT be cached initially");
+
+    // Refresh all data with include_uncached=true
+    let response = harness
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_REFRESH)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "connection_id": connection_id,
+                    "data": true,
+                    "include_uncached": true
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Should refresh both tables
+    assert_eq!(
+        json["tables_refreshed"], 2,
+        "Should refresh all tables including uncached"
+    );
+    assert_eq!(json["tables_failed"], 0);
+
+    // Verify products is NOW cached
+    let tables = harness.engine.list_tables(Some("test_conn")).await?;
+    let products_now_cached = tables
+        .iter()
+        .find(|t| t.table_name == "products")
+        .and_then(|t| t.parquet_path.as_ref())
+        .is_some();
+    assert!(
+        products_now_cached,
+        "products should be cached after include_uncached refresh"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_refresh_data_creates_new_versioned_file() -> Result<()> {
     let harness = RefreshTestHarness::new().await?;
 
