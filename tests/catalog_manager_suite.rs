@@ -1,4 +1,5 @@
 use runtimedb::catalog::{CatalogManager, PostgresCatalogManager, SqliteCatalogManager};
+use sqlx::{PgPool, SqlitePool};
 use tempfile::TempDir;
 use testcontainers::{runners::AsyncRunner, ImageExt};
 use testcontainers_modules::postgres::Postgres;
@@ -492,3 +493,122 @@ macro_rules! catalog_manager_tests {
 
 catalog_manager_tests!(sqlite, create_sqlite_catalog);
 catalog_manager_tests!(postgres, create_postgres_catalog);
+
+/// Test that migration hash mismatch is detected on startup.
+/// This simulates the scenario where a migration SQL file was modified after
+/// being applied to a database.
+#[tokio::test]
+async fn sqlite_migration_hash_mismatch_fails() {
+    let dir = TempDir::new().expect("failed to create temp dir");
+    let db_path = dir.path().join("catalog.sqlite");
+    let db_uri = format!("sqlite:{}?mode=rwc", db_path.display());
+
+    // First: apply migrations normally
+    let manager = SqliteCatalogManager::new(db_path.to_str().unwrap())
+        .await
+        .unwrap();
+    manager.run_migrations().await.unwrap();
+    manager.close().await.unwrap();
+
+    // Second: tamper with the stored hash to simulate a modified migration
+    let pool = SqlitePool::connect(&db_uri).await.unwrap();
+    sqlx::query("UPDATE schema_migrations SET hash = 'tampered_hash' WHERE version = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    // Third: try to run migrations again - should fail with hash mismatch
+    let manager = SqliteCatalogManager::new(db_path.to_str().unwrap())
+        .await
+        .unwrap();
+    let result = manager.run_migrations().await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("modified after being applied"));
+    assert!(err.contains("tampered_hash"));
+}
+
+/// Test that unknown migrations in DB (newer than compiled code) are detected.
+/// This simulates the scenario where the DB has a migration version that doesn't exist in code.
+#[tokio::test]
+async fn sqlite_unknown_migration_fails() {
+    let dir = TempDir::new().expect("failed to create temp dir");
+    let db_path = dir.path().join("catalog.sqlite");
+    let db_uri = format!("sqlite:{}?mode=rwc", db_path.display());
+
+    // Manually create schema_migrations table with v99 (which doesn't exist in compiled code)
+    let pool = SqlitePool::connect(&db_uri).await.unwrap();
+    sqlx::query(
+        "CREATE TABLE schema_migrations (
+            version INTEGER PRIMARY KEY,
+            hash TEXT NOT NULL,
+            applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO schema_migrations (version, hash) VALUES (99, 'somehash')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    // Try to run migrations - should fail because v99 doesn't exist in compiled code
+    let manager = SqliteCatalogManager::new(db_path.to_str().unwrap())
+        .await
+        .unwrap();
+    let result = manager.run_migrations().await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("v99") && err.contains("only knows up to"),
+        "Expected error about unknown migration v99, got: {}",
+        err
+    );
+}
+
+/// Test that migration hash mismatch is detected for PostgreSQL.
+#[tokio::test]
+async fn postgres_migration_hash_mismatch_fails() {
+    let container = Postgres::default()
+        .with_tag("15-alpine")
+        .start()
+        .await
+        .expect("Failed to start postgres container");
+
+    let host_port = container.get_host_port_ipv4(5432).await.unwrap();
+    let connection_string = format!(
+        "postgres://postgres:postgres@localhost:{}/postgres",
+        host_port
+    );
+
+    // First: apply migrations normally
+    let manager = PostgresCatalogManager::new(&connection_string)
+        .await
+        .unwrap();
+    manager.run_migrations().await.unwrap();
+    manager.close().await.unwrap();
+
+    // Second: tamper with the stored hash to simulate a modified migration
+    let pool = PgPool::connect(&connection_string).await.unwrap();
+    sqlx::query("UPDATE schema_migrations SET hash = 'tampered_hash' WHERE version = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    // Third: try to run migrations again - should fail with hash mismatch
+    let manager = PostgresCatalogManager::new(&connection_string)
+        .await
+        .unwrap();
+    let result = manager.run_migrations().await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("modified after being applied"));
+    assert!(err.contains("tampered_hash"));
+}

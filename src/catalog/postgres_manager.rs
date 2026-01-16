@@ -2,7 +2,9 @@ use crate::catalog::backend::CatalogBackend;
 use crate::catalog::manager::{
     CatalogManager, ConnectionInfo, OptimisticLock, PendingDeletion, TableInfo,
 };
-use crate::catalog::migrations::{run_migrations, CatalogMigrations};
+use crate::catalog::migrations::{
+    run_migrations, wrap_migration_sql, CatalogMigrations, Migration, POSTGRES_MIGRATIONS,
+};
 use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -50,133 +52,9 @@ impl PostgresCatalogManager {
         let backend = CatalogBackend::new(pool);
         Ok(Self { backend })
     }
-
-    async fn initialize_schema(pool: &PgPool) -> Result<()> {
-        sqlx::query(
-            "CREATE TABLE connections (
-                id SERIAL PRIMARY KEY,
-                external_id TEXT UNIQUE NOT NULL,
-                name TEXT UNIQUE NOT NULL,
-                source_type TEXT NOT NULL,
-                config_json TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )",
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE tables (
-                id SERIAL PRIMARY KEY,
-                connection_id INTEGER NOT NULL,
-                schema_name TEXT NOT NULL,
-                table_name TEXT NOT NULL,
-                parquet_path TEXT,
-                last_sync TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                arrow_schema_json TEXT,
-                FOREIGN KEY (connection_id) REFERENCES connections(id),
-                UNIQUE (connection_id, schema_name, table_name)
-            )",
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE secrets (
-                name TEXT PRIMARY KEY,
-                provider TEXT NOT NULL,
-                provider_ref TEXT,
-                status TEXT NOT NULL DEFAULT 'active',
-                created_at TIMESTAMPTZ NOT NULL,
-                updated_at TIMESTAMPTZ NOT NULL
-            )",
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE encrypted_secret_values (
-                name TEXT PRIMARY KEY,
-                encrypted_value BYTEA NOT NULL
-            )",
-        )
-        .execute(pool)
-        .await?;
-
-        Ok(())
-    }
 }
 
 struct PostgresMigrationBackend;
-
-impl CatalogMigrations for PostgresMigrationBackend {
-    type Pool = PgPool;
-
-    async fn ensure_migrations_table(pool: &Self::Pool) -> Result<()> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS schema_migrations (
-                version BIGINT PRIMARY KEY,
-                applied_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-            )",
-        )
-        .execute(pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn current_version(pool: &Self::Pool) -> Result<i64> {
-        sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
-            .fetch_one(pool)
-            .await
-            .map_err(Into::into)
-    }
-
-    async fn record_version(pool: &Self::Pool, version: i64) -> Result<()> {
-        sqlx::query("INSERT INTO schema_migrations (version) VALUES ($1)")
-            .bind(version)
-            .execute(pool)
-            .await?;
-        Ok(())
-    }
-
-    async fn migrate_v1(pool: &Self::Pool) -> Result<()> {
-        PostgresCatalogManager::initialize_schema(pool).await
-    }
-
-    async fn migrate_v2(pool: &Self::Pool) -> Result<()> {
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS pending_deletions (
-                id SERIAL PRIMARY KEY,
-                path TEXT NOT NULL,
-                delete_after TIMESTAMPTZ NOT NULL
-            )
-            "#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_pending_deletions_due ON pending_deletions(delete_after)",
-        )
-        .execute(pool)
-        .await?;
-
-        Ok(())
-    }
-
-    async fn migrate_v3(pool: &Self::Pool) -> Result<()> {
-        // Add UNIQUE constraint on path column to prevent duplicate deletion records
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_deletions_path ON pending_deletions(path)",
-        )
-        .execute(pool)
-        .await?;
-
-        Ok(())
-    }
-}
 
 #[async_trait]
 impl CatalogManager for PostgresCatalogManager {
@@ -260,6 +138,38 @@ impl CatalogManager for PostgresCatalogManager {
 
     async fn delete_connection(&self, name: &str) -> Result<()> {
         self.backend.delete_connection(name).await
+    }
+
+    async fn get_connection_by_id(&self, id: i32) -> Result<Option<ConnectionInfo>> {
+        self.backend.get_connection_by_id(id).await
+    }
+
+    async fn schedule_file_deletion(&self, path: &str, delete_after: DateTime<Utc>) -> Result<()> {
+        // Use native TIMESTAMPTZ binding for Postgres (not RFC3339 string)
+        // ON CONFLICT DO NOTHING silently ignores duplicates when path already exists
+        sqlx::query(
+            "INSERT INTO pending_deletions (path, delete_after) VALUES ($1, $2) ON CONFLICT (path) DO NOTHING",
+        )
+        .bind(path)
+        .bind(delete_after)
+        .execute(self.backend.pool())
+        .await?;
+        Ok(())
+    }
+
+    async fn get_pending_deletions(&self) -> Result<Vec<PendingDeletion>> {
+        // Use native TIMESTAMPTZ comparison for Postgres (not RFC3339 string)
+        sqlx::query_as(
+            "SELECT id, path, delete_after FROM pending_deletions WHERE delete_after <= $1",
+        )
+        .bind(Utc::now())
+        .fetch_all(self.backend.pool())
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn remove_pending_deletion(&self, id: i32) -> Result<()> {
+        self.backend.remove_pending_deletion(id).await
     }
 
     async fn get_secret_metadata(&self, name: &str) -> Result<Option<SecretMetadata>> {
@@ -394,38 +304,6 @@ impl CatalogManager for PostgresCatalogManager {
             .map(SecretMetadataRow::into_metadata)
             .collect())
     }
-
-    async fn get_connection_by_id(&self, id: i32) -> Result<Option<ConnectionInfo>> {
-        self.backend.get_connection_by_id(id).await
-    }
-
-    async fn schedule_file_deletion(&self, path: &str, delete_after: DateTime<Utc>) -> Result<()> {
-        // Use native TIMESTAMPTZ binding for Postgres (not RFC3339 string)
-        // ON CONFLICT DO NOTHING silently ignores duplicates when path already exists
-        sqlx::query(
-            "INSERT INTO pending_deletions (path, delete_after) VALUES ($1, $2) ON CONFLICT (path) DO NOTHING",
-        )
-        .bind(path)
-        .bind(delete_after)
-        .execute(self.backend.pool())
-        .await?;
-        Ok(())
-    }
-
-    async fn get_pending_deletions(&self) -> Result<Vec<PendingDeletion>> {
-        // Use native TIMESTAMPTZ comparison for Postgres (not RFC3339 string)
-        sqlx::query_as(
-            "SELECT id, path, delete_after FROM pending_deletions WHERE delete_after <= $1",
-        )
-        .bind(Utc::now())
-        .fetch_all(self.backend.pool())
-        .await
-        .map_err(Into::into)
-    }
-
-    async fn remove_pending_deletion(&self, id: i32) -> Result<()> {
-        self.backend.remove_pending_deletion(id).await
-    }
 }
 
 impl Debug for PostgresCatalogManager {
@@ -433,5 +311,40 @@ impl Debug for PostgresCatalogManager {
         f.debug_struct("PostgresCatalogManager")
             .field("pool", self.backend.pool())
             .finish()
+    }
+}
+
+impl CatalogMigrations for PostgresMigrationBackend {
+    type Pool = PgPool;
+
+    fn migrations() -> &'static [Migration] {
+        POSTGRES_MIGRATIONS
+    }
+
+    async fn ensure_migrations_table(pool: &Self::Pool) -> Result<()> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                version BIGINT PRIMARY KEY,
+                hash TEXT NOT NULL,
+                applied_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_applied_migrations(pool: &Self::Pool) -> Result<Vec<(i64, String)>> {
+        let rows: Vec<(i64, String)> =
+            sqlx::query_as("SELECT version, hash FROM schema_migrations ORDER BY version")
+                .fetch_all(pool)
+                .await?;
+        Ok(rows)
+    }
+
+    async fn apply_migration(pool: &Self::Pool, version: i64, hash: &str, sql: &str) -> Result<()> {
+        let wrapped_sql = wrap_migration_sql(sql, version, hash);
+        sqlx::raw_sql(&wrapped_sql).execute(pool).await?;
+        Ok(())
     }
 }

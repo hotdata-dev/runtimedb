@@ -48,6 +48,9 @@ arrow-ipc-55 = { package = "arrow-ipc", version = "55" }
 arrow-array-54 = { package = "arrow-array", version = "54" }
 arrow-ipc-54 = { package = "arrow-ipc", version = "54" }
 
+[build-dependencies]
+sha2 = "0.10"
+
 [dev-dependencies]
 testcontainers = "0.26.3"
 testcontainers-modules = { version = "0.14.0", features = ["postgres", "minio", "mysql"] }

@@ -2,7 +2,9 @@ use crate::catalog::backend::CatalogBackend;
 use crate::catalog::manager::{
     CatalogManager, ConnectionInfo, OptimisticLock, PendingDeletion, TableInfo,
 };
-use crate::catalog::migrations::{run_migrations, CatalogMigrations};
+use crate::catalog::migrations::{
+    run_migrations, wrap_migration_sql, CatalogMigrations, Migration, SQLITE_MIGRATIONS,
+};
 use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -78,70 +80,6 @@ impl SqliteCatalogManager {
             backend,
             catalog_path: db_path.to_string(),
         })
-    }
-
-    async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
-        sqlx::query(
-            r#"
-            CREATE TABLE connections (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                external_id TEXT UNIQUE NOT NULL,
-                name TEXT UNIQUE NOT NULL,
-                source_type TEXT NOT NULL,
-                config_json TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        "#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE tables (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                connection_id INTEGER NOT NULL,
-                schema_name TEXT NOT NULL,
-                table_name TEXT NOT NULL,
-                parquet_path TEXT,
-                last_sync TIMESTAMP,
-                arrow_schema_json TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (connection_id) REFERENCES connections(id),
-                UNIQUE (connection_id, schema_name, table_name)
-            )
-        "#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE secrets (
-                name TEXT PRIMARY KEY,
-                provider TEXT NOT NULL,
-                provider_ref TEXT,
-                status TEXT NOT NULL DEFAULT 'active',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE encrypted_secret_values (
-                name TEXT PRIMARY KEY,
-                encrypted_value BLOB NOT NULL
-            )
-            "#,
-        )
-        .execute(pool)
-        .await?;
-
-        Ok(())
     }
 }
 
@@ -406,69 +344,34 @@ impl CatalogManager for SqliteCatalogManager {
 impl CatalogMigrations for SqliteMigrationBackend {
     type Pool = SqlitePool;
 
+    fn migrations() -> &'static [Migration] {
+        SQLITE_MIGRATIONS
+    }
+
     async fn ensure_migrations_table(pool: &Self::Pool) -> Result<()> {
         sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS schema_migrations (
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
                 version INTEGER PRIMARY KEY,
+                hash TEXT NOT NULL,
                 applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            "#,
+            )",
         )
         .execute(pool)
         .await?;
         Ok(())
     }
 
-    async fn current_version(pool: &Self::Pool) -> Result<i64> {
-        sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
-            .fetch_one(pool)
-            .await
-            .map_err(Into::into)
+    async fn get_applied_migrations(pool: &Self::Pool) -> Result<Vec<(i64, String)>> {
+        let rows: Vec<(i64, String)> =
+            sqlx::query_as("SELECT version, hash FROM schema_migrations ORDER BY version")
+                .fetch_all(pool)
+                .await?;
+        Ok(rows)
     }
 
-    async fn record_version(pool: &Self::Pool, version: i64) -> Result<()> {
-        sqlx::query("INSERT INTO schema_migrations (version) VALUES (?)")
-            .bind(version)
-            .execute(pool)
-            .await?;
-        Ok(())
-    }
-
-    async fn migrate_v1(pool: &Self::Pool) -> Result<()> {
-        SqliteCatalogManager::initialize_schema(pool).await
-    }
-
-    async fn migrate_v2(pool: &Self::Pool) -> Result<()> {
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS pending_deletions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                path TEXT NOT NULL,
-                delete_after TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_pending_deletions_due ON pending_deletions(delete_after)",
-        )
-        .execute(pool)
-        .await?;
-
-        Ok(())
-    }
-
-    async fn migrate_v3(pool: &Self::Pool) -> Result<()> {
-        // Add UNIQUE index on path column to prevent duplicate deletion records
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_deletions_path ON pending_deletions(path)",
-        )
-        .execute(pool)
-        .await?;
-
+    async fn apply_migration(pool: &Self::Pool, version: i64, hash: &str, sql: &str) -> Result<()> {
+        let wrapped_sql = wrap_migration_sql(sql, version, hash);
+        sqlx::raw_sql(&wrapped_sql).execute(pool).await?;
         Ok(())
     }
 }
