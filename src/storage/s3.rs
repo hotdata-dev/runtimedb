@@ -106,7 +106,22 @@ impl StorageManager for S3Storage {
 
     async fn delete(&self, url: &str) -> Result<()> {
         let path = self.url_to_path(url)?;
-        self.store.delete(&path).await?;
+
+        // Check if this looks like a directory (versioned cache URLs don't end with file extension).
+        // S3 doesn't have real directories, so we need to delete all objects with this prefix.
+        // This matches FilesystemStorage::delete behavior which uses remove_dir_all for directories.
+        if !url.contains('.') || url.ends_with('/') {
+            // Treat as prefix/directory - delete all objects underneath
+            let list = self.store.list(Some(&path));
+            let objects: Vec<_> = list.try_collect().await?;
+
+            for obj in objects {
+                self.store.delete(&obj.location).await?;
+            }
+        } else {
+            // Single file deletion
+            self.store.delete(&path).await?;
+        }
         Ok(())
     }
 

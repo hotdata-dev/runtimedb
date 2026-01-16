@@ -1,27 +1,97 @@
-//! S3 storage integration tests using MinIO
+//! S3 storage integration tests using MinIO via testcontainers.
 //!
-//! These tests require MinIO running locally:
-//! docker run -p 9000:9000 -p 9001:9001 minio/minio server /data --console-address ":9001"
+//! These tests automatically start a MinIO container, no manual setup required.
 //!
-//! Or via docker-compose from the monopoly root directory.
-//!
-//! Run these tests with: cargo test --test s3_storage_tests -- --ignored
+//! Run these tests with: cargo test --test s3_storage_tests
 
 use runtimedb::storage::{S3Credentials, S3Storage, StorageManager};
+use std::process::Command;
+use std::time::Duration;
+use testcontainers::{runners::AsyncRunner, ContainerAsync};
+use testcontainers_modules::minio::MinIO;
+
+/// MinIO default credentials
+const MINIO_ROOT_USER: &str = "minioadmin";
+const MINIO_ROOT_PASSWORD: &str = "minioadmin";
+const MINIO_BUCKET: &str = "test-bucket";
+
+/// Create a bucket in MinIO using the mc (MinIO Client) via Docker
+async fn create_minio_bucket(endpoint: &str, bucket: &str) {
+    // MC_HOST format: http(s)://<ACCESS_KEY>:<SECRET_KEY>@<HOST>:<PORT>
+    let mc_host = format!(
+        "http://{}:{}@{}",
+        MINIO_ROOT_USER,
+        MINIO_ROOT_PASSWORD,
+        endpoint.trim_start_matches("http://")
+    );
+
+    let output = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "--network=host",
+            "-e",
+            &format!("MC_HOST_minio={}", mc_host),
+            "minio/mc",
+            "mb",
+            "--ignore-existing",
+            &format!("minio/{}", bucket),
+        ])
+        .output()
+        .expect("Failed to run docker mc command - is Docker running?");
+
+    if !output.status.success() {
+        eprintln!(
+            "Warning: mc mb command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // Give MinIO time to process
+    tokio::time::sleep(Duration::from_millis(500)).await;
+}
+
+/// Test infrastructure that manages MinIO container lifecycle
+struct MinioTestInfra {
+    #[allow(dead_code)]
+    minio: ContainerAsync<MinIO>,
+    storage: S3Storage,
+}
+
+impl MinioTestInfra {
+    async fn start() -> Self {
+        let minio = MinIO::default()
+            .start()
+            .await
+            .expect("Failed to start MinIO");
+
+        let minio_host_port = minio.get_host_port_ipv4(9000).await.unwrap();
+        let minio_host = minio.get_host().await.unwrap();
+        let minio_endpoint = format!("http://{}:{}", minio_host, minio_host_port);
+
+        // Create the test bucket
+        create_minio_bucket(&minio_endpoint, MINIO_BUCKET).await;
+
+        let storage = S3Storage::new_with_config(
+            MINIO_BUCKET,
+            &minio_endpoint,
+            MINIO_ROOT_USER,
+            MINIO_ROOT_PASSWORD,
+            true,
+        )
+        .expect("Failed to create S3Storage");
+
+        Self { minio, storage }
+    }
+}
 
 #[tokio::test]
-#[ignore] // Run with --ignored flag when MinIO is available
 async fn s3_storage_write_read_delete() {
-    // Set up MinIO credentials
-    std::env::set_var("AWS_ACCESS_KEY_ID", "root");
-    std::env::set_var("AWS_SECRET_ACCESS_KEY", "password");
-    std::env::set_var("AWS_ENDPOINT", "http://localhost:9000");
-    std::env::set_var("AWS_REGION", "us-east-1");
-    std::env::set_var("AWS_ALLOW_HTTP", "true");
+    let infra = MinioTestInfra::start().await;
+    let storage = &infra.storage;
 
-    let storage = S3Storage::new("test-bucket").unwrap();
-
-    let url = storage.cache_url(1, "public", "users");
+    // Use a specific file path (not directory) for this test
+    let url = format!("s3://{}/cache/1/public/users/test.parquet", MINIO_BUCKET);
     let data = b"test data";
 
     // Write
@@ -40,20 +110,13 @@ async fn s3_storage_write_read_delete() {
 }
 
 #[tokio::test]
-#[ignore] // Run with --ignored flag when MinIO is available
 async fn s3_storage_delete_prefix() {
-    // Set up MinIO credentials
-    std::env::set_var("AWS_ACCESS_KEY_ID", "root");
-    std::env::set_var("AWS_SECRET_ACCESS_KEY", "password");
-    std::env::set_var("AWS_ENDPOINT", "http://localhost:9000");
-    std::env::set_var("AWS_REGION", "us-east-1");
-    std::env::set_var("AWS_ALLOW_HTTP", "true");
-
-    let storage = S3Storage::new("test-bucket").unwrap();
+    let infra = MinioTestInfra::start().await;
+    let storage = &infra.storage;
 
     // Write multiple files under same prefix
-    let url1 = storage.cache_url(1, "public", "users");
-    let url2 = storage.cache_url(1, "public", "orders");
+    let url1 = format!("s3://{}/cache/2/public/users/data.parquet", MINIO_BUCKET);
+    let url2 = format!("s3://{}/cache/2/public/orders/data.parquet", MINIO_BUCKET);
 
     storage.write(&url1, b"users").await.unwrap();
     storage.write(&url2, b"orders").await.unwrap();
@@ -63,7 +126,7 @@ async fn s3_storage_delete_prefix() {
     assert!(storage.exists(&url2).await.unwrap());
 
     // Delete entire connection prefix
-    let prefix = storage.cache_prefix(1);
+    let prefix = storage.cache_prefix(2);
     storage.delete_prefix(&prefix).await.unwrap();
 
     // Verify both are deleted
@@ -72,24 +135,64 @@ async fn s3_storage_delete_prefix() {
 }
 
 #[tokio::test]
-#[ignore] // Run with --ignored flag when MinIO is available
 async fn s3_storage_path_construction() {
-    // Set up MinIO credentials
-    std::env::set_var("AWS_ACCESS_KEY_ID", "root");
-    std::env::set_var("AWS_SECRET_ACCESS_KEY", "password");
-    std::env::set_var("AWS_ENDPOINT", "http://localhost:9000");
-    std::env::set_var("AWS_REGION", "us-east-1");
-    std::env::set_var("AWS_ALLOW_HTTP", "true");
-
-    let storage = S3Storage::new("test-bucket").unwrap();
+    let infra = MinioTestInfra::start().await;
+    let storage = &infra.storage;
 
     // Test cache URL construction (directory path for DLT's multiple parquet files)
     let cache_url = storage.cache_url(1, "public", "users");
-    assert_eq!(cache_url, "s3://test-bucket/cache/1/public/users");
+    assert_eq!(
+        cache_url,
+        format!("s3://{}/cache/1/public/users", MINIO_BUCKET)
+    );
 
     // Test cache prefix construction
     let cache_prefix = storage.cache_prefix(1);
-    assert_eq!(cache_prefix, "s3://test-bucket/cache/1");
+    assert_eq!(cache_prefix, format!("s3://{}/cache/1", MINIO_BUCKET));
+}
+
+/// Test that deleting a versioned directory URL removes all contents.
+/// This tests the fix for: S3Storage::delete was only deleting a single object,
+/// but finalize_cache_write returns directory URLs like s3://bucket/.../version
+/// which need to delete the data.parquet file inside.
+#[tokio::test]
+async fn s3_storage_delete_versioned_directory() {
+    let infra = MinioTestInfra::start().await;
+    let storage = &infra.storage;
+
+    // Use prepare/finalize to create a versioned cache entry
+    let handle = storage.prepare_cache_write(99, "test_schema", "test_table");
+
+    // Write the parquet file locally
+    std::fs::create_dir_all(handle.local_path.parent().unwrap()).unwrap();
+    std::fs::write(&handle.local_path, b"test parquet data").unwrap();
+
+    // Finalize uploads to S3 and returns the directory URL
+    let versioned_dir_url = storage.finalize_cache_write(&handle).await.unwrap();
+
+    // The URL should be a directory like s3://test-bucket/cache/99/test_schema/test_table/{version}
+    assert!(
+        !versioned_dir_url.ends_with(".parquet"),
+        "URL should be a directory, not a file: {}",
+        versioned_dir_url
+    );
+
+    // Verify the data.parquet file exists inside
+    let file_url = format!("{}/data.parquet", versioned_dir_url);
+    assert!(
+        storage.exists(&file_url).await.unwrap(),
+        "data.parquet should exist at {}",
+        file_url
+    );
+
+    // Now delete using the directory URL (this is what the deletion worker does)
+    storage.delete(&versioned_dir_url).await.unwrap();
+
+    // The data.parquet file should be gone
+    assert!(
+        !storage.exists(&file_url).await.unwrap(),
+        "data.parquet should be deleted when deleting directory URL"
+    );
 }
 
 /// Test that S3Storage created with new_with_config returns credentials via get_s3_credentials
