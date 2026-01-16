@@ -35,3 +35,13 @@ CREATE TABLE encrypted_secret_values (
     name TEXT PRIMARY KEY,
     encrypted_value BYTEA NOT NULL
 );
+
+-- Pending deletions for deferred file cleanup with retry tracking
+CREATE TABLE pending_deletions (
+    id SERIAL PRIMARY KEY,
+    path TEXT NOT NULL UNIQUE,
+    delete_after TIMESTAMPTZ NOT NULL,
+    retry_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_pending_deletions_due ON pending_deletions(delete_after);
