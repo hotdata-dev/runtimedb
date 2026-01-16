@@ -79,7 +79,9 @@ impl StorageManager for FilesystemStorage {
     }
 
     async fn delete_prefix(&self, prefix: &str) -> Result<()> {
-        let path = Path::new(prefix);
+        // Handle both file:// URLs and raw paths
+        let path_str = prefix.strip_prefix("file://").unwrap_or(prefix);
+        let path = Path::new(path_str);
         if path.exists() {
             fs::remove_dir_all(path)?;
         }

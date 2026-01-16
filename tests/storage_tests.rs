@@ -170,3 +170,74 @@ async fn test_filesystem_prepare_and_finalize_path_consistency() {
     assert_eq!(url_path, version_dir.to_str().unwrap());
     assert!(handle.local_path.exists());
 }
+
+/// Test that delete_prefix works with file:// URLs returned by finalize_cache_write.
+/// This is critical for cache cleanup - the deletion worker and orchestrator pass
+/// file:// URLs to delete_prefix, not raw paths.
+#[tokio::test]
+async fn test_filesystem_delete_prefix_with_file_url() {
+    use std::fs;
+
+    let temp = TempDir::new().unwrap();
+    let cache_base = temp.path().join("cache");
+
+    let storage = FilesystemStorage::new(cache_base.to_str().unwrap());
+
+    // Prepare and finalize a cache write (simulating what refresh_table does)
+    let handle = storage.prepare_cache_write(1, "public", "orders");
+    fs::create_dir_all(handle.local_path.parent().unwrap()).unwrap();
+    fs::write(&handle.local_path, b"test parquet data").unwrap();
+
+    let versioned_dir_url = storage.finalize_cache_write(&handle).await.unwrap();
+
+    // Verify the URL has file:// prefix (this is what production code returns)
+    assert!(
+        versioned_dir_url.starts_with("file://"),
+        "finalize_cache_write should return file:// URL"
+    );
+
+    // Verify the data file exists
+    assert!(handle.local_path.exists(), "data.parquet should exist");
+
+    // Now delete using the file:// URL (this is what delete_prefix receives in production)
+    storage.delete_prefix(&versioned_dir_url).await.unwrap();
+
+    // Verify the directory and its contents are deleted
+    assert!(
+        !handle.local_path.exists(),
+        "data.parquet should be deleted after delete_prefix with file:// URL"
+    );
+    assert!(
+        !handle.local_path.parent().unwrap().exists(),
+        "version directory should be deleted after delete_prefix with file:// URL"
+    );
+}
+
+/// Test that delete_prefix also works with raw paths (without file:// prefix)
+/// for backwards compatibility with cache_prefix which returns raw paths.
+#[tokio::test]
+async fn test_filesystem_delete_prefix_with_raw_path() {
+    let temp = TempDir::new().unwrap();
+    let cache_base = temp.path().join("cache");
+
+    let storage = FilesystemStorage::new(cache_base.to_str().unwrap());
+
+    // Write some data
+    let url = storage.cache_url(1, "public", "users");
+    storage.write(&url, b"test").await.unwrap();
+
+    // cache_prefix returns a raw path (no file:// prefix)
+    let prefix = storage.cache_prefix(1);
+    assert!(
+        !prefix.starts_with("file://"),
+        "cache_prefix should return raw path"
+    );
+
+    // delete_prefix should work with raw paths too
+    storage.delete_prefix(&prefix).await.unwrap();
+
+    assert!(
+        !storage.exists(&url).await.unwrap(),
+        "file should be deleted after delete_prefix with raw path"
+    );
+}
