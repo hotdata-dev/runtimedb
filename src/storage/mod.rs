@@ -20,6 +20,22 @@ pub struct S3Credentials {
     pub endpoint_url: String,
 }
 
+/// Handle for a pending cache write operation.
+/// Contains all information needed to finalize the write without parsing paths.
+#[derive(Debug, Clone)]
+pub struct CacheWriteHandle {
+    /// Local path where parquet file should be written
+    pub local_path: std::path::PathBuf,
+    /// Unique version identifier for this write
+    pub version: String,
+    /// Connection ID
+    pub connection_id: i32,
+    /// Schema name
+    pub schema: String,
+    /// Table name
+    pub table: String,
+}
+
 #[async_trait]
 pub trait StorageManager: Debug + Send + Sync {
     // Path construction
@@ -42,33 +58,26 @@ pub trait StorageManager: Debug + Send + Sync {
         None
     }
 
-    /// Returns a local path to write Parquet data to.
-    /// For local storage: returns final destination path.
-    /// For remote storage: returns a temp file path.
+    /// Prepares a cache write operation for atomic data refresh.
+    ///
+    /// Uses versioned DIRECTORIES to avoid duplicate reads during the grace period
+    /// between writing new data and deleting old data. DataFusion's ListingTable
+    /// reads all parquet files in a directory, so by placing each version in its
+    /// own directory with a fixed filename (`data.parquet`), we ensure only the
+    /// active version is read after the catalog is updated.
+    ///
+    /// Path structure: `{base}/{conn_id}/{schema}/{table}/{version}/data.parquet`
+    ///
+    /// Returns a handle containing the local path and version for finalization.
     fn prepare_cache_write(
         &self,
         connection_id: i32,
         schema: &str,
         table: &str,
-    ) -> std::path::PathBuf;
-
-    /// Prepare a versioned cache write path for atomic refresh.
-    /// Returns a local path with unique suffix to avoid overwriting existing cache.
-    fn prepare_versioned_cache_write(
-        &self,
-        connection_id: i32,
-        schema: &str,
-        table: &str,
-    ) -> std::path::PathBuf;
+    ) -> CacheWriteHandle;
 
     /// Finalizes the cache write after Parquet file is written.
     /// For local storage: no-op (file already in place), returns URL.
     /// For remote storage: uploads temp file to storage, cleans up temp, returns URL.
-    async fn finalize_cache_write(
-        &self,
-        written_path: &std::path::Path,
-        connection_id: i32,
-        schema: &str,
-        table: &str,
-    ) -> Result<String>;
+    async fn finalize_cache_write(&self, handle: &CacheWriteHandle) -> Result<String>;
 }

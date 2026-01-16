@@ -250,8 +250,19 @@ async fn test_refresh_schema_detects_removed_tables() -> Result<()> {
     let json: serde_json::Value = serde_json::from_slice(&body)?;
 
     assert_eq!(json["connections_refreshed"], 1);
-    assert_eq!(json["tables_discovered"], 1); // only orders remains
-    assert_eq!(json["tables_removed"], 1); // products was removed
+    // tables_discovered reflects catalog state (stale tables are NOT deleted)
+    assert_eq!(json["tables_discovered"], 2); // orders + products (stale) remain in catalog
+                                              // NOTE: tables_removed reports detection but doesn't delete from catalog.
+                                              // Stale table cleanup is intentionally not implemented.
+    assert_eq!(json["tables_removed"], 1); // products was detected as removed from remote
+
+    // Verify products table still exists in catalog (stale tables are not deleted)
+    let tables = harness.engine.list_tables(Some("test_conn")).await?;
+    let products_exists = tables.iter().any(|t| t.table_name == "products");
+    assert!(
+        products_exists,
+        "products table should still exist in catalog (stale table cleanup not implemented)"
+    );
 
     Ok(())
 }
@@ -951,7 +962,7 @@ async fn test_data_refresh_schedules_pending_deletion() -> Result<()> {
 
     // The deletion is scheduled 60 seconds in the future by default
     // so we verify the scheduling mechanism works but don't wait for deletion
-    let due = harness.engine.catalog().get_due_deletions().await?;
+    let due = harness.engine.catalog().get_pending_deletions().await?;
     assert!(
         due.is_empty(),
         "deletions should not be due immediately (60s grace period)"
@@ -961,7 +972,9 @@ async fn test_data_refresh_schedules_pending_deletion() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_schema_refresh_schedules_deletion_for_removed_tables() -> Result<()> {
+async fn test_schema_refresh_reports_removed_tables_but_keeps_them() -> Result<()> {
+    // NOTE: This test verifies that stale tables are detected but NOT deleted.
+    // Stale table cleanup is intentionally not implemented to avoid data loss.
     let harness = RefreshTestHarness::new().await?;
 
     // Create a DuckDB with multiple tables
@@ -1008,13 +1021,16 @@ async fn test_schema_refresh_schedules_deletion_for_removed_tables() -> Result<(
     let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
     let json: serde_json::Value = serde_json::from_slice(&body)?;
 
-    // Verify table was removed
+    // Verify table removal was detected
     assert_eq!(json["tables_removed"], 1);
 
-    // Verify products table no longer exists
+    // Verify products table STILL exists (stale tables are not deleted)
     let tables = harness.engine.list_tables(Some("test_conn")).await?;
     let products_exists = tables.iter().any(|t| t.table_name == "products");
-    assert!(!products_exists, "products table should be removed");
+    assert!(
+        products_exists,
+        "products table should still exist (stale table cleanup not implemented)"
+    );
 
     Ok(())
 }
@@ -1056,7 +1072,7 @@ async fn test_pending_deletions_respect_timing() -> Result<()> {
     assert_eq!(response.status(), StatusCode::OK);
 
     // Get due deletions immediately - should be empty since deletion is 60s in future
-    let due = harness.engine.catalog().get_due_deletions().await?;
+    let due = harness.engine.catalog().get_pending_deletions().await?;
     assert!(
         due.is_empty(),
         "deletions should not be due immediately after scheduling"
@@ -1375,7 +1391,7 @@ async fn test_concurrent_refresh_same_table() -> Result<()> {
 
     // Verify pending deletions don't have duplicates for the same path
     // (This validates the fix from #8 - INSERT OR IGNORE on pending_deletions)
-    let due = harness.engine.catalog().get_due_deletions().await?;
+    let due = harness.engine.catalog().get_pending_deletions().await?;
     let paths: std::collections::HashSet<_> = due.iter().map(|d| &d.path).collect();
     assert_eq!(
         due.len(),
@@ -1562,9 +1578,10 @@ async fn test_concurrent_connection_wide_refresh() -> Result<()> {
     let internal_id = internal_conn.id;
 
     // Run two connection-wide data refreshes concurrently
+    // Use include_uncached=false (default) - only refresh already-cached tables
     let (result1, result2) = tokio::join!(
-        engine1.refresh_connection_data(internal_id, &conn_id1),
-        engine2.refresh_connection_data(internal_id, &conn_id2)
+        engine1.refresh_connection_data(internal_id, &conn_id1, false),
+        engine2.refresh_connection_data(internal_id, &conn_id2, false)
     );
 
     // Both should complete without panicking

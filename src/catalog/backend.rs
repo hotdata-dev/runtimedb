@@ -385,30 +385,6 @@ where
             .map_err(Into::into)
     }
 
-    pub async fn delete_stale_tables(
-        &self,
-        connection_id: i32,
-        current_tables: &[(String, String)],
-    ) -> Result<Vec<TableInfo>> {
-        // Get all existing tables for this connection
-        let existing = self.list_tables(Some(connection_id)).await?;
-
-        // Find tables not in current_tables (tuple is schema_name, table_name)
-        let current_set: std::collections::HashSet<_> = current_tables.iter().collect();
-        let stale: Vec<_> = existing
-            .into_iter()
-            .filter(|t| !current_set.contains(&(t.schema_name.clone(), t.table_name.clone())))
-            .collect();
-
-        // Delete each stale table
-        for table in &stale {
-            let sql = format!("DELETE FROM tables WHERE id = {}", DB::bind_param(1));
-            query(&sql).bind(table.id).execute(&self.pool).await?;
-        }
-
-        Ok(stale)
-    }
-
     pub async fn remove_pending_deletion(&self, id: i32) -> Result<()> {
         let sql = format!(
             "DELETE FROM pending_deletions WHERE id = {}",

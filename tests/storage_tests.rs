@@ -97,18 +97,25 @@ async fn filesystem_delete_prefix_works() {
 }
 
 #[test]
-fn test_filesystem_prepare_cache_write_path() {
+fn test_filesystem_prepare_cache_write_returns_handle() {
     let temp = TempDir::new().unwrap();
     let cache_base = temp.path().join("cache");
 
     let storage = FilesystemStorage::new(cache_base.to_str().unwrap());
 
-    let path = storage.prepare_cache_write(1, "public", "users");
+    let handle = storage.prepare_cache_write(1, "public", "users");
 
-    // Verify path structure: {cache_base}/{conn_id}/{schema}/{table}/{table}.parquet
-    let path_str = path.to_str().unwrap();
-    assert!(path_str.contains("/cache/1/public/users/users.parquet"));
-    assert!(path_str.ends_with("users.parquet"));
+    // Verify handle fields
+    assert_eq!(handle.connection_id, 1);
+    assert_eq!(handle.schema, "public");
+    assert_eq!(handle.table, "users");
+    assert!(!handle.version.is_empty());
+
+    // Verify path structure: {cache_base}/{conn_id}/{schema}/{table}/{version}/data.parquet
+    let path_str = handle.local_path.to_str().unwrap();
+    assert!(path_str.contains("/cache/1/public/users/"));
+    assert!(path_str.contains(&handle.version));
+    assert!(path_str.ends_with("/data.parquet"));
 }
 
 #[tokio::test]
@@ -120,22 +127,20 @@ async fn test_filesystem_finalize_cache_write_returns_url() {
 
     let storage = FilesystemStorage::new(cache_base.to_str().unwrap());
 
-    // Prepare write path
-    let write_path = storage.prepare_cache_write(1, "public", "users");
+    // Prepare write handle
+    let handle = storage.prepare_cache_write(1, "public", "users");
 
     // Create parent directories and write a test file
-    fs::create_dir_all(write_path.parent().unwrap()).unwrap();
-    fs::write(&write_path, b"test data").unwrap();
+    fs::create_dir_all(handle.local_path.parent().unwrap()).unwrap();
+    fs::write(&handle.local_path, b"test data").unwrap();
 
-    // Finalize should return the cache_url
-    let url = storage
-        .finalize_cache_write(&write_path, 1, "public", "users")
-        .await
-        .unwrap();
+    // Finalize should return the versioned directory URL
+    let url = storage.finalize_cache_write(&handle).await.unwrap();
 
-    // Should return directory URL (for ListingTable compatibility)
+    // Should return versioned directory URL (for ListingTable compatibility)
     assert!(url.starts_with("file://"));
-    assert!(url.contains("/cache/1/public/users"));
+    assert!(url.contains("/cache/1/public/users/"));
+    assert!(url.contains(&handle.version));
     assert!(!url.ends_with(".parquet")); // Should be directory, not file
 }
 
@@ -148,23 +153,20 @@ async fn test_filesystem_prepare_and_finalize_path_consistency() {
 
     let storage = FilesystemStorage::new(cache_base.to_str().unwrap());
 
-    // Prepare write path
-    let write_path = storage.prepare_cache_write(1, "public", "orders");
+    // Prepare write handle
+    let handle = storage.prepare_cache_write(1, "public", "orders");
 
     // Create parent directories and write a test file
-    fs::create_dir_all(write_path.parent().unwrap()).unwrap();
-    fs::write(&write_path, b"test data").unwrap();
+    fs::create_dir_all(handle.local_path.parent().unwrap()).unwrap();
+    fs::write(&handle.local_path, b"test data").unwrap();
 
     // Finalize and get URL
-    let url = storage
-        .finalize_cache_write(&write_path, 1, "public", "orders")
-        .await
-        .unwrap();
+    let url = storage.finalize_cache_write(&handle).await.unwrap();
 
-    // The file should be inside the directory pointed to by the URL
+    // The URL should point to the version directory (parent of the parquet file)
     let url_path = url.strip_prefix("file://").unwrap();
-    let file_parent = write_path.parent().unwrap();
+    let version_dir = handle.local_path.parent().unwrap();
 
-    assert_eq!(url_path, file_parent.to_str().unwrap());
-    assert!(write_path.exists());
+    assert_eq!(url_path, version_dir.to_str().unwrap());
+    assert!(handle.local_path.exists());
 }

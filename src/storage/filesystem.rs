@@ -5,7 +5,7 @@ use datafusion::prelude::SessionContext;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::StorageManager;
+use super::{CacheWriteHandle, StorageManager};
 
 #[derive(Debug)]
 pub struct FilesystemStorage {
@@ -98,50 +98,45 @@ impl StorageManager for FilesystemStorage {
         Ok(())
     }
 
-    fn prepare_cache_write(&self, connection_id: i32, schema: &str, table: &str) -> PathBuf {
-        // Write file INSIDE the table directory (for ListingTable compatibility)
-        self.cache_base
-            .join(connection_id.to_string())
-            .join(schema)
-            .join(table) // table directory
-            .join(format!("{}.parquet", table)) // file inside directory
-    }
-
-    fn prepare_versioned_cache_write(
+    fn prepare_cache_write(
         &self,
         connection_id: i32,
         schema: &str,
         table: &str,
-    ) -> PathBuf {
+    ) -> CacheWriteHandle {
         // Use versioned DIRECTORIES to avoid duplicate reads during grace period.
         // DataFusion's ListingTable reads all parquet files in a directory.
         // By using versioned directories with a fixed filename, we ensure only
         // the active version is read after catalog update.
         // Path: {cache_base}/{conn_id}/{schema}/{table}/{version}/data.parquet
         let version = nanoid::nanoid!(8);
-        self.cache_base
+        let local_path = self
+            .cache_base
             .join(connection_id.to_string())
             .join(schema)
             .join(table)
-            .join(version)
-            .join("data.parquet")
+            .join(&version)
+            .join("data.parquet");
+
+        CacheWriteHandle {
+            local_path,
+            version,
+            connection_id,
+            schema: schema.to_string(),
+            table: table.to_string(),
+        }
     }
 
-    async fn finalize_cache_write(
-        &self,
-        written_path: &Path,
-        _connection_id: i32,
-        _schema: &str,
-        _table: &str,
-    ) -> Result<String> {
+    async fn finalize_cache_write(&self, handle: &CacheWriteHandle) -> Result<String> {
         // For local storage, the file is already in place.
-        // Return the parent directory URL (for ListingTable compatibility).
-        // For versioned writes: written_path is {version}/data.parquet,
-        // so parent is the version directory which contains only this file.
-        let parent = written_path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Written path has no parent"))?;
-        Ok(format!("file://{}", parent.display()))
+        // Return the versioned directory URL (for ListingTable compatibility).
+        let version_dir = self
+            .cache_base
+            .join(handle.connection_id.to_string())
+            .join(&handle.schema)
+            .join(&handle.table)
+            .join(&handle.version);
+        Ok(format!("file://{}", version_dir.display()))
     }
 }
 
@@ -150,19 +145,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_versioned_cache_path_unique() {
+    fn test_cache_write_handle_unique_versions() {
         let storage = FilesystemStorage::new("/tmp/cache");
-        let path1 = storage.prepare_versioned_cache_write(1, "main", "orders");
-        let path2 = storage.prepare_versioned_cache_write(1, "main", "orders");
-        assert_ne!(path1, path2, "Versioned paths should be unique");
+        let handle1 = storage.prepare_cache_write(1, "main", "orders");
+        let handle2 = storage.prepare_cache_write(1, "main", "orders");
+        assert_ne!(
+            handle1.version, handle2.version,
+            "Versions should be unique"
+        );
+        assert_ne!(
+            handle1.local_path, handle2.local_path,
+            "Paths should be unique"
+        );
     }
 
     #[test]
-    fn test_versioned_cache_path_structure() {
-        // New structure: {cache_base}/{conn_id}/{schema}/{table}/{version}/data.parquet
+    fn test_cache_write_handle_structure() {
         let storage = FilesystemStorage::new("/tmp/cache");
-        let path = storage.prepare_versioned_cache_write(42, "public", "users");
-        let path_str = path.to_string_lossy();
+        let handle = storage.prepare_cache_write(42, "public", "users");
+        let path_str = handle.local_path.to_string_lossy();
+
+        assert_eq!(handle.connection_id, 42);
+        assert_eq!(handle.schema, "public");
+        assert_eq!(handle.table, "users");
+        assert!(!handle.version.is_empty(), "Version should not be empty");
 
         assert!(
             path_str.contains("/42/"),
@@ -173,28 +179,29 @@ mod tests {
             path_str.contains("/users/"),
             "Path should contain table directory"
         );
-        // The version is a directory, not a filename suffix
+        assert!(
+            path_str.contains(&handle.version),
+            "Path should contain version"
+        );
         assert!(
             path_str.ends_with("/data.parquet"),
-            "Path should end with /data.parquet, got: {}",
-            path_str
+            "Path should end with /data.parquet"
         );
     }
 
     #[test]
     fn test_versioned_directories_are_separate() {
-        // Verify that each version gets its own isolated directory
         let storage = FilesystemStorage::new("/tmp/cache");
-        let path1 = storage.prepare_versioned_cache_write(1, "main", "orders");
-        let path2 = storage.prepare_versioned_cache_write(1, "main", "orders");
+        let handle1 = storage.prepare_cache_write(1, "main", "orders");
+        let handle2 = storage.prepare_cache_write(1, "main", "orders");
 
         // Both should end with data.parquet
-        assert!(path1.ends_with("data.parquet"));
-        assert!(path2.ends_with("data.parquet"));
+        assert!(handle1.local_path.ends_with("data.parquet"));
+        assert!(handle2.local_path.ends_with("data.parquet"));
 
         // But their parent directories (version dirs) should be different
-        let dir1 = path1.parent().unwrap();
-        let dir2 = path2.parent().unwrap();
+        let dir1 = handle1.local_path.parent().unwrap();
+        let dir2 = handle2.local_path.parent().unwrap();
         assert_ne!(dir1, dir2, "Version directories should be different");
 
         // And both should be under the same table directory

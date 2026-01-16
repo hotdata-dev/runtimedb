@@ -104,19 +104,16 @@ pub trait CatalogManager: Debug + Send + Sync {
     /// Get connection by internal ID.
     async fn get_connection_by_id(&self, id: i32) -> Result<Option<ConnectionInfo>>;
 
-    /// Delete tables for a connection that are NOT in the provided list.
-    /// Returns the deleted TableInfo records (for cache cleanup).
-    async fn delete_stale_tables(
-        &self,
-        connection_id: i32,
-        current_tables: &[(String, String)],
-    ) -> Result<Vec<TableInfo>>;
+    // NOTE: Stale table detection (tables removed from remote source) is intentionally
+    // not implemented. The naive approach of comparing discovered vs existing tables
+    // is error-prone and doesn't handle data cleanup properly. Stale tables will
+    // remain in the catalog until a more robust solution is implemented.
 
     /// Schedule a file path for deletion after a grace period.
     async fn schedule_file_deletion(&self, path: &str, delete_after: DateTime<Utc>) -> Result<()>;
 
-    /// Get all pending file deletions that are due.
-    async fn get_due_deletions(&self) -> Result<Vec<PendingDeletion>>;
+    /// Get all pending file deletions that are due for cleanup.
+    async fn get_pending_deletions(&self) -> Result<Vec<PendingDeletion>>;
 
     /// Remove a pending deletion record after successful delete.
     async fn remove_pending_deletion(&self, id: i32) -> Result<()>;

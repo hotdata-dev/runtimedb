@@ -576,10 +576,10 @@ pub async fn refresh_handler(
             RefreshResponse::Table(result)
         }
 
-        // Data refresh: all tables in connection
+        // Data refresh: all tables in connection (or only cached tables by default)
         (Some((conn_id, external_id)), None, None, true) => {
             let result = engine
-                .refresh_connection_data(conn_id, &external_id)
+                .refresh_connection_data(conn_id, &external_id, request.include_uncached)
                 .await?;
             RefreshResponse::Connection(result)
         }

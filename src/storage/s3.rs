@@ -8,7 +8,7 @@ use object_store::{path::Path as ObjectPath, ObjectStore};
 use std::sync::Arc;
 use url::Url;
 
-use super::{S3Credentials, StorageManager};
+use super::{CacheWriteHandle, S3Credentials, StorageManager};
 
 #[derive(Debug, Clone)]
 struct S3Config {
@@ -150,76 +150,44 @@ impl StorageManager for S3Storage {
 
     fn prepare_cache_write(
         &self,
-        _connection_id: i32,
-        _schema: &str,
-        table: &str,
-    ) -> std::path::PathBuf {
-        // Temp file path - will be uploaded to correct S3 location
-        std::env::temp_dir().join(format!("{}-{}.parquet", table, uuid::Uuid::new_v4()))
-    }
-
-    fn prepare_versioned_cache_write(
-        &self,
         connection_id: i32,
         schema: &str,
         table: &str,
-    ) -> std::path::PathBuf {
+    ) -> CacheWriteHandle {
         // Use versioned DIRECTORIES to avoid duplicate reads during grace period.
         // Path structure: {temp_dir}/{conn_id}/{schema}/{table}/{version}/data.parquet
         // This matches the S3 destination structure for consistency.
         let version = nanoid::nanoid!(8);
-        std::env::temp_dir()
+        let local_path = std::env::temp_dir()
             .join(connection_id.to_string())
             .join(schema)
             .join(table)
-            .join(version)
-            .join("data.parquet")
+            .join(&version)
+            .join("data.parquet");
+
+        CacheWriteHandle {
+            local_path,
+            version,
+            connection_id,
+            schema: schema.to_string(),
+            table: table.to_string(),
+        }
     }
 
-    async fn finalize_cache_write(
-        &self,
-        written_path: &std::path::Path,
-        connection_id: i32,
-        schema: &str,
-        table: &str,
-    ) -> Result<String> {
-        let data = std::fs::read(written_path)?;
+    async fn finalize_cache_write(&self, handle: &CacheWriteHandle) -> Result<String> {
+        let data = std::fs::read(&handle.local_path)?;
 
-        // Determine if this is a versioned write by checking path structure.
-        // Versioned writes have: {temp}/{conn}/{schema}/{table}/{version}/data.parquet
-        // Non-versioned have: {temp}/{table}-{uuid}.parquet
-        let filename = written_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
-        let is_versioned = filename == "data.parquet";
-
-        let (file_url, dir_url) = if is_versioned {
-            // For versioned writes, extract version from path and create versioned S3 path
-            // Local path: {temp}/{conn}/{schema}/{table}/{version}/data.parquet
-            // S3 path: s3://bucket/cache/{conn}/{schema}/{table}/{version}/data.parquet
-            let version_dir = written_path.parent().and_then(|p| p.file_name());
-            let version = version_dir
-                .and_then(|v| v.to_str())
-                .ok_or_else(|| anyhow::anyhow!("Could not extract version from path"))?;
-
-            let versioned_dir_url = format!(
-                "s3://{}/cache/{}/{}/{}/{}",
-                self.bucket, connection_id, schema, table, version
-            );
-            let file_url = format!("{}/data.parquet", versioned_dir_url);
-            (file_url, versioned_dir_url)
-        } else {
-            // Non-versioned write: use the standard cache_url directory
-            let dir_url = self.cache_url(connection_id, schema, table);
-            let file_url = format!("{}/{}.parquet", dir_url, table);
-            (file_url, dir_url)
-        };
+        // Build S3 URL using the version from the handle
+        let versioned_dir_url = format!(
+            "s3://{}/cache/{}/{}/{}/{}",
+            self.bucket, handle.connection_id, handle.schema, handle.table, handle.version
+        );
+        let file_url = format!("{}/data.parquet", versioned_dir_url);
 
         self.write(&file_url, &data).await?;
-        std::fs::remove_file(written_path)?;
+        std::fs::remove_file(&handle.local_path)?;
 
-        Ok(dir_url) // Return directory URL for ListingTable
+        Ok(versioned_dir_url)
     }
 }
 
@@ -228,30 +196,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_versioned_cache_path_unique() {
-        // S3Storage uses temp dir for local writes before upload
-        // Create a mock S3Storage just for path generation testing
+    fn test_cache_write_handle_unique_versions() {
         let storage = S3Storage {
             bucket: "test-bucket".to_string(),
             store: Arc::new(object_store::memory::InMemory::new()),
             config: None,
         };
 
-        let path1 = storage.prepare_versioned_cache_write(1, "main", "orders");
-        let path2 = storage.prepare_versioned_cache_write(1, "main", "orders");
-        assert_ne!(path1, path2, "Versioned paths should be unique");
+        let handle1 = storage.prepare_cache_write(1, "main", "orders");
+        let handle2 = storage.prepare_cache_write(1, "main", "orders");
+        assert_ne!(
+            handle1.version, handle2.version,
+            "Versions should be unique"
+        );
+        assert_ne!(
+            handle1.local_path, handle2.local_path,
+            "Paths should be unique"
+        );
     }
 
     #[test]
-    fn test_versioned_cache_path_structure() {
+    fn test_cache_write_handle_structure() {
         let storage = S3Storage {
             bucket: "test-bucket".to_string(),
             store: Arc::new(object_store::memory::InMemory::new()),
             config: None,
         };
 
-        let path = storage.prepare_versioned_cache_write(42, "public", "users");
-        let path_str = path.to_string_lossy();
+        let handle = storage.prepare_cache_write(42, "public", "users");
+        let path_str = handle.local_path.to_string_lossy();
+
+        assert_eq!(handle.connection_id, 42);
+        assert_eq!(handle.schema, "public");
+        assert_eq!(handle.table, "users");
+        assert!(!handle.version.is_empty(), "Version should not be empty");
 
         assert!(
             path_str.contains("/42/"),
@@ -263,9 +241,12 @@ mod tests {
             "Path should contain table directory"
         );
         assert!(
+            path_str.contains(&handle.version),
+            "Path should contain version"
+        );
+        assert!(
             path_str.ends_with("/data.parquet"),
-            "Path should end with /data.parquet, got: {}",
-            path_str
+            "Path should end with /data.parquet"
         );
     }
 
@@ -277,16 +258,16 @@ mod tests {
             config: None,
         };
 
-        let path1 = storage.prepare_versioned_cache_write(1, "main", "orders");
-        let path2 = storage.prepare_versioned_cache_write(1, "main", "orders");
+        let handle1 = storage.prepare_cache_write(1, "main", "orders");
+        let handle2 = storage.prepare_cache_write(1, "main", "orders");
 
         // Both should end with data.parquet
-        assert!(path1.ends_with("data.parquet"));
-        assert!(path2.ends_with("data.parquet"));
+        assert!(handle1.local_path.ends_with("data.parquet"));
+        assert!(handle2.local_path.ends_with("data.parquet"));
 
         // But their parent directories (version dirs) should be different
-        let dir1 = path1.parent().unwrap();
-        let dir2 = path2.parent().unwrap();
+        let dir1 = handle1.local_path.parent().unwrap();
+        let dir2 = handle2.local_path.parent().unwrap();
         assert_ne!(dir1, dir2, "Version directories should be different");
 
         // And both should be under the same table directory
@@ -299,26 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_version_from_path() {
-        // Test that we can correctly extract version from the local temp path
-        // This simulates what finalize_cache_write does
-        let temp_dir = std::env::temp_dir();
-        let version = "abc12345";
-        let path = temp_dir
-            .join("1")
-            .join("public")
-            .join("users")
-            .join(version)
-            .join("data.parquet");
-
-        let version_dir = path.parent().and_then(|p| p.file_name());
-        let extracted = version_dir.and_then(|v| v.to_str()).unwrap();
-        assert_eq!(extracted, version, "Should extract version from path");
-    }
-
-    #[test]
     fn test_versioned_s3_url_format() {
-        // Test that the S3 URL is correctly formatted with version
         let bucket = "my-bucket";
         let connection_id = 42;
         let schema = "public";
@@ -342,10 +304,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_finalize_versioned_write_uses_version_in_s3_path() {
-        // This test verifies that finalize_cache_write extracts the version
-        // from the local path and uses it in the S3 destination URL.
-        // We use in-memory object store to avoid real S3 calls.
+    async fn test_finalize_cache_write_uploads_to_correct_s3_path() {
         let store = Arc::new(object_store::memory::InMemory::new());
         let storage = S3Storage {
             bucket: "test-bucket".to_string(),
@@ -353,7 +312,7 @@ mod tests {
             config: None,
         };
 
-        // Create a temp file that mimics versioned path structure
+        // Create a handle with known version
         let version = "testver1";
         let temp_base = std::env::temp_dir().join("s3_test_finalize");
         let versioned_dir = temp_base
@@ -366,11 +325,15 @@ mod tests {
         let temp_file = versioned_dir.join("data.parquet");
         std::fs::write(&temp_file, b"test parquet data").unwrap();
 
-        // Call finalize_cache_write
-        let result_url = storage
-            .finalize_cache_write(&temp_file, 1, "public", "orders")
-            .await
-            .unwrap();
+        let handle = CacheWriteHandle {
+            local_path: temp_file,
+            version: version.to_string(),
+            connection_id: 1,
+            schema: "public".to_string(),
+            table: "orders".to_string(),
+        };
+
+        let result_url = storage.finalize_cache_write(&handle).await.unwrap();
 
         // Verify the returned URL contains the version
         assert!(

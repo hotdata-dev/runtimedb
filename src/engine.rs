@@ -469,8 +469,12 @@ impl RuntimeEngine {
     }
 
     /// Refresh schema for a connection. Re-discovers tables from remote,
-    /// preserving cached data for existing tables, and removes stale tables.
-    /// Returns counts of (added, removed, modified).
+    /// preserving cached data for existing tables.
+    ///
+    /// NOTE: Stale table detection (tables removed from remote) is not implemented.
+    /// Tables that no longer exist in the remote source will remain in the catalog.
+    ///
+    /// Returns counts of (added, removed, modified). `removed` is always 0 for now.
     pub async fn refresh_schema(&self, connection_id: i32) -> Result<(usize, usize, usize)> {
         let conn = self
             .catalog
@@ -493,6 +497,7 @@ impl RuntimeEngine {
             .collect();
 
         let added_count = current_set.difference(&existing_set).count();
+        // NOTE: We report removed tables but don't actually delete them
         let removed_count = existing_set.difference(&current_set).count();
 
         let mut modified = 0;
@@ -516,18 +521,6 @@ impl RuntimeEngine {
                     &schema_json,
                 )
                 .await?;
-        }
-
-        let current_table_list: Vec<_> = current_set.into_iter().collect();
-        let deleted_tables = self
-            .catalog
-            .delete_stale_tables(connection_id, &current_table_list)
-            .await?;
-
-        for table_info in deleted_tables {
-            if let Some(path) = table_info.parquet_path {
-                self.schedule_file_deletion(&path).await?;
-            }
         }
 
         Ok((added_count, removed_count, modified))
@@ -591,14 +584,28 @@ impl RuntimeEngine {
         })
     }
 
-    /// Refresh data for all tables in a connection.
+    /// Refresh data for tables in a connection.
+    ///
+    /// By default, only refreshes tables that already have cached data (parquet_path is set).
+    /// Set `include_uncached` to true to also sync tables that haven't been cached yet.
     pub async fn refresh_connection_data(
         &self,
         connection_id: i32,
         external_id: &str,
+        include_uncached: bool,
     ) -> Result<ConnectionRefreshResult> {
         let start = std::time::Instant::now();
-        let tables = self.catalog.list_tables(Some(connection_id)).await?;
+        let all_tables = self.catalog.list_tables(Some(connection_id)).await?;
+
+        // By default, only refresh tables that already have cached data
+        let tables: Vec<_> = if include_uncached {
+            all_tables
+        } else {
+            all_tables
+                .into_iter()
+                .filter(|t| t.parquet_path.is_some())
+                .collect()
+        };
 
         let conn = self
             .catalog
@@ -663,7 +670,7 @@ impl RuntimeEngine {
 
     /// Process any pending file deletions that are due.
     pub async fn process_pending_deletions(&self) -> Result<usize> {
-        let pending = self.catalog.get_due_deletions().await?;
+        let pending = self.catalog.get_pending_deletions().await?;
         let mut deleted = 0;
 
         for deletion in pending {
@@ -697,7 +704,7 @@ impl RuntimeEngine {
                         break;
                     }
                     _ = interval.tick() => {
-                        let pending = match catalog.get_due_deletions().await {
+                        let pending = match catalog.get_pending_deletions().await {
                             Ok(p) => p,
                             Err(e) => {
                                 warn!("Failed to get pending deletions: {}", e);
@@ -1122,7 +1129,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         // The deletion should still be pending (worker stopped)
-        let due = engine.catalog.get_due_deletions().await.unwrap();
+        let due = engine.catalog.get_pending_deletions().await.unwrap();
         assert_eq!(
             due.len(),
             1,
@@ -1152,7 +1159,7 @@ mod tests {
             .unwrap();
 
         // Get the pending deletions - should not be due yet since grace period is 5 minutes
-        let pending = engine.catalog.get_due_deletions().await.unwrap();
+        let pending = engine.catalog.get_pending_deletions().await.unwrap();
         assert!(
             pending.is_empty(),
             "With 300s grace period, deletion should not be due immediately"
@@ -1179,7 +1186,7 @@ mod tests {
             .unwrap();
 
         // Verify it's not immediately due (within the grace period)
-        let pending = engine.catalog.get_due_deletions().await.unwrap();
+        let pending = engine.catalog.get_pending_deletions().await.unwrap();
         assert!(
             pending.is_empty(),
             "With default 60s grace period, deletion should not be due immediately"

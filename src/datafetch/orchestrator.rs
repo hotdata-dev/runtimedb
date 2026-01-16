@@ -43,12 +43,12 @@ impl FetchOrchestrator {
         table_name: &str,
     ) -> Result<(String, usize)> {
         // Prepare cache write location
-        let write_path = self
+        let handle = self
             .storage
             .prepare_cache_write(connection_id, schema_name, table_name);
 
         // Create writer
-        let mut writer = StreamingParquetWriter::new(write_path.clone());
+        let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
 
         // Fetch the table data into writer
         self.fetcher
@@ -71,7 +71,7 @@ impl FetchOrchestrator {
         // Finalize cache write (uploads to S3 if needed, returns URL)
         let parquet_url = self
             .storage
-            .finalize_cache_write(&write_path, connection_id, schema_name, table_name)
+            .finalize_cache_write(&handle)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to finalize cache write: {}", e))?;
 
@@ -116,13 +116,13 @@ impl FetchOrchestrator {
             .await?;
         let old_path = old_info.as_ref().and_then(|i| i.parquet_path.clone());
 
-        // 2. Generate versioned new path
-        let new_local_path =
-            self.storage
-                .prepare_versioned_cache_write(connection_id, schema_name, table_name);
+        // 2. Prepare cache write (generates versioned path)
+        let handle = self
+            .storage
+            .prepare_cache_write(connection_id, schema_name, table_name);
 
         // 3. Fetch and write to new path
-        let mut writer = StreamingParquetWriter::new(new_local_path.clone());
+        let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
         self.fetcher
             .fetch_table(
                 source,
@@ -143,7 +143,7 @@ impl FetchOrchestrator {
         // 5. Finalize (upload to S3 if needed)
         let new_url = self
             .storage
-            .finalize_cache_write(&new_local_path, connection_id, schema_name, table_name)
+            .finalize_cache_write(&handle)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to finalize cache write: {}", e))?;
 
@@ -205,7 +205,7 @@ mod tests {
     };
     use crate::datafetch::{ColumnMetadata, DataFetchError, DataFetcher, TableMetadata};
     use crate::secrets::{SecretMetadata, SecretStatus};
-    use crate::storage::StorageManager;
+    use crate::storage::{CacheWriteHandle, StorageManager};
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use datafusion::arrow::datatypes::DataType as ArrowDataType;
@@ -343,40 +343,38 @@ mod tests {
             Ok(())
         }
 
-        fn prepare_cache_write(&self, connection_id: i32, schema: &str, table: &str) -> PathBuf {
-            self.base_path
-                .join(connection_id.to_string())
-                .join(schema)
-                .join(table)
-                .join(format!("{}.parquet", table))
-        }
-
-        fn prepare_versioned_cache_write(
+        fn prepare_cache_write(
             &self,
             connection_id: i32,
             schema: &str,
             table: &str,
-        ) -> PathBuf {
-            let version = self.version_counter.fetch_add(1, Ordering::SeqCst);
-            self.base_path
+        ) -> CacheWriteHandle {
+            let version = format!("v{}", self.version_counter.fetch_add(1, Ordering::SeqCst));
+            let local_path = self
+                .base_path
                 .join(connection_id.to_string())
                 .join(schema)
                 .join(table)
-                .join(format!("v{}", version))
-                .join("data.parquet")
+                .join(&version)
+                .join("data.parquet");
+
+            CacheWriteHandle {
+                local_path,
+                version,
+                connection_id,
+                schema: schema.to_string(),
+                table: table.to_string(),
+            }
         }
 
-        async fn finalize_cache_write(
-            &self,
-            written_path: &std::path::Path,
-            _connection_id: i32,
-            _schema: &str,
-            _table: &str,
-        ) -> Result<String> {
-            let parent = written_path
-                .parent()
-                .ok_or_else(|| anyhow::anyhow!("No parent"))?;
-            Ok(format!("file://{}", parent.display()))
+        async fn finalize_cache_write(&self, handle: &CacheWriteHandle) -> Result<String> {
+            let version_dir = self
+                .base_path
+                .join(handle.connection_id.to_string())
+                .join(&handle.schema)
+                .join(&handle.table)
+                .join(&handle.version);
+            Ok(format!("file://{}", version_dir.display()))
         }
     }
 
@@ -509,14 +507,6 @@ mod tests {
             Ok(None)
         }
 
-        async fn delete_stale_tables(
-            &self,
-            _connection_id: i32,
-            _current_tables: &[(String, String)],
-        ) -> Result<Vec<TableInfo>> {
-            Ok(vec![])
-        }
-
         async fn schedule_file_deletion(
             &self,
             _path: &str,
@@ -525,7 +515,7 @@ mod tests {
             Ok(())
         }
 
-        async fn get_due_deletions(&self) -> Result<Vec<PendingDeletion>> {
+        async fn get_pending_deletions(&self) -> Result<Vec<PendingDeletion>> {
             Ok(vec![])
         }
 

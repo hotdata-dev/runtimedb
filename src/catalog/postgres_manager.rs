@@ -399,16 +399,6 @@ impl CatalogManager for PostgresCatalogManager {
         self.backend.get_connection_by_id(id).await
     }
 
-    async fn delete_stale_tables(
-        &self,
-        connection_id: i32,
-        current_tables: &[(String, String)],
-    ) -> Result<Vec<TableInfo>> {
-        self.backend
-            .delete_stale_tables(connection_id, current_tables)
-            .await
-    }
-
     async fn schedule_file_deletion(&self, path: &str, delete_after: DateTime<Utc>) -> Result<()> {
         // Use native TIMESTAMPTZ binding for Postgres (not RFC3339 string)
         // ON CONFLICT DO NOTHING silently ignores duplicates when path already exists
@@ -422,7 +412,7 @@ impl CatalogManager for PostgresCatalogManager {
         Ok(())
     }
 
-    async fn get_due_deletions(&self) -> Result<Vec<PendingDeletion>> {
+    async fn get_pending_deletions(&self) -> Result<Vec<PendingDeletion>> {
         // Use native TIMESTAMPTZ comparison for Postgres (not RFC3339 string)
         sqlx::query_as(
             "SELECT id, path, delete_after FROM pending_deletions WHERE delete_after <= $1",

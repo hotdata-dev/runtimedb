@@ -169,6 +169,10 @@ pub struct RefreshRequest {
     pub table_name: Option<String>,
     #[serde(default)]
     pub data: bool,
+    /// When true, refresh all tables including those without cached data.
+    /// Default is false: only refresh tables that already have parquet files.
+    #[serde(default)]
+    pub include_uncached: bool,
 }
 
 /// Response for schema refresh operations
