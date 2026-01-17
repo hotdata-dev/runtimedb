@@ -51,9 +51,11 @@ async fn test_query_returns_result_id() -> Result<()> {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
     let json: serde_json::Value = serde_json::from_slice(&body)?;
 
-    // Should have result_id
+    // Should have result_id (not null when persistence succeeds)
     assert!(json["result_id"].is_string());
     assert!(!json["result_id"].as_str().unwrap().is_empty());
+    // Should not have warning
+    assert!(json.get("warning").is_none());
 
     // Should have expected data
     assert_eq!(json["row_count"], 1);

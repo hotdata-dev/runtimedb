@@ -48,12 +48,12 @@ pub async fn query_handler(
     let schema = &result.schema;
 
     // Persist result and get ID
-    let result_id = match persist_query_result(&engine, schema, batches).await {
-        Ok(id) => id,
+    let (result_id, warning) = match persist_query_result(&engine, schema, batches).await {
+        Ok(id) => (Some(id), None),
         Err(e) => {
             // Log error but don't fail the request - result persistence is best-effort
             warn!("Failed to persist query result: {}", e);
-            nanoid::nanoid!() // Generate ID anyway so response is consistent
+            (None, Some(format!("Result not persisted: {}", e)))
         }
     };
 
@@ -67,6 +67,7 @@ pub async fn query_handler(
         rows,
         row_count,
         execution_time_ms,
+        warning,
     }))
 }
 
@@ -747,10 +748,11 @@ pub async fn get_result_handler(
     let execution_time_ms = start.elapsed().as_millis() as u64;
 
     Ok(Json(QueryResponse {
-        result_id: result.id,
+        result_id: Some(result.id),
         columns,
         rows,
         row_count,
         execution_time_ms,
+        warning: None,
     }))
 }

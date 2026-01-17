@@ -11,11 +11,18 @@ pub struct QueryRequest {
 /// Response body for POST /query and GET /results/{id}
 #[derive(Debug, Serialize)]
 pub struct QueryResponse {
-    pub result_id: String,
+    /// Unique identifier for retrieving this result via GET /results/{id}.
+    /// Null if persistence failed (see `warning` field for details).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_id: Option<String>,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<serde_json::Value>>,
     pub row_count: usize,
     pub execution_time_ms: u64,
+    /// Warning message if result persistence failed.
+    /// When present, `result_id` will be null and the result cannot be retrieved later.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// Column metadata for API responses
