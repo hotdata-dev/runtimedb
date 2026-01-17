@@ -13,7 +13,6 @@ pub struct QueryRequest {
 pub struct QueryResponse {
     /// Unique identifier for retrieving this result via GET /results/{id}.
     /// Null if persistence failed (see `warning` field for details).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub result_id: Option<String>,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<serde_json::Value>>,

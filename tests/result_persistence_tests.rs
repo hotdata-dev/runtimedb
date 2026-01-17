@@ -262,3 +262,73 @@ async fn test_empty_result_returns_id() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_persistence_failure_returns_null_result_id_with_warning() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+
+    let app = AppServer::new(engine);
+
+    // Make the cache directory read-only to force persistence failure
+    let cache_dir = temp_dir.path().join("cache");
+    std::fs::create_dir_all(&cache_dir)?;
+    let mut perms = std::fs::metadata(&cache_dir)?.permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&cache_dir, perms)?;
+
+    // Query should still succeed, but with warning
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"sql": "SELECT 1 as num"}).to_string()))?,
+        )
+        .await?;
+
+    // Restore permissions for cleanup
+    let mut perms = std::fs::metadata(&cache_dir)?.permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(&cache_dir, perms)?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // result_id should be null (not missing)
+    assert!(
+        json.get("result_id").is_some(),
+        "result_id field should be present"
+    );
+    assert!(
+        json["result_id"].is_null(),
+        "result_id should be null on persistence failure"
+    );
+
+    // Should have warning explaining the failure
+    assert!(
+        json.get("warning").is_some(),
+        "warning field should be present"
+    );
+    assert!(
+        json["warning"].as_str().unwrap().contains("not persisted"),
+        "warning should explain persistence failure"
+    );
+
+    // Should still have the query results
+    assert_eq!(json["row_count"], 1);
+    assert_eq!(json["rows"][0][0], 1);
+
+    Ok(())
+}
