@@ -106,7 +106,7 @@ where
         const MAX_RETRIES: usize = 3;
 
         for attempt in 0..MAX_RETRIES {
-            let external_id = crate::catalog::manager::generate_connection_id();
+            let external_id = crate::id::generate_connection_id();
             let insert_sql = format!(
                 "INSERT INTO connections (external_id, name, source_type, config_json) VALUES ({}, {}, {}, {})",
                 DB::bind_param(1),
