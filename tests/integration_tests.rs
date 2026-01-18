@@ -11,7 +11,7 @@ use axum::{
     Router,
 };
 use runtimedb::http::app_server::{
-    AppServer, PATH_CONNECTIONS, PATH_INFORMATION_SCHEMA, PATH_QUERY,
+    AppServer, PATH_CONNECTIONS, PATH_INFORMATION_SCHEMA, PATH_QUERY, PATH_RESULT, PATH_RESULTS,
 };
 use runtimedb::source::Source;
 use runtimedb::RuntimeEngine;
@@ -28,6 +28,7 @@ use tower::util::ServiceExt;
 struct QueryResult {
     row_count: usize,
     columns: Vec<String>,
+    result_id: Option<String>,
 }
 
 impl QueryResult {
@@ -47,7 +48,11 @@ impl QueryResult {
             None => (vec![], 0),
         };
 
-        Self { row_count, columns }
+        Self {
+            row_count,
+            columns,
+            result_id: None, // Engine doesn't return result_id directly
+        }
     }
 
     fn from_api(json: &serde_json::Value) -> Self {
@@ -61,8 +66,13 @@ impl QueryResult {
             .unwrap_or_default();
 
         let row_count = json["row_count"].as_u64().unwrap_or(0) as usize;
+        let result_id = json["result_id"].as_str().map(String::from);
 
-        Self { row_count, columns }
+        Self {
+            row_count,
+            columns,
+            result_id,
+        }
     }
 
     fn assert_row_count(&self, expected: usize) {
@@ -76,6 +86,14 @@ impl QueryResult {
     fn assert_columns(&self, expected: &[&str]) {
         let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(self.columns, expected, "Column mismatch");
+    }
+
+    fn assert_has_result_id(&self) {
+        assert!(self.result_id.is_some(), "Expected result_id to be present");
+    }
+
+    fn get_result_id(&self) -> Option<&str> {
+        self.result_id.as_deref()
     }
 }
 
@@ -208,6 +226,43 @@ impl TablesResult {
     }
 }
 
+/// Result list from GET /results
+struct ResultsListResult {
+    count: usize,
+    #[allow(dead_code)]
+    has_more: bool,
+    result_ids: Vec<String>,
+}
+
+impl ResultsListResult {
+    fn from_api(json: &serde_json::Value) -> Self {
+        let results = json["results"].as_array();
+        Self {
+            count: json["count"].as_u64().unwrap_or(0) as usize,
+            has_more: json["has_more"].as_bool().unwrap_or(false),
+            result_ids: results
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|r| r["id"].as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    fn assert_count(&self, expected: usize) {
+        assert_eq!(self.count, expected, "Expected {} results", expected);
+    }
+
+    fn assert_contains(&self, result_id: &str) {
+        assert!(
+            self.result_ids.contains(&result_id.to_string()),
+            "Result '{}' not found in list",
+            result_id
+        );
+    }
+}
+
 /// Single connection details from get operations.
 #[allow(dead_code)]
 struct ConnectionDetails {
@@ -257,6 +312,10 @@ trait TestExecutor: Send + Sync {
     async fn delete_connection(&self, identifier: &str) -> bool;
     async fn purge_connection_cache(&self, identifier: &str) -> bool;
     async fn purge_table_cache(&self, identifier: &str, schema: &str, table: &str) -> bool;
+
+    // Result persistence operations (API-only for now)
+    async fn get_result(&self, result_id: &str) -> Option<QueryResult>;
+    async fn list_results(&self) -> ResultsListResult;
 }
 
 /// Engine-based test executor.
@@ -320,6 +379,21 @@ impl TestExecutor for EngineExecutor {
             .purge_table(identifier, schema, table)
             .await
             .is_ok()
+    }
+
+    async fn get_result(&self, _result_id: &str) -> Option<QueryResult> {
+        // Engine doesn't expose result persistence directly in the same way as API
+        // For integration tests, we only test via API
+        None
+    }
+
+    async fn list_results(&self) -> ResultsListResult {
+        // Engine doesn't expose result listing directly
+        ResultsListResult {
+            count: 0,
+            has_more: false,
+            result_ids: vec![],
+        }
     }
 }
 
@@ -557,6 +631,53 @@ impl TestExecutor for ApiExecutor {
             .await
             .unwrap();
         response.status() == StatusCode::NO_CONTENT
+    }
+
+    async fn get_result(&self, result_id: &str) -> Option<QueryResult> {
+        let uri = PATH_RESULT.replace("{id}", result_id);
+        let response = self
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        if response.status() != StatusCode::OK {
+            return None;
+        }
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        Some(QueryResult::from_api(
+            &serde_json::from_slice(&body).unwrap(),
+        ))
+    }
+
+    async fn list_results(&self) -> ResultsListResult {
+        let response = self
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(PATH_RESULTS)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        ResultsListResult::from_api(&serde_json::from_slice(&body).unwrap())
     }
 }
 
@@ -1203,5 +1324,102 @@ mod error_tests {
             !purged,
             "Purge of nonexistent table should return false/404"
         );
+    }
+}
+
+// ============================================================================
+// Tests - Result Persistence
+// ============================================================================
+
+mod result_persistence_tests {
+    use super::*;
+
+    /// Test the full flow: query -> get result_id -> retrieve result -> list results
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_api_result_persistence_flow() {
+        let (_dir, source) = fixtures::duckdb_standard();
+        let harness = TestHarness::new().await;
+        let api = harness.api();
+
+        // Connect
+        let _conn_id = api.connect("test_conn", &source).await;
+
+        // Execute query and verify we get a result_id
+        let query_result = api.query(&queries::select_orders("test_conn")).await;
+        query_result.assert_row_count(4);
+        query_result.assert_has_result_id();
+
+        let result_id = query_result.get_result_id().unwrap();
+
+        // Verify result_id format (rslt prefix + 26-char nanoid = 30 chars)
+        assert!(
+            result_id.starts_with("rslt"),
+            "result_id should start with 'rslt'"
+        );
+        assert_eq!(result_id.len(), 30, "result_id should be 30 characters");
+
+        // Retrieve the result by ID
+        let retrieved = api.get_result(result_id).await;
+        assert!(
+            retrieved.is_some(),
+            "Should be able to retrieve result by ID"
+        );
+
+        let retrieved = retrieved.unwrap();
+        retrieved.assert_row_count(4);
+        retrieved.assert_columns(&["order_id", "customer_name", "amount"]);
+
+        // Verify the result appears in the list
+        let results_list = api.list_results().await;
+        results_list.assert_count(1);
+        results_list.assert_contains(result_id);
+    }
+
+    /// Test that multiple queries create separate results
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_api_multiple_queries_create_separate_results() {
+        let (_dir, source) = fixtures::duckdb_standard();
+        let harness = TestHarness::new().await;
+        let api = harness.api();
+
+        // Connect
+        let _conn_id = api.connect("test_conn", &source).await;
+
+        // Execute first query
+        let result1 = api.query(&queries::select_orders("test_conn")).await;
+        result1.assert_has_result_id();
+        let id1 = result1.get_result_id().unwrap().to_string();
+
+        // Execute second query (aggregation)
+        let result2 = api.query(&queries::count_paid_orders("test_conn")).await;
+        result2.assert_has_result_id();
+        let id2 = result2.get_result_id().unwrap().to_string();
+
+        // IDs should be different
+        assert_ne!(id1, id2, "Each query should get a unique result_id");
+
+        // Both should be in the list
+        let results_list = api.list_results().await;
+        results_list.assert_count(2);
+        results_list.assert_contains(&id1);
+        results_list.assert_contains(&id2);
+
+        // Both should be retrievable
+        let retrieved1 = api.get_result(&id1).await;
+        assert!(retrieved1.is_some());
+        retrieved1.unwrap().assert_row_count(4);
+
+        let retrieved2 = api.get_result(&id2).await;
+        assert!(retrieved2.is_some());
+        retrieved2.unwrap().assert_row_count(1);
+    }
+
+    /// Test that non-existent result returns None
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_api_get_nonexistent_result() {
+        let harness = TestHarness::new().await;
+
+        let result = harness.api().get_result("rslt_nonexistent_id_12345").await;
+        assert!(result.is_none(), "Non-existent result should return None");
     }
 }
