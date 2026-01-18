@@ -1,6 +1,6 @@
 use crate::catalog::backend::CatalogBackend;
 use crate::catalog::manager::{
-    CatalogManager, ConnectionInfo, OptimisticLock, PendingDeletion, TableInfo,
+    CatalogManager, ConnectionInfo, OptimisticLock, PendingDeletion, QueryResult, TableInfo,
 };
 use crate::catalog::migrations::{
     run_migrations, wrap_migration_sql, CatalogMigrations, Migration, SQLITE_MIGRATIONS,
@@ -362,6 +362,52 @@ impl CatalogManager for SqliteCatalogManager {
 
     async fn remove_pending_deletion(&self, id: i32) -> Result<()> {
         self.backend.remove_pending_deletion(id).await
+    }
+
+    async fn store_result(&self, result: &QueryResult) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO results (id, parquet_path, created_at)
+             VALUES (?, ?, ?)",
+        )
+        .bind(&result.id)
+        .bind(&result.parquet_path)
+        .bind(result.created_at)
+        .execute(self.backend.pool())
+        .await?;
+        Ok(())
+    }
+
+    async fn get_result(&self, id: &str) -> Result<Option<QueryResult>> {
+        let result = sqlx::query_as::<_, QueryResult>(
+            "SELECT id, parquet_path, created_at FROM results WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(self.backend.pool())
+        .await?;
+        Ok(result)
+    }
+
+    async fn list_results(&self, limit: usize, offset: usize) -> Result<(Vec<QueryResult>, bool)> {
+        // Fetch one extra to determine if there are more results
+        let fetch_limit = limit + 1;
+        let results = sqlx::query_as::<_, QueryResult>(
+            "SELECT id, parquet_path, created_at FROM results
+             ORDER BY created_at DESC
+             LIMIT ? OFFSET ?",
+        )
+        .bind(fetch_limit as i64)
+        .bind(offset as i64)
+        .fetch_all(self.backend.pool())
+        .await?;
+
+        let has_more = results.len() > limit;
+        let results = if has_more {
+            results.into_iter().take(limit).collect()
+        } else {
+            results
+        };
+
+        Ok((results, has_more))
     }
 }
 

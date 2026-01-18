@@ -594,6 +594,22 @@ mod tests {
         async fn delete_encrypted_secret_value(&self, _name: &str) -> Result<bool> {
             Ok(true)
         }
+
+        async fn store_result(&self, _result: &crate::catalog::QueryResult) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get_result(&self, _id: &str) -> Result<Option<crate::catalog::QueryResult>> {
+            Ok(None)
+        }
+
+        async fn list_results(
+            &self,
+            _limit: usize,
+            _offset: usize,
+        ) -> Result<(Vec<crate::catalog::QueryResult>, bool)> {
+            Ok((vec![], false))
+        }
     }
 
     /// Create a test SecretManager

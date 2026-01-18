@@ -8,13 +8,41 @@ pub struct QueryRequest {
     pub sql: String,
 }
 
-/// Response body for POST /query
+/// Response body for POST /query and GET /results/{id}
 #[derive(Debug, Serialize)]
 pub struct QueryResponse {
+    /// Unique identifier for retrieving this result via GET /results/{id}.
+    /// Null if persistence failed (see `warning` field for details).
+    pub result_id: Option<String>,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<serde_json::Value>>,
     pub row_count: usize,
     pub execution_time_ms: u64,
+    /// Warning message if result persistence failed.
+    /// When present, `result_id` will be null and the result cannot be retrieved later.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+/// Summary of a persisted query result for listing
+#[derive(Debug, Serialize)]
+pub struct ResultInfo {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Response body for GET /results
+#[derive(Debug, Serialize)]
+pub struct ListResultsResponse {
+    pub results: Vec<ResultInfo>,
+    /// Number of results returned in this response
+    pub count: usize,
+    /// Pagination offset used for this request
+    pub offset: usize,
+    /// Limit used for this request
+    pub limit: usize,
+    /// Whether there are more results available after this page
+    pub has_more: bool,
 }
 
 /// Column metadata for API responses

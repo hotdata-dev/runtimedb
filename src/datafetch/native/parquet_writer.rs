@@ -182,6 +182,40 @@ mod tests {
     }
 
     #[test]
+    fn test_schema_only_no_batches_written() {
+        // Tests the case where init() is called but no batches are written before close().
+        // This can happen when DataFusion returns an empty Vec<RecordBatch>.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("schema_only.parquet");
+
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, true),
+        ]);
+
+        let mut writer = StreamingParquetWriter::new(path.clone());
+        writer.init(&schema).unwrap();
+
+        // Close without writing any batches
+        let (result_path, row_count) = writer.close().unwrap();
+        assert_eq!(row_count, 0);
+        assert!(result_path.exists());
+
+        // Verify the parquet file is readable and has the correct schema
+        use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
+        use std::fs::File;
+
+        let file = File::open(&path).unwrap();
+        let reader = SerializedFileReader::new(file).unwrap();
+        let parquet_schema = reader.metadata().file_metadata().schema_descr();
+
+        // Should have 2 columns matching our schema
+        assert_eq!(parquet_schema.num_columns(), 2);
+        assert_eq!(parquet_schema.column(0).name(), "id");
+        assert_eq!(parquet_schema.column(1).name(), "name");
+    }
+
+    #[test]
     fn test_compression_applied() {
         use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
         use std::fs::File;

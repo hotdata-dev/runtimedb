@@ -1,4 +1,7 @@
-use crate::catalog::{CatalogManager, ConnectionInfo, SqliteCatalogManager, TableInfo};
+use crate::catalog::{
+    CatalogManager, ConnectionInfo, QueryResult, SqliteCatalogManager, TableInfo,
+};
+use crate::datafetch::native::StreamingParquetWriter;
 use crate::datafetch::{FetchOrchestrator, NativeFetcher};
 use crate::datafusion::{
     block_on, InformationSchemaProvider, RuntimeCatalogProvider, RuntimeDbCatalogProvider,
@@ -12,6 +15,7 @@ use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
 use anyhow::Result;
 use chrono::Utc;
+use datafusion::arrow::datatypes::Schema;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::CatalogProvider;
 use datafusion::prelude::*;
@@ -41,9 +45,19 @@ const DEFAULT_PARALLEL_REFRESH_COUNT: usize = 4;
 /// Default interval (in seconds) between deletion worker runs.
 const DEFAULT_DELETION_WORKER_INTERVAL_SECS: u64 = 30;
 
+/// Connection ID used for internal runtimedb storage (results, etc.)
+const INTERNAL_CONNECTION_ID: i32 = 0;
+
+/// Result of a query execution with optional persistence.
 pub struct QueryResponse {
+    pub schema: Arc<Schema>,
     pub results: Vec<RecordBatch>,
     pub execution_time: Duration,
+}
+
+/// Internal result from writing parquet file, containing the handle for finalization.
+struct ParquetWriteResult {
+    handle: crate::storage::CacheWriteHandle,
 }
 
 /// The main query engine that manages connections, catalogs, and query execution.
@@ -230,6 +244,11 @@ impl RuntimeEngine {
         &self.storage
     }
 
+    /// Get a reference to the DataFusion session context.
+    pub fn session_context(&self) -> &SessionContext {
+        &self.df_ctx
+    }
+
     /// Get a reference to the secret manager.
     pub fn secret_manager(&self) -> &Arc<SecretManager> {
         &self.secret_manager
@@ -329,6 +348,7 @@ impl RuntimeEngine {
             error!("Error executing query: {}", e);
             e
         })?;
+        let schema = Arc::new(Schema::from(df.schema()));
         let results = df.collect().await.map_err(|e| {
             error!("Error getting query result: {}", e);
             e
@@ -337,9 +357,115 @@ impl RuntimeEngine {
         info!("Results available");
 
         Ok(QueryResponse {
+            schema,
             execution_time: start.elapsed(),
             results,
         })
+    }
+
+    /// Persist query results to storage and catalog.
+    ///
+    /// Returns the result ID on success, or an error if persistence fails.
+    /// This is a best-effort operation - callers should handle errors gracefully
+    /// since the query results are still valid even if persistence fails.
+    pub async fn persist_result(
+        &self,
+        schema: &Arc<Schema>,
+        batches: &[RecordBatch],
+    ) -> Result<String> {
+        let result_id = format!("rslt{}", nanoid::nanoid!(26));
+
+        // Write to parquet
+        let parquet_path = self.write_results_to_parquet(&result_id, schema, batches)?;
+
+        // Finalize (uploads to S3 if needed) and get directory URL
+        let dir_url = self
+            .storage
+            .finalize_cache_write(&parquet_path.handle)
+            .await?;
+
+        // Directory URL already includes the version subdirectory, and the file is data.parquet
+        let file_url = format!("{}/data.parquet", dir_url);
+
+        // Store in catalog
+        let query_result = QueryResult {
+            id: result_id.clone(),
+            parquet_path: file_url,
+            created_at: Utc::now(),
+        };
+
+        self.catalog.store_result(&query_result).await?;
+
+        Ok(result_id)
+    }
+
+    /// Retrieve a persisted query result by ID.
+    ///
+    /// Returns the schema and record batches for the result, or None if not found.
+    pub async fn get_result(&self, id: &str) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>> {
+        // Look up result in catalog
+        let result = match self.catalog.get_result(id).await? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        // Load results from parquet
+        let df = self
+            .df_ctx
+            .read_parquet(
+                &result.parquet_path,
+                datafusion::prelude::ParquetReadOptions::default(),
+            )
+            .await?;
+
+        let schema = Arc::new(Schema::from(df.schema()));
+        let batches = df.collect().await?;
+
+        Ok(Some((schema, batches)))
+    }
+
+    /// List persisted query results with pagination.
+    ///
+    /// Returns results ordered by creation time (newest first).
+    /// The `has_more` flag indicates if there are additional results beyond this page.
+    pub async fn list_results(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<crate::catalog::QueryResult>, bool)> {
+        self.catalog.list_results(limit, offset).await
+    }
+
+    /// Write result batches to a parquet file.
+    ///
+    /// Note: Empty results are persisted with schema only. This ensures GET /results/{id}
+    /// works for all result IDs returned by POST /query. A future optimization could avoid
+    /// persisting empty results entirely if storage space becomes a concern.
+    fn write_results_to_parquet(
+        &self,
+        result_id: &str,
+        schema: &Arc<Schema>,
+        batches: &[RecordBatch],
+    ) -> Result<ParquetWriteResult> {
+        // Prepare write location - using result_id as both schema and table
+        // This creates path: {base}/0/runtimedb_results/{result_id}/{version}/data.parquet
+        let handle = self.storage.prepare_cache_write(
+            INTERNAL_CONNECTION_ID,
+            "runtimedb_results",
+            result_id,
+        );
+
+        // Write parquet file
+        let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
+        writer.init(schema)?;
+
+        for batch in batches {
+            writer.write_batch(batch)?;
+        }
+
+        writer.close()?;
+
+        Ok(ParquetWriteResult { handle })
     }
 
     /// Purge all cached data for a connection (clears parquet files and resets sync state).

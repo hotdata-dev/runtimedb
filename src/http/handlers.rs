@@ -3,9 +3,10 @@ use crate::http::error::ApiError;
 use crate::http::models::{
     ColumnInfo, ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse,
     CreateSecretRequest, CreateSecretResponse, DiscoveryStatus, GetConnectionResponse,
-    GetSecretResponse, InformationSchemaResponse, ListConnectionsResponse, ListSecretsResponse,
-    QueryRequest, QueryResponse, RefreshRequest, RefreshResponse, SchemaRefreshResult,
-    SecretMetadataResponse, TableInfo, UpdateSecretRequest, UpdateSecretResponse,
+    GetSecretResponse, InformationSchemaResponse, ListConnectionsResponse, ListResultsResponse,
+    ListSecretsResponse, QueryRequest, QueryResponse, RefreshRequest, RefreshResponse, ResultInfo,
+    SchemaRefreshResult, SecretMetadataResponse, TableInfo, UpdateSecretRequest,
+    UpdateSecretResponse,
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
 use crate::source::Source;
@@ -15,11 +16,13 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use datafusion::arrow::datatypes::Schema;
+use datafusion::arrow::record_batch::RecordBatch;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::error;
+use tracing::{error, warn};
 
 /// Handler for POST /query
 pub async fn query_handler(
@@ -36,26 +39,45 @@ pub async fn query_handler(
     let result = engine.execute_query(&request.sql).await?;
     let execution_time_ms = start.elapsed().as_millis() as u64;
 
-    // Convert arrow batches to JSON
     let batches = &result.results;
+    let schema = &result.schema;
 
-    // Get column names from schema
-    let columns: Vec<String> = if let Some(batch) = batches.first() {
-        batch
-            .schema()
-            .fields()
-            .iter()
-            .map(|f| f.name().clone())
-            .collect()
-    } else {
-        Vec::new()
+    // Persist result and get ID (best-effort - don't fail query on persistence error)
+    // todo: this likely should be entirely rolled into the engine (e.g. execute_query_and_persist(..)
+    let (result_id, warning) = match engine.persist_result(schema, batches).await {
+        Ok(id) => (Some(id), None),
+        Err(e) => {
+            warn!("Failed to persist query result: {}", e);
+            (None, Some(format!("Result not persisted: {}", e)))
+        }
     };
+
+    // Serialize results for HTTP response
+    let (columns, rows) = serialize_batches(schema, batches)?;
+    let row_count = rows.len();
+
+    Ok(Json(QueryResponse {
+        result_id,
+        columns,
+        rows,
+        row_count,
+        execution_time_ms,
+        warning,
+    }))
+}
+
+/// Serialize record batches to columns and rows for JSON response.
+fn serialize_batches(
+    schema: &Arc<Schema>,
+    batches: &[RecordBatch],
+) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>), ApiError> {
+    // Get column names from schema
+    let columns: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
 
     // Convert rows to JSON values
     let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
 
     for batch in batches {
-        // Create encoders once per batch (one per column)
         let schema = batch.schema();
         let mut encoders: Vec<_> = batch
             .columns()
@@ -65,7 +87,6 @@ pub async fn query_handler(
             .collect::<Result<_, _>>()
             .map_err(|e| ApiError::internal_error(format!("Failed to create encoder: {}", e)))?;
 
-        // Process all rows using the pre-created encoders
         for row_idx in 0..batch.num_rows() {
             let row_values: Vec<serde_json::Value> = encoders
                 .iter_mut()
@@ -75,14 +96,7 @@ pub async fn query_handler(
         }
     }
 
-    let row_count = rows.len();
-
-    Ok(Json(QueryResponse {
-        columns,
-        rows,
-        row_count,
-        execution_time_ms,
-    }))
+    Ok((columns, rows))
 }
 
 /// Handler for GET /information_schema
@@ -610,4 +624,81 @@ pub async fn refresh_handler(
     };
 
     Ok(Json(response))
+}
+
+/// Default limit for listing results
+const DEFAULT_RESULTS_LIMIT: usize = 100;
+
+/// Maximum limit for listing results
+const MAX_RESULTS_LIMIT: usize = 1000;
+
+/// Query parameters for listing results
+#[derive(Debug, Deserialize)]
+pub struct ListResultsParams {
+    /// Maximum number of results to return (default: 100, max: 1000)
+    pub limit: Option<usize>,
+    /// Offset for pagination (default: 0)
+    pub offset: Option<usize>,
+}
+
+/// Handler for GET /results
+pub async fn list_results_handler(
+    State(engine): State<Arc<RuntimeEngine>>,
+    QueryParams(params): QueryParams<ListResultsParams>,
+) -> Result<Json<ListResultsResponse>, ApiError> {
+    let limit = params
+        .limit
+        .unwrap_or(DEFAULT_RESULTS_LIMIT)
+        .min(MAX_RESULTS_LIMIT);
+    let offset = params.offset.unwrap_or(0);
+
+    let (results, has_more) = engine
+        .list_results(limit, offset)
+        .await
+        .map_err(|e| ApiError::internal_error(format!("Failed to list results: {}", e)))?;
+
+    let count = results.len();
+    let results = results
+        .into_iter()
+        .map(|r| ResultInfo {
+            id: r.id,
+            created_at: r.created_at,
+        })
+        .collect();
+
+    Ok(Json(ListResultsResponse {
+        results,
+        count,
+        offset,
+        limit,
+        has_more,
+    }))
+}
+
+/// Handler for GET /results/{id}
+pub async fn get_result_handler(
+    State(engine): State<Arc<RuntimeEngine>>,
+    Path(id): Path<String>,
+) -> Result<Json<QueryResponse>, ApiError> {
+    let start = Instant::now();
+
+    // Load result from engine (handles both catalog lookup and parquet loading)
+    let (schema, batches) = engine
+        .get_result(&id)
+        .await
+        .map_err(|e| ApiError::internal_error(format!("Failed to lookup result: {}", e)))?
+        .ok_or_else(|| ApiError::not_found(format!("Result '{}' not found", id)))?;
+
+    let (columns, rows) = serialize_batches(&schema, &batches)?;
+    let row_count = rows.len();
+    let execution_time_ms = start.elapsed().as_millis() as u64;
+
+    Ok(Json(QueryResponse {
+        result_id: Some(id),
+        columns,
+        rows,
+        row_count,
+        execution_time_ms,
+        warning: None,
+    }))
 }

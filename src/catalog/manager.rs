@@ -54,6 +54,14 @@ pub struct PendingDeletion {
     pub retry_count: i32,
 }
 
+/// A persisted query result.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct QueryResult {
+    pub id: String, // nanoid
+    pub parquet_path: String,
+    pub created_at: DateTime<Utc>,
+}
+
 /// Async interface for catalog operations.
 #[async_trait]
 pub trait CatalogManager: Debug + Send + Sync {
@@ -164,4 +172,17 @@ pub trait CatalogManager: Debug + Send + Sync {
 
     /// Delete an encrypted secret value. Returns true if it existed.
     async fn delete_encrypted_secret_value(&self, name: &str) -> Result<bool>;
+
+    // Query result persistence methods
+
+    /// Store a query result. The result is persisted permanently until explicitly deleted.
+    async fn store_result(&self, result: &QueryResult) -> Result<()>;
+
+    /// Get a query result by ID. Returns None if not found.
+    async fn get_result(&self, id: &str) -> Result<Option<QueryResult>>;
+
+    /// List query results with pagination.
+    /// Results are ordered by created_at descending (newest first).
+    /// Returns (results, has_more) where has_more indicates if there are more results after this page.
+    async fn list_results(&self, limit: usize, offset: usize) -> Result<(Vec<QueryResult>, bool)>;
 }
