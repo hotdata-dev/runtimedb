@@ -386,6 +386,29 @@ impl CatalogManager for SqliteCatalogManager {
         .await?;
         Ok(result)
     }
+
+    async fn list_results(&self, limit: usize, offset: usize) -> Result<(Vec<QueryResult>, bool)> {
+        // Fetch one extra to determine if there are more results
+        let fetch_limit = limit + 1;
+        let results = sqlx::query_as::<_, QueryResult>(
+            "SELECT id, parquet_path, created_at FROM results
+             ORDER BY created_at DESC
+             LIMIT ? OFFSET ?",
+        )
+        .bind(fetch_limit as i64)
+        .bind(offset as i64)
+        .fetch_all(self.backend.pool())
+        .await?;
+
+        let has_more = results.len() > limit;
+        let results = if has_more {
+            results.into_iter().take(limit).collect()
+        } else {
+            results
+        };
+
+        Ok((results, has_more))
+    }
 }
 
 impl CatalogMigrations for SqliteMigrationBackend {

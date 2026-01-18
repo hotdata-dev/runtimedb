@@ -180,4 +180,9 @@ pub trait CatalogManager: Debug + Send + Sync {
 
     /// Get a query result by ID. Returns None if not found.
     async fn get_result(&self, id: &str) -> Result<Option<QueryResult>>;
+
+    /// List query results with pagination.
+    /// Results are ordered by created_at descending (newest first).
+    /// Returns (results, has_more) where has_more indicates if there are more results after this page.
+    async fn list_results(&self, limit: usize, offset: usize) -> Result<(Vec<QueryResult>, bool)>;
 }

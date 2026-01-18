@@ -424,6 +424,18 @@ impl RuntimeEngine {
         Ok(Some((schema, batches)))
     }
 
+    /// List persisted query results with pagination.
+    ///
+    /// Returns results ordered by creation time (newest first).
+    /// The `has_more` flag indicates if there are additional results beyond this page.
+    pub async fn list_results(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<crate::catalog::QueryResult>, bool)> {
+        self.catalog.list_results(limit, offset).await
+    }
+
     /// Write result batches to a parquet file.
     ///
     /// Note: Empty results are persisted with schema only. This ensures GET /results/{id}

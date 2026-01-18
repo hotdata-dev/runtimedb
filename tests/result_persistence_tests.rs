@@ -7,7 +7,7 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine};
 use datafusion::prelude::SessionContext;
 use rand::RngCore;
-use runtimedb::http::app_server::{AppServer, PATH_QUERY, PATH_RESULT};
+use runtimedb::http::app_server::{AppServer, PATH_QUERY, PATH_RESULT, PATH_RESULTS};
 use runtimedb::storage::{CacheWriteHandle, FilesystemStorage, StorageManager};
 use runtimedb::RuntimeEngine;
 use serde_json::json;
@@ -797,6 +797,229 @@ async fn test_different_failure_stages_produce_consistent_warnings() -> Result<(
         .await?;
 
     assert_eq!(get_response.status(), StatusCode::OK);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_results_empty() -> Result<()> {
+    let (app, _temp) = setup_test().await?;
+
+    // List results when there are none
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(PATH_RESULTS)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(json["count"], 0);
+    assert_eq!(json["offset"], 0);
+    assert_eq!(json["limit"], 100); // Default limit
+    assert_eq!(json["has_more"], false);
+    assert!(json["results"].as_array().unwrap().is_empty());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_results_returns_created_results() -> Result<()> {
+    let (app, _temp) = setup_test().await?;
+
+    // Create two results
+    let response1 = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"sql": "SELECT 1 as x"}).to_string()))?,
+        )
+        .await?;
+    assert_eq!(response1.status(), StatusCode::OK);
+    let body1 = axum::body::to_bytes(response1.into_body(), usize::MAX).await?;
+    let json1: serde_json::Value = serde_json::from_slice(&body1)?;
+    let result_id1 = json1["result_id"].as_str().unwrap();
+
+    let response2 = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"sql": "SELECT 2 as y"}).to_string()))?,
+        )
+        .await?;
+    assert_eq!(response2.status(), StatusCode::OK);
+    let body2 = axum::body::to_bytes(response2.into_body(), usize::MAX).await?;
+    let json2: serde_json::Value = serde_json::from_slice(&body2)?;
+    let result_id2 = json2["result_id"].as_str().unwrap();
+
+    // List results
+    let list_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(PATH_RESULTS)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(list_response.status(), StatusCode::OK);
+
+    let list_body = axum::body::to_bytes(list_response.into_body(), usize::MAX).await?;
+    let list_json: serde_json::Value = serde_json::from_slice(&list_body)?;
+
+    assert_eq!(list_json["count"], 2);
+    assert_eq!(list_json["has_more"], false);
+
+    let results = list_json["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+
+    // Results should be ordered by created_at descending (newest first)
+    // so result_id2 should be first
+    let result_ids: Vec<&str> = results.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert!(result_ids.contains(&result_id1));
+    assert!(result_ids.contains(&result_id2));
+
+    // Each result should have id and created_at
+    for result in results {
+        assert!(result["id"].is_string());
+        assert!(result["created_at"].is_string());
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_results_pagination() -> Result<()> {
+    let (app, _temp) = setup_test().await?;
+
+    // Create 5 results
+    let mut result_ids = Vec::new();
+    for i in 1..=5 {
+        let response = app
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(PATH_QUERY)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"sql": format!("SELECT {} as num", i)}).to_string(),
+                    ))?,
+            )
+            .await?;
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        let json: serde_json::Value = serde_json::from_slice(&body)?;
+        result_ids.push(json["result_id"].as_str().unwrap().to_string());
+    }
+
+    // Get first page with limit=2
+    let page1_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("{}?limit=2", PATH_RESULTS))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(page1_response.status(), StatusCode::OK);
+    let page1_body = axum::body::to_bytes(page1_response.into_body(), usize::MAX).await?;
+    let page1_json: serde_json::Value = serde_json::from_slice(&page1_body)?;
+
+    assert_eq!(page1_json["count"], 2);
+    assert_eq!(page1_json["limit"], 2);
+    assert_eq!(page1_json["offset"], 0);
+    assert_eq!(page1_json["has_more"], true);
+
+    // Get second page with limit=2, offset=2
+    let page2_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("{}?limit=2&offset=2", PATH_RESULTS))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(page2_response.status(), StatusCode::OK);
+    let page2_body = axum::body::to_bytes(page2_response.into_body(), usize::MAX).await?;
+    let page2_json: serde_json::Value = serde_json::from_slice(&page2_body)?;
+
+    assert_eq!(page2_json["count"], 2);
+    assert_eq!(page2_json["limit"], 2);
+    assert_eq!(page2_json["offset"], 2);
+    assert_eq!(page2_json["has_more"], true);
+
+    // Get third page - should have only 1 result
+    let page3_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("{}?limit=2&offset=4", PATH_RESULTS))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(page3_response.status(), StatusCode::OK);
+    let page3_body = axum::body::to_bytes(page3_response.into_body(), usize::MAX).await?;
+    let page3_json: serde_json::Value = serde_json::from_slice(&page3_body)?;
+
+    assert_eq!(page3_json["count"], 1);
+    assert_eq!(page3_json["limit"], 2);
+    assert_eq!(page3_json["offset"], 4);
+    assert_eq!(page3_json["has_more"], false);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_results_limit_capped_at_max() -> Result<()> {
+    let (app, _temp) = setup_test().await?;
+
+    // Request with limit > max (1000) should be capped
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("{}?limit=5000", PATH_RESULTS))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Limit should be capped at 1000
+    assert_eq!(json["limit"], 1000);
 
     Ok(())
 }

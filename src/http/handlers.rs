@@ -3,9 +3,10 @@ use crate::http::error::ApiError;
 use crate::http::models::{
     ColumnInfo, ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse,
     CreateSecretRequest, CreateSecretResponse, DiscoveryStatus, GetConnectionResponse,
-    GetSecretResponse, InformationSchemaResponse, ListConnectionsResponse, ListSecretsResponse,
-    QueryRequest, QueryResponse, RefreshRequest, RefreshResponse, SchemaRefreshResult,
-    SecretMetadataResponse, TableInfo, UpdateSecretRequest, UpdateSecretResponse,
+    GetSecretResponse, InformationSchemaResponse, ListConnectionsResponse, ListResultsResponse,
+    ListSecretsResponse, QueryRequest, QueryResponse, RefreshRequest, RefreshResponse, ResultInfo,
+    SchemaRefreshResult, SecretMetadataResponse, TableInfo, UpdateSecretRequest,
+    UpdateSecretResponse,
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
 use crate::source::Source;
@@ -623,6 +624,55 @@ pub async fn refresh_handler(
     };
 
     Ok(Json(response))
+}
+
+/// Default limit for listing results
+const DEFAULT_RESULTS_LIMIT: usize = 100;
+
+/// Maximum limit for listing results
+const MAX_RESULTS_LIMIT: usize = 1000;
+
+/// Query parameters for listing results
+#[derive(Debug, Deserialize)]
+pub struct ListResultsParams {
+    /// Maximum number of results to return (default: 100, max: 1000)
+    pub limit: Option<usize>,
+    /// Offset for pagination (default: 0)
+    pub offset: Option<usize>,
+}
+
+/// Handler for GET /results
+pub async fn list_results_handler(
+    State(engine): State<Arc<RuntimeEngine>>,
+    QueryParams(params): QueryParams<ListResultsParams>,
+) -> Result<Json<ListResultsResponse>, ApiError> {
+    let limit = params
+        .limit
+        .unwrap_or(DEFAULT_RESULTS_LIMIT)
+        .min(MAX_RESULTS_LIMIT);
+    let offset = params.offset.unwrap_or(0);
+
+    let (results, has_more) = engine
+        .list_results(limit, offset)
+        .await
+        .map_err(|e| ApiError::internal_error(format!("Failed to list results: {}", e)))?;
+
+    let count = results.len();
+    let results = results
+        .into_iter()
+        .map(|r| ResultInfo {
+            id: r.id,
+            created_at: r.created_at,
+        })
+        .collect();
+
+    Ok(Json(ListResultsResponse {
+        results,
+        count,
+        offset,
+        limit,
+        has_more,
+    }))
 }
 
 /// Handler for GET /results/{id}

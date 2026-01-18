@@ -24,6 +24,27 @@ pub struct QueryResponse {
     pub warning: Option<String>,
 }
 
+/// Summary of a persisted query result for listing
+#[derive(Debug, Serialize)]
+pub struct ResultInfo {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Response body for GET /results
+#[derive(Debug, Serialize)]
+pub struct ListResultsResponse {
+    pub results: Vec<ResultInfo>,
+    /// Number of results returned in this response
+    pub count: usize,
+    /// Pagination offset used for this request
+    pub offset: usize,
+    /// Limit used for this request
+    pub limit: usize,
+    /// Whether there are more results available after this page
+    pub has_more: bool,
+}
+
 /// Column metadata for API responses
 #[derive(Debug, Serialize)]
 pub struct ColumnInfo {
