@@ -27,11 +27,6 @@ pub struct ConnectionInfo {
     pub config_json: String,
 }
 
-/// Generates a connection external ID: "conn" + 26-char nanoid (30 chars total)
-pub fn generate_connection_id() -> String {
-    format!("conn{}", nanoid::nanoid!(26))
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct TableInfo {
     pub id: i32,

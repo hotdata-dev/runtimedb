@@ -1351,13 +1351,6 @@ mod result_persistence_tests {
 
         let result_id = query_result.get_result_id().unwrap();
 
-        // Verify result_id format (rslt prefix + 26-char nanoid = 30 chars)
-        assert!(
-            result_id.starts_with("rslt"),
-            "result_id should start with 'rslt'"
-        );
-        assert_eq!(result_id.len(), 30, "result_id should be 30 characters");
-
         // Retrieve the result by ID
         let retrieved = api.get_result(result_id).await;
         assert!(

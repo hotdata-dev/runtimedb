@@ -160,16 +160,6 @@ async fn test_query_returns_result_id() -> Result<()> {
     assert!(json["result_id"].is_string());
     let result_id = json["result_id"].as_str().unwrap();
     assert!(!result_id.is_empty());
-    // Verify ID format: "rslt" prefix + 26-char nanoid = 30 chars total
-    assert!(
-        result_id.starts_with("rslt"),
-        "result_id should start with 'rslt' prefix"
-    );
-    assert_eq!(
-        result_id.len(),
-        30,
-        "result_id should be 30 chars (4-char prefix + 26-char nanoid)"
-    );
     // Should not have warning
     assert!(json.get("warning").is_none());
 

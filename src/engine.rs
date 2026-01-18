@@ -373,7 +373,7 @@ impl RuntimeEngine {
         schema: &Arc<Schema>,
         batches: &[RecordBatch],
     ) -> Result<String> {
-        let result_id = format!("rslt{}", nanoid::nanoid!(26));
+        let result_id = crate::id::generate_result_id();
 
         // Write to parquet
         let parquet_path = self.write_results_to_parquet(&result_id, schema, batches)?;

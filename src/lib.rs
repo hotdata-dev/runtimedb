@@ -4,6 +4,7 @@ pub mod datafetch;
 pub mod datafusion;
 mod engine;
 pub mod http;
+pub mod id;
 pub mod secrets;
 pub mod source;
 pub mod storage;

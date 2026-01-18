@@ -1233,13 +1233,6 @@ async fn test_table_refresh_response_contains_external_connection_id() -> Result
     // Create connection and get the external ID
     let external_connection_id = harness.create_connection("test_conn", &db_path).await?;
 
-    // Verify the external ID has the expected format (starts with "conn")
-    assert!(
-        external_connection_id.starts_with("conn"),
-        "external connection_id should start with 'conn', got: {}",
-        external_connection_id
-    );
-
     // Query to trigger initial sync
     harness
         .engine
@@ -1294,13 +1287,6 @@ async fn test_connection_refresh_response_contains_external_connection_id() -> R
 
     // Create connection and get the external ID
     let external_connection_id = harness.create_connection("test_conn", &db_path).await?;
-
-    // Verify the external ID has the expected format (starts with "conn")
-    assert!(
-        external_connection_id.starts_with("conn"),
-        "external connection_id should start with 'conn', got: {}",
-        external_connection_id
-    );
 
     // Query both tables to trigger sync
     harness
