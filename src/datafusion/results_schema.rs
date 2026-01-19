@@ -42,9 +42,11 @@ impl<V> BoundedCache<V> {
     }
 
     fn insert(&mut self, key: String, value: V) {
+        use std::collections::hash_map::Entry;
+
         // If key already exists, just update the value (don't change order)
-        if self.entries.contains_key(&key) {
-            self.entries.insert(key, value);
+        if let Entry::Occupied(mut e) = self.entries.entry(key.clone()) {
+            e.insert(value);
             return;
         }
 
@@ -143,7 +145,7 @@ impl SchemaProvider for ResultsSchemaProvider {
             Ok(None) => return Ok(None),
             Err(e) => {
                 return Err(datafusion::error::DataFusionError::External(Box::new(
-                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+                    std::io::Error::other(e.to_string()),
                 )));
             }
         };
@@ -178,5 +180,113 @@ impl SchemaProvider for ResultsSchemaProvider {
     fn table_exist(&self, name: &str) -> bool {
         // This is a sync trait method, so block_on is required here
         matches!(block_on(self.catalog.get_result(name)), Ok(Some(_)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bounded_cache_basic_operations() {
+        let mut cache: BoundedCache<i32> = BoundedCache::new(3);
+
+        // Empty cache
+        assert!(cache.get("a").is_none());
+        assert_eq!(cache.len(), 0);
+
+        // Insert and retrieve
+        cache.insert("a".to_string(), 1);
+        assert_eq!(cache.get("a"), Some(&1));
+        assert_eq!(cache.len(), 1);
+
+        cache.insert("b".to_string(), 2);
+        cache.insert("c".to_string(), 3);
+        assert_eq!(cache.len(), 3);
+    }
+
+    #[test]
+    fn test_bounded_cache_eviction_at_capacity() {
+        let mut cache: BoundedCache<i32> = BoundedCache::new(3);
+
+        cache.insert("a".to_string(), 1);
+        cache.insert("b".to_string(), 2);
+        cache.insert("c".to_string(), 3);
+
+        // At capacity, inserting "d" should evict "a" (oldest)
+        cache.insert("d".to_string(), 4);
+
+        assert!(
+            cache.get("a").is_none(),
+            "oldest entry 'a' should be evicted"
+        );
+        assert_eq!(cache.get("b"), Some(&2));
+        assert_eq!(cache.get("c"), Some(&3));
+        assert_eq!(cache.get("d"), Some(&4));
+        assert_eq!(cache.len(), 3);
+    }
+
+    #[test]
+    fn test_bounded_cache_update_existing_key_no_eviction() {
+        let mut cache: BoundedCache<i32> = BoundedCache::new(3);
+
+        cache.insert("a".to_string(), 1);
+        cache.insert("b".to_string(), 2);
+        cache.insert("c".to_string(), 3);
+
+        // Updating "a" should not cause eviction or change order
+        cache.insert("a".to_string(), 100);
+
+        assert_eq!(cache.get("a"), Some(&100), "value should be updated");
+        assert_eq!(cache.get("b"), Some(&2));
+        assert_eq!(cache.get("c"), Some(&3));
+        assert_eq!(cache.len(), 3);
+
+        // Now insert "d" - should evict "a" since it's still oldest
+        cache.insert("d".to_string(), 4);
+
+        assert!(cache.get("a").is_none(), "'a' should be evicted as oldest");
+        assert_eq!(cache.get("b"), Some(&2));
+        assert_eq!(cache.get("c"), Some(&3));
+        assert_eq!(cache.get("d"), Some(&4));
+    }
+
+    #[test]
+    fn test_bounded_cache_capacity_one() {
+        let mut cache: BoundedCache<i32> = BoundedCache::new(1);
+
+        cache.insert("a".to_string(), 1);
+        assert_eq!(cache.get("a"), Some(&1));
+        assert_eq!(cache.len(), 1);
+
+        // Insert "b" should evict "a"
+        cache.insert("b".to_string(), 2);
+        assert!(cache.get("a").is_none());
+        assert_eq!(cache.get("b"), Some(&2));
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn test_bounded_cache_fifo_order() {
+        let mut cache: BoundedCache<i32> = BoundedCache::new(3);
+
+        cache.insert("first".to_string(), 1);
+        cache.insert("second".to_string(), 2);
+        cache.insert("third".to_string(), 3);
+
+        // Insert 3 more, should evict in FIFO order
+        cache.insert("fourth".to_string(), 4);
+        assert!(cache.get("first").is_none());
+
+        cache.insert("fifth".to_string(), 5);
+        assert!(cache.get("second").is_none());
+
+        cache.insert("sixth".to_string(), 6);
+        assert!(cache.get("third").is_none());
+
+        // Only the last 3 should remain
+        assert_eq!(cache.get("fourth"), Some(&4));
+        assert_eq!(cache.get("fifth"), Some(&5));
+        assert_eq!(cache.get("sixth"), Some(&6));
     }
 }
