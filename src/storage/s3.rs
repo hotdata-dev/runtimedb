@@ -1,11 +1,13 @@
 // src/storage/s3.rs
 use anyhow::Result;
 use async_trait::async_trait;
+use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::SessionContext;
 use futures::TryStreamExt;
 use object_store::aws::AmazonS3Builder;
 use object_store::buffered::BufWriter;
 use object_store::{path::Path as ObjectPath, ObjectStore};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tracing::warn;
@@ -160,17 +162,21 @@ impl StorageManager for S3Storage {
         })
     }
 
-    #[tracing::instrument(
-        name = "prepare_cache_write",
-        skip(self),
-        fields(
-            runtimedb.backend = "s3",
-            runtimedb.connection_id = connection_id,
-            runtimedb.schema = %schema,
-            runtimedb.table = %table,
-            runtimedb.bucket = %self.bucket,
-        )
-    )]
+    fn get_object_store_config(&self) -> Option<(ObjectStoreUrl, HashMap<String, String>)> {
+        self.config.as_ref().and_then(|c| {
+            let url = ObjectStoreUrl::parse(&format!("s3://{}", self.bucket)).ok()?;
+            let mut options = HashMap::new();
+            options.insert("aws_access_key_id".to_string(), c.access_key.clone());
+            options.insert(
+                "aws_secret_access_key".to_string(),
+                c.secret_key.clone(),
+            );
+            options.insert("aws_endpoint".to_string(), c.endpoint.clone());
+            options.insert("aws_allow_http".to_string(), "true".to_string());
+            Some((url, options))
+        })
+    }
+
     fn prepare_cache_write(
         &self,
         connection_id: i32,
