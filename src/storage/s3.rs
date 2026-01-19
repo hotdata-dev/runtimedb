@@ -4,8 +4,10 @@ use async_trait::async_trait;
 use datafusion::prelude::SessionContext;
 use futures::TryStreamExt;
 use object_store::aws::AmazonS3Builder;
+use object_store::buffered::BufWriter;
 use object_store::{path::Path as ObjectPath, ObjectStore};
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tracing::warn;
 use url::Url;
 
@@ -176,20 +178,28 @@ impl StorageManager for S3Storage {
     }
 
     async fn finalize_cache_write(&self, handle: &CacheWriteHandle) -> Result<String> {
-        let data = std::fs::read(&handle.local_path)?;
-
-        // Build S3 URL using the version from the handle
+        // Build S3 path using the version from the handle
         let versioned_dir_url = format!(
             "s3://{}/cache/{}/{}/{}/{}",
             self.bucket, handle.connection_id, handle.schema, handle.table, handle.version
         );
-        let file_url = format!("{}/data.parquet", versioned_dir_url);
+        let s3_path = ObjectPath::from(format!(
+            "cache/{}/{}/{}/{}/data.parquet",
+            handle.connection_id, handle.schema, handle.table, handle.version
+        ));
 
-        self.write(&file_url, &data).await?;
+        // Stream file to S3 using BufWriter to avoid loading entire file into memory.
+        // BufWriter adaptively uses put() for small files or put_multipart() for large files.
+        let file = tokio::fs::File::open(&handle.local_path).await?;
+        let mut reader = tokio::io::BufReader::new(file);
+        let mut writer = BufWriter::new(self.store.clone(), s3_path);
+
+        tokio::io::copy(&mut reader, &mut writer).await?;
+        writer.shutdown().await?;
 
         // Clean up local temp file - log warning but don't fail if removal fails
         // since the S3 upload succeeded and that's what matters
-        if let Err(e) = std::fs::remove_file(&handle.local_path) {
+        if let Err(e) = tokio::fs::remove_file(&handle.local_path).await {
             warn!(
                 path = %handle.local_path.display(),
                 error = %e,
