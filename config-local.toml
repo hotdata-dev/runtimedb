@@ -14,7 +14,12 @@ type = "sqlite"
 #password =
 
 [storage]
-type = "filesystem"
+type = "s3"
+bucket = "ducklake-data"
+region = "us-west-2"
+endpoint = "http://localhost:9000"
+access_key = "minioadmin"
+secret_key = "minioadmin"
 ## S3 Example
 #[storage]
 #type = "s3"
