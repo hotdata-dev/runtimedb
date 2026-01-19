@@ -374,4 +374,134 @@ mod tests {
         // Cleanup
         let _ = std::fs::remove_dir_all(&temp_base);
     }
+
+    #[tokio::test]
+    async fn test_finalize_cache_write_cleans_up_temp_file() {
+        // This test verifies the streaming implementation cleans up the local temp file.
+        // The streaming path uses tokio::fs::remove_file after upload.
+        let store = Arc::new(object_store::memory::InMemory::new());
+        let storage = S3Storage {
+            bucket: "test-bucket".to_string(),
+            store: store.clone(),
+            config: None,
+        };
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let version = "cleanup_test";
+        let versioned_dir = temp_dir
+            .path()
+            .join("1")
+            .join("public")
+            .join("orders")
+            .join(version);
+        std::fs::create_dir_all(&versioned_dir).unwrap();
+
+        let temp_file = versioned_dir.join("data.parquet");
+        std::fs::write(&temp_file, b"test data for cleanup verification").unwrap();
+
+        // Verify temp file exists before upload
+        assert!(temp_file.exists(), "Temp file should exist before upload");
+
+        let handle = CacheWriteHandle {
+            local_path: temp_file.clone(),
+            version: version.to_string(),
+            connection_id: 1,
+            schema: "public".to_string(),
+            table: "orders".to_string(),
+        };
+
+        storage.finalize_cache_write(&handle).await.unwrap();
+
+        // Verify temp file was removed after successful upload
+        assert!(
+            !temp_file.exists(),
+            "Temp file should be removed after upload"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_finalize_cache_write_streams_large_file() {
+        // This test verifies correctness for larger files.
+        use std::io::Write;
+
+        let store = Arc::new(object_store::memory::InMemory::new());
+        let storage = S3Storage {
+            bucket: "test-bucket".to_string(),
+            store: store.clone(),
+            config: None,
+        };
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let version = "large_file_test";
+        let versioned_dir = temp_dir
+            .path()
+            .join("1")
+            .join("public")
+            .join("big_table")
+            .join(version);
+        std::fs::create_dir_all(&versioned_dir).unwrap();
+
+        let temp_file = versioned_dir.join("data.parquet");
+
+        // Create a 10MB file by writing in chunks to avoid large memory allocation.
+        let total_size: usize = 10 * 1024 * 1024;
+        let chunk_size: usize = 64 * 1024; // 64KB chunks
+        let mut expected_checksum: u64 = 0;
+        {
+            let mut file = std::fs::File::create(&temp_file).unwrap();
+            let chunk: Vec<u8> = (0..chunk_size).map(|i| (i % 256) as u8).collect();
+            let chunk_sum: u64 = chunk.iter().map(|&b| b as u64).sum();
+            for _ in 0..(total_size / chunk_size) {
+                file.write_all(&chunk).unwrap();
+                expected_checksum = expected_checksum.wrapping_add(chunk_sum);
+            }
+            file.flush().unwrap();
+        }
+
+        let handle = CacheWriteHandle {
+            local_path: temp_file.clone(),
+            version: version.to_string(),
+            connection_id: 1,
+            schema: "public".to_string(),
+            table: "big_table".to_string(),
+        };
+
+        let result_url = storage.finalize_cache_write(&handle).await.unwrap();
+
+        // Verify upload succeeded
+        assert!(
+            result_url.contains(version),
+            "Result URL should contain version"
+        );
+
+        // Verify data integrity via size and checksum
+        let s3_path =
+            ObjectPath::from(format!("cache/1/public/big_table/{}/data.parquet", version));
+        let result = store.get(&s3_path).await.unwrap();
+
+        // Stream the uploaded data and compute checksum without loading entire file
+        let mut uploaded_checksum: u64 = 0;
+        let mut uploaded_size: usize = 0;
+        let mut stream = result.into_stream();
+        while let Some(chunk) = stream.try_next().await.unwrap() {
+            uploaded_size += chunk.len();
+            uploaded_checksum =
+                uploaded_checksum.wrapping_add(chunk.iter().map(|&b| b as u64).sum::<u64>());
+        }
+
+        assert_eq!(
+            uploaded_size, total_size,
+            "Uploaded file size should match original"
+        );
+        assert_eq!(
+            uploaded_checksum, expected_checksum,
+            "Uploaded file checksum should match original"
+        );
+
+        // Verify temp file was cleaned up
+        assert!(
+            !temp_file.exists(),
+            "Temp file should be removed after upload"
+        );
+    }
 }
