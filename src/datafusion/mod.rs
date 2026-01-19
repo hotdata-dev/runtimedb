@@ -1,6 +1,7 @@
 mod catalog_provider;
 mod information_schema;
 mod lazy_table_provider;
+mod results_schema;
 mod runtimedb_catalog;
 mod schema_provider;
 

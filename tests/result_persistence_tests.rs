@@ -1013,3 +1013,236 @@ async fn test_list_results_limit_capped_at_max() -> Result<()> {
 
     Ok(())
 }
+
+// =============================================================================
+// SQL Query Tests - Query results via runtimedb.results schema
+// =============================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_query_result_via_sql() -> Result<()> {
+    let (app, _temp) = setup_test().await?;
+
+    // First, create a result by running a query
+    let create_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"sql": "SELECT 42 as answer, 'hello' as greeting"}).to_string(),
+                ))?,
+        )
+        .await?;
+
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(create_response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    let result_id = json["result_id"].as_str().unwrap();
+
+    // Now query the result via SQL using runtimedb.results schema
+    let sql_query = format!("SELECT * FROM runtimedb.results.\"{}\"", result_id);
+    let query_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"sql": sql_query}).to_string()))?,
+        )
+        .await?;
+
+    assert_eq!(query_response.status(), StatusCode::OK);
+    let query_body = axum::body::to_bytes(query_response.into_body(), usize::MAX).await?;
+    let query_json: serde_json::Value = serde_json::from_slice(&query_body)?;
+
+    // Verify we got the original data back
+    assert_eq!(query_json["row_count"], 1);
+    assert_eq!(query_json["rows"][0][0], 42);
+    assert_eq!(query_json["rows"][0][1], "hello");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_query_result_via_sql_multiple_rows() -> Result<()> {
+    let (app, _temp) = setup_test().await?;
+
+    // Create a result with multiple rows
+    let create_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"sql": "SELECT * FROM (VALUES (1, 'a'), (2, 'b'), (3, 'c')) AS t(num, letter)"}).to_string(),
+                ))?,
+        )
+        .await?;
+
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(create_response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    let result_id = json["result_id"].as_str().unwrap();
+
+    // Query via SQL
+    let sql_query = format!("SELECT * FROM runtimedb.results.\"{}\"", result_id);
+    let query_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"sql": sql_query}).to_string()))?,
+        )
+        .await?;
+
+    assert_eq!(query_response.status(), StatusCode::OK);
+    let query_body = axum::body::to_bytes(query_response.into_body(), usize::MAX).await?;
+    let query_json: serde_json::Value = serde_json::from_slice(&query_body)?;
+
+    // Verify all 3 rows are returned
+    assert_eq!(query_json["row_count"], 3);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_query_result_via_sql_with_filter() -> Result<()> {
+    let (app, _temp) = setup_test().await?;
+
+    // Create a result with multiple rows
+    let create_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"sql": "SELECT * FROM (VALUES (1, 'a'), (2, 'b'), (3, 'c')) AS t(num, letter)"}).to_string(),
+                ))?,
+        )
+        .await?;
+
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(create_response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    let result_id = json["result_id"].as_str().unwrap();
+
+    // Query with a filter
+    let sql_query = format!(
+        "SELECT * FROM runtimedb.results.\"{}\" WHERE num > 1",
+        result_id
+    );
+    let query_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"sql": sql_query}).to_string()))?,
+        )
+        .await?;
+
+    assert_eq!(query_response.status(), StatusCode::OK);
+    let query_body = axum::body::to_bytes(query_response.into_body(), usize::MAX).await?;
+    let query_json: serde_json::Value = serde_json::from_slice(&query_body)?;
+
+    // Should only return 2 rows (num=2 and num=3)
+    assert_eq!(query_json["row_count"], 2);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_query_nonexistent_result_via_sql() -> Result<()> {
+    let (app, _temp) = setup_test().await?;
+
+    // Try to query a result that doesn't exist
+    let sql_query = "SELECT * FROM runtimedb.results.\"nonexistent_id\"";
+    let query_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"sql": sql_query}).to_string()))?,
+        )
+        .await?;
+
+    // Should return an error (table not found) - DataFusion returns 500 for missing tables
+    assert!(query_response.status().is_client_error() || query_response.status().is_server_error());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_query_result_with_aggregation() -> Result<()> {
+    let (app, _temp) = setup_test().await?;
+
+    // Create a result with numeric data
+    let create_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"sql": "SELECT * FROM (VALUES (10), (20), (30)) AS t(value)"})
+                        .to_string(),
+                ))?,
+        )
+        .await?;
+
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(create_response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    let result_id = json["result_id"].as_str().unwrap();
+
+    // Query with aggregation
+    let sql_query = format!(
+        "SELECT SUM(value) as total, AVG(value) as avg FROM runtimedb.results.\"{}\"",
+        result_id
+    );
+    let query_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"sql": sql_query}).to_string()))?,
+        )
+        .await?;
+
+    assert_eq!(query_response.status(), StatusCode::OK);
+    let query_body = axum::body::to_bytes(query_response.into_body(), usize::MAX).await?;
+    let query_json: serde_json::Value = serde_json::from_slice(&query_body)?;
+
+    // Verify aggregation results
+    assert_eq!(query_json["row_count"], 1);
+    assert_eq!(query_json["rows"][0][0], 60); // SUM = 10+20+30
+                                              // AVG returns as float, compare loosely
+    let avg_value = query_json["rows"][0][1].as_f64().unwrap();
+    assert!((avg_value - 20.0).abs() < 0.001); // AVG = 60/3
+
+    Ok(())
+}

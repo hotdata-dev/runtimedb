@@ -1207,8 +1207,12 @@ impl RuntimeEngineBuilder {
         // Register all existing connections as DataFusion catalogs
         engine.register_existing_connections().await?;
 
-        // Register the runtimedb virtual catalog for system metadata
-        let runtimedb_catalog = Arc::new(RuntimeDbCatalogProvider::new());
+        // Register the runtimedb virtual catalog for system metadata and results
+        // Pass df_ctx so the results schema can access registered object stores (S3, etc.)
+        let runtimedb_catalog = Arc::new(RuntimeDbCatalogProvider::new(
+            engine.catalog.clone(),
+            &engine.df_ctx,
+        ));
         runtimedb_catalog.register_schema(
             "information_schema",
             Arc::new(InformationSchemaProvider::new(engine.catalog.clone())),

@@ -1,24 +1,37 @@
+use super::results_schema::ResultsSchemaProvider;
+use crate::catalog::CatalogManager;
 use async_trait::async_trait;
 use datafusion::catalog::{CatalogProvider, SchemaProvider};
 use datafusion::error::Result;
+use datafusion::prelude::SessionContext;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 /// Virtual catalog provider for internal RuntimeDB system objects.
 ///
-/// This catalog provides access to system schemas like `information_schema`
-/// that expose metadata about the RuntimeDB instance. Schemas are registered
-/// dynamically via `register_schema()`.
-#[derive(Debug, Default)]
+/// This catalog provides access to system schemas like `results` and `information_schema`
+/// that expose internal RuntimeDB data. Schemas are registered dynamically via
+/// `register_schema()`.
+#[derive(Debug)]
 pub struct RuntimeDbCatalogProvider {
     schemas: RwLock<HashMap<String, Arc<dyn SchemaProvider>>>,
 }
 
 impl RuntimeDbCatalogProvider {
-    pub fn new() -> Self {
+    /// Create a new RuntimeDbCatalogProvider with the results schema pre-registered.
+    ///
+    /// The `ctx` parameter is used to share the RuntimeEnv (including object stores like S3)
+    /// with the results schema provider for schema inference.
+    pub fn new(catalog: Arc<dyn CatalogManager>, ctx: &SessionContext) -> Self {
+        let mut schemas = HashMap::new();
+        schemas.insert(
+            "results".to_string(),
+            Arc::new(ResultsSchemaProvider::with_runtime_env(catalog, ctx))
+                as Arc<dyn SchemaProvider>,
+        );
         Self {
-            schemas: RwLock::new(HashMap::new()),
+            schemas: RwLock::new(schemas),
         }
     }
 }
