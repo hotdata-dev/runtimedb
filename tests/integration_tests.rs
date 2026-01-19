@@ -28,6 +28,8 @@ use tower::util::ServiceExt;
 struct QueryResult {
     row_count: usize,
     columns: Vec<String>,
+    /// Nullable flags for each column (parallel to columns vec)
+    nullable_flags: Vec<bool>,
     result_id: Option<String>,
 }
 
@@ -41,11 +43,19 @@ impl QueryResult {
             .map(|f| f.name().clone())
             .collect();
 
+        let nullable_flags: Vec<bool> = response
+            .schema
+            .fields()
+            .iter()
+            .map(|f| f.is_nullable())
+            .collect();
+
         let row_count: usize = response.results.iter().map(|b| b.num_rows()).sum();
 
         Self {
             row_count,
             columns,
+            nullable_flags,
             result_id: None, // Engine doesn't return result_id directly
         }
     }
@@ -60,12 +70,18 @@ impl QueryResult {
             })
             .unwrap_or_default();
 
+        let nullable_flags = json["nullable"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_bool()).collect())
+            .unwrap_or_default();
+
         let row_count = json["row_count"].as_u64().unwrap_or(0) as usize;
         let result_id = json["result_id"].as_str().map(String::from);
 
         Self {
             row_count,
             columns,
+            nullable_flags,
             result_id,
         }
     }
@@ -81,6 +97,25 @@ impl QueryResult {
     fn assert_columns(&self, expected: &[&str]) {
         let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(self.columns, expected, "Column mismatch");
+    }
+
+    /// Assert nullable flags match expected values.
+    /// Takes a slice of (column_name, expected_nullable) tuples.
+    fn assert_nullable_flags(&self, expected: &[(&str, bool)]) {
+        for (col_name, expected_nullable) in expected {
+            let idx = self
+                .columns
+                .iter()
+                .position(|c| c == *col_name)
+                .unwrap_or_else(|| panic!("Column '{}' not found in result", col_name));
+
+            let actual_nullable = self.nullable_flags.get(idx).copied().unwrap_or(true);
+            assert_eq!(
+                actual_nullable, *expected_nullable,
+                "Column '{}' nullable mismatch: expected {}, got {}",
+                col_name, expected_nullable, actual_nullable
+            );
+        }
     }
 
     fn assert_has_result_id(&self) {
@@ -922,6 +957,15 @@ async fn run_nullable_flags_test(
     // Verify we got all 3 rows (including rows with NULLs in nullable columns)
     result.assert_row_count(3);
     result.assert_columns(&["c_custkey", "c_name", "c_acctbal", "c_comment"]);
+
+    // Verify nullable flags are correctly preserved (issue #59)
+    // c_custkey and c_name are NOT NULL, c_acctbal and c_comment are nullable
+    result.assert_nullable_flags(&[
+        ("c_custkey", false), // NOT NULL
+        ("c_name", false),    // NOT NULL
+        ("c_acctbal", true),  // nullable
+        ("c_comment", true),  // nullable
+    ]);
 }
 
 /// Run empty table nullable flags preservation test scenario.
@@ -945,6 +989,15 @@ async fn run_empty_nullable_flags_test(
     // Verify we got 0 rows but correct columns
     result.assert_row_count(0);
     result.assert_columns(&["c_custkey", "c_name", "c_acctbal", "c_comment"]);
+
+    // Verify nullable flags are correctly preserved even for empty tables (issue #59)
+    // This is the critical case - nullable must come from information_schema, not data
+    result.assert_nullable_flags(&[
+        ("c_custkey", false), // NOT NULL
+        ("c_name", false),    // NOT NULL
+        ("c_acctbal", true),  // nullable
+        ("c_comment", true),  // nullable
+    ]);
 }
 
 // ============================================================================

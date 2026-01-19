@@ -53,12 +53,13 @@ pub async fn query_handler(
     };
 
     // Serialize results for HTTP response
-    let (columns, rows) = serialize_batches(schema, batches)?;
+    let (columns, nullable, rows) = serialize_batches(schema, batches)?;
     let row_count = rows.len();
 
     Ok(Json(QueryResponse {
         result_id,
         columns,
+        nullable,
         rows,
         row_count,
         execution_time_ms,
@@ -66,13 +67,14 @@ pub async fn query_handler(
     }))
 }
 
-/// Serialize record batches to columns and rows for JSON response.
+/// Serialize record batches to columns, nullable flags, and rows for JSON response.
 fn serialize_batches(
     schema: &Arc<Schema>,
     batches: &[RecordBatch],
-) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>), ApiError> {
-    // Get column names from schema
+) -> Result<(Vec<String>, Vec<bool>, Vec<Vec<serde_json::Value>>), ApiError> {
+    // Get column names and nullable flags from schema
     let columns: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
+    let nullable: Vec<bool> = schema.fields().iter().map(|f| f.is_nullable()).collect();
 
     // Convert rows to JSON values
     let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
@@ -96,7 +98,7 @@ fn serialize_batches(
         }
     }
 
-    Ok((columns, rows))
+    Ok((columns, nullable, rows))
 }
 
 /// Handler for GET /information_schema
@@ -689,13 +691,14 @@ pub async fn get_result_handler(
         .map_err(|e| ApiError::internal_error(format!("Failed to lookup result: {}", e)))?
         .ok_or_else(|| ApiError::not_found(format!("Result '{}' not found", id)))?;
 
-    let (columns, rows) = serialize_batches(&schema, &batches)?;
+    let (columns, nullable, rows) = serialize_batches(&schema, &batches)?;
     let row_count = rows.len();
     let execution_time_ms = start.elapsed().as_millis() as u64;
 
     Ok(Json(QueryResponse {
         result_id: Some(id),
         columns,
+        nullable,
         rows,
         row_count,
         execution_time_ms,
