@@ -7,8 +7,8 @@ use datafusion::arrow::array::{
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use futures::StreamExt;
-use sqlx::postgres::{PgColumn, PgConnection, PgRow};
-use sqlx::{Column, Connection, Row, TypeInfo};
+use sqlx::postgres::{PgConnection, PgRow};
+use sqlx::{Connection, Row};
 use std::sync::Arc;
 use urlencoding::encode;
 
@@ -182,69 +182,62 @@ pub async fn fetch_table(
 
     const BATCH_SIZE: usize = 10_000;
 
+    // Query information_schema for accurate column metadata (especially nullable).
+    // This ensures we get correct nullable flags regardless of table data.
+    // We query on the same connection before starting the streaming data fetch.
+    let schema_rows = sqlx::query(
+        r#"
+        SELECT column_name, data_type, is_nullable
+        FROM information_schema.columns
+        WHERE table_schema = $1 AND table_name = $2
+        ORDER BY ordinal_position
+        "#,
+    )
+    .bind(schema)
+    .bind(table)
+    .fetch_all(&mut conn)
+    .await?;
+
+    if schema_rows.is_empty() {
+        return Err(DataFetchError::Query(format!(
+            "Table {}.{} has no columns",
+            schema, table
+        )));
+    }
+
+    let fields: Vec<Field> = schema_rows
+        .iter()
+        .map(|row| {
+            let col_name: String = row.get(0);
+            let data_type: String = row.get(1);
+            let is_nullable: String = row.get(2);
+            Field::new(
+                col_name,
+                pg_type_to_arrow(&data_type),
+                is_nullable.to_uppercase() == "YES",
+            )
+        })
+        .collect();
+
+    let arrow_schema = Schema::new(fields);
+
     // Stream rows instead of loading all into memory
     let mut stream = sqlx::query(&query).fetch(&mut conn);
-
-    // Get first row to extract schema
-    let first_row = stream.next().await;
-
-    let arrow_schema = match &first_row {
-        Some(Ok(row)) => schema_from_columns(row.columns()),
-        Some(Err(e)) => return Err(DataFetchError::Query(e.to_string())),
-        None => {
-            // Empty table: query information_schema for schema
-            // Need a new connection since stream borrows conn
-            let mut schema_conn = connect_with_ssl_retry(&connection_string).await?;
-            let schema_rows = sqlx::query(
-                r#"
-                SELECT column_name, data_type, is_nullable
-                FROM information_schema.columns
-                WHERE table_schema = $1 AND table_name = $2
-                ORDER BY ordinal_position
-                "#,
-            )
-            .bind(schema)
-            .bind(table)
-            .fetch_all(&mut schema_conn)
-            .await?;
-
-            if schema_rows.is_empty() {
-                return Err(DataFetchError::Query(format!(
-                    "Table {}.{} has no columns",
-                    schema, table
-                )));
-            }
-
-            let fields: Vec<Field> = schema_rows
-                .iter()
-                .map(|row| {
-                    let col_name: String = row.get(0);
-                    let data_type: String = row.get(1);
-                    let is_nullable: String = row.get(2);
-                    Field::new(
-                        col_name,
-                        pg_type_to_arrow(&data_type),
-                        is_nullable.to_uppercase() == "YES",
-                    )
-                })
-                .collect();
-
-            Schema::new(fields)
-        }
-    };
 
     // Initialize writer with schema
     writer.init(&arrow_schema)?;
 
-    // Handle empty table case
-    if first_row.is_none() {
-        let empty_batch = RecordBatch::new_empty(Arc::new(arrow_schema));
-        writer.write_batch(&empty_batch)?;
-        return Ok(());
-    }
-
-    // Process first row and continue streaming
-    let first_row = first_row.unwrap()?;
+    // Check if table has any rows
+    let first_row = match stream.next().await {
+        Some(Ok(row)) => row,
+        Some(Err(e)) => return Err(DataFetchError::Query(e.to_string())),
+        None => {
+            // Empty table
+            let empty_batch = RecordBatch::new_empty(Arc::new(arrow_schema));
+            writer.write_batch(&empty_batch)?;
+            return Ok(());
+        }
+    };
     let mut batch_rows: Vec<PgRow> = Vec::with_capacity(BATCH_SIZE);
     batch_rows.push(first_row);
 
@@ -273,20 +266,6 @@ pub async fn fetch_table(
 // ============================================================================
 // Arrow conversion utilities
 // ============================================================================
-
-/// Build Arrow Schema from sqlx column metadata
-fn schema_from_columns(columns: &[PgColumn]) -> Schema {
-    let fields: Vec<Field> = columns
-        .iter()
-        .map(|col| {
-            let name = col.name();
-            let data_type = pg_type_to_arrow(col.type_info().name());
-            Field::new(name, data_type, true) // Assume nullable
-        })
-        .collect();
-
-    Schema::new(fields)
-}
 
 /// Convert PostgreSQL type name to Arrow DataType
 fn pg_type_to_arrow(pg_type: &str) -> DataType {

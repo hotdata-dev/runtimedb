@@ -8,8 +8,8 @@ use datafusion::arrow::array::{
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use futures::StreamExt;
-use sqlx::mysql::{MySqlColumn, MySqlConnectOptions, MySqlConnection, MySqlRow, MySqlSslMode};
-use sqlx::{Column, ConnectOptions, Row, TypeInfo};
+use sqlx::mysql::{MySqlConnectOptions, MySqlConnection, MySqlRow, MySqlSslMode};
+use sqlx::{ConnectOptions, Row};
 use std::sync::Arc;
 use tracing::warn;
 
@@ -176,7 +176,7 @@ pub async fn fetch_table(
     writer: &mut StreamingParquetWriter,
 ) -> Result<(), DataFetchError> {
     let options = resolve_connect_options(source, secrets).await?;
-    let mut conn = connect_with_ssl_retry(options.clone()).await?;
+    let mut conn = connect_with_ssl_retry(options).await?;
 
     // Build query - use backticks for MySQL identifier escaping
     let query = format!(
@@ -187,69 +187,66 @@ pub async fn fetch_table(
 
     const BATCH_SIZE: usize = 10_000;
 
+    // Query information_schema for accurate column metadata (especially nullable).
+    // This ensures we get correct nullable flags regardless of table data.
+    // We query on the same connection before starting the streaming data fetch.
+    // Note: CAST is required because MySQL returns some columns as BLOB.
+    let schema_rows = sqlx::query(
+        r#"
+        SELECT
+            CAST(COLUMN_NAME AS CHAR(64)) AS COLUMN_NAME,
+            CAST(COLUMN_TYPE AS CHAR(255)) AS COLUMN_TYPE,
+            CAST(IS_NULLABLE AS CHAR(3)) AS IS_NULLABLE
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+        ORDER BY ORDINAL_POSITION
+        "#,
+    )
+    .bind(schema)
+    .bind(table)
+    .fetch_all(&mut conn)
+    .await?;
+
+    if schema_rows.is_empty() {
+        return Err(DataFetchError::Query(format!(
+            "Table {}.{} has no columns",
+            schema, table
+        )));
+    }
+
+    let fields: Vec<Field> = schema_rows
+        .iter()
+        .map(|row| {
+            let col_name: String = row.get(0);
+            let data_type: String = row.get(1);
+            let is_nullable: String = row.get(2);
+            Field::new(
+                col_name,
+                mysql_type_to_arrow(&data_type),
+                is_nullable.to_uppercase() == "YES",
+            )
+        })
+        .collect();
+
+    let arrow_schema = Schema::new(fields);
+
     // Stream rows instead of loading all into memory
     let mut stream = sqlx::query(&query).fetch(&mut conn);
-
-    // Get first row to extract schema
-    let first_row = stream.next().await;
-
-    let arrow_schema = match &first_row {
-        Some(Ok(row)) => schema_from_columns(row.columns()),
-        Some(Err(e)) => return Err(DataFetchError::Query(e.to_string())),
-        None => {
-            // Empty table: query information_schema for schema
-            // Need a new connection since stream borrows conn
-            let mut schema_conn = connect_with_ssl_retry(options).await?;
-            let schema_rows = sqlx::query(
-                r#"
-                SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE
-                FROM information_schema.COLUMNS
-                WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-                ORDER BY ORDINAL_POSITION
-                "#,
-            )
-            .bind(schema)
-            .bind(table)
-            .fetch_all(&mut schema_conn)
-            .await?;
-
-            if schema_rows.is_empty() {
-                return Err(DataFetchError::Query(format!(
-                    "Table {}.{} has no columns",
-                    schema, table
-                )));
-            }
-
-            let fields: Vec<Field> = schema_rows
-                .iter()
-                .map(|row| {
-                    let col_name: String = row.get(0);
-                    let data_type: String = row.get(1);
-                    let is_nullable: String = row.get(2);
-                    Field::new(
-                        col_name,
-                        mysql_type_to_arrow(&data_type),
-                        is_nullable.to_uppercase() == "YES",
-                    )
-                })
-                .collect();
-
-            Schema::new(fields)
-        }
-    };
 
     // Initialize writer with schema
     writer.init(&arrow_schema)?;
 
-    // Handle empty table case
-    if first_row.is_none() {
-        let empty_batch = RecordBatch::new_empty(Arc::new(arrow_schema));
-        writer.write_batch(&empty_batch)?;
-        return Ok(());
-    }
-
-    // Process first row and continue streaming
-    let first_row = first_row.unwrap()?;
+    // Check if table has any rows
+    let first_row = match stream.next().await {
+        Some(Ok(row)) => row,
+        Some(Err(e)) => return Err(DataFetchError::Query(e.to_string())),
+        None => {
+            // Empty table
+            let empty_batch = RecordBatch::new_empty(Arc::new(arrow_schema));
+            writer.write_batch(&empty_batch)?;
+            return Ok(());
+        }
+    };
     let mut batch_rows: Vec<MySqlRow> = Vec::with_capacity(BATCH_SIZE);
     batch_rows.push(first_row);
 
@@ -278,20 +275,6 @@ pub async fn fetch_table(
 // ============================================================================
 // Arrow conversion utilities
 // ============================================================================
-
-/// Build Arrow Schema from sqlx column metadata
-fn schema_from_columns(columns: &[MySqlColumn]) -> Schema {
-    let fields: Vec<Field> = columns
-        .iter()
-        .map(|col| {
-            let name = col.name();
-            let data_type = mysql_type_to_arrow(col.type_info().name());
-            Field::new(name, data_type, true) // Assume nullable
-        })
-        .collect();
-
-    Schema::new(fields)
-}
 
 /// Convert MySQL type name to Arrow DataType
 fn mysql_type_to_arrow(mysql_type: &str) -> DataType {
