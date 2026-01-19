@@ -14,14 +14,19 @@ type = "sqlite"
 #password =
 
 [storage]
-type = "filesystem"
-## S3 Example
+type = "s3"
+bucket = "ducklake-data"
+region = "us-west-2"
+endpoint = "http://localhost:9000"
+access_key = "minioadmin"
+secret_key = "minioadmin"
+## Filesystem example
 #[storage]
-#type = "s3"
-#bucket = "runtime-cache"
-#region = "us-east-1"
-## Optional: for MinIO/localstack
-#endpoint = "http://localhost:9000"
+#type = "filesystem"
 
 [paths]
 #cache_dir = "~/.hotdata/runtimedb/cache"
+
+[liquid_cache]
+enabled = true
+server_address = "http://localhost:15214"

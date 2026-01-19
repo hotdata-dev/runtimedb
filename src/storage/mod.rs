@@ -1,8 +1,10 @@
 // src/storage/mod.rs
 use anyhow::Result;
 use async_trait::async_trait;
+use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::SessionContext;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt::Debug;
 
 pub mod filesystem;
@@ -55,6 +57,13 @@ pub trait StorageManager: Debug + Send + Sync {
     /// Get S3 credentials
     /// Returns None for non-S3 storage backends.
     fn get_s3_credentials(&self) -> Option<S3Credentials> {
+        None
+    }
+
+    /// Get object store configuration for liquid-cache registration.
+    /// Returns the object store URL and options (credentials) needed to register
+    /// with liquid-cache's server.
+    fn get_object_store_config(&self) -> Option<(ObjectStoreUrl, HashMap<String, String>)> {
         None
     }
 

@@ -13,6 +13,7 @@ use crate::http::models::{
 use crate::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
+use liquid_cache_client::LiquidCacheBuilder;
 use anyhow::Result;
 use chrono::Utc;
 use datafusion::arrow::datatypes::Schema;
@@ -125,6 +126,15 @@ impl RuntimeEngine {
         if config.storage.storage_type != "filesystem" {
             let storage = Self::create_storage_from_config(config).await?;
             builder = builder.storage(storage);
+        }
+
+        if config.liquid_cache.enabled {
+            let server = config.liquid_cache.server_address.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("liquid cache enabled but server_address not set")
+            })?;
+            info!("Creating liquid cache builder for server: {}", server);
+            let liquid_cache_builder = LiquidCacheBuilder::new(server);
+            builder = builder.liquid_cache_builder(liquid_cache_builder);
         }
 
         builder.build().await
@@ -1154,6 +1164,7 @@ pub struct RuntimeEngineBuilder {
     deletion_grace_period: Duration,
     deletion_worker_interval: Duration,
     parallel_refresh_count: usize,
+    liquid_cache_builder: Option<LiquidCacheBuilder>,
 }
 
 impl Default for RuntimeEngineBuilder {
@@ -1176,6 +1187,7 @@ impl RuntimeEngineBuilder {
             deletion_grace_period: DEFAULT_DELETION_GRACE_PERIOD,
             deletion_worker_interval: Duration::from_secs(DEFAULT_DELETION_WORKER_INTERVAL_SECS),
             parallel_refresh_count: DEFAULT_PARALLEL_REFRESH_COUNT,
+            liquid_cache_builder: None,
         }
     }
 
@@ -1241,6 +1253,13 @@ impl RuntimeEngineBuilder {
         self
     }
 
+    /// Configure liquid cache for distributed query caching.
+    /// When enabled, queries are offloaded to a liquid-cache server for caching.
+    pub fn liquid_cache_builder(mut self, builder: LiquidCacheBuilder) -> Self {
+        self.liquid_cache_builder = Some(builder);
+        self
+    }
+
     /// Resolve the base directory, using default if not set.
     fn resolve_base_dir(&self) -> PathBuf {
         self.base_dir.clone().unwrap_or_else(|| {
@@ -1297,8 +1316,21 @@ impl RuntimeEngineBuilder {
         // Step 5: Run migrations and set up DataFusion
         catalog.run_migrations().await?;
 
-        let df_ctx = SessionContext::new();
-        storage.register_with_datafusion(&df_ctx)?;
+        let df_ctx = if let Some(mut liquid_cache_builder) = self.liquid_cache_builder {
+            info!("Building liquid cache session context");
+
+            // Register object stores from storage config
+            if let Some((url, options)) = storage.get_object_store_config() {
+                liquid_cache_builder = liquid_cache_builder.with_object_store(url, Some(options));
+            }
+
+            liquid_cache_builder.build(SessionConfig::new())?
+        } else {
+            let ctx = SessionContext::new();
+            // Register storage with DataFusion (only when not using liquid cache)
+            storage.register_with_datafusion(&ctx)?;
+            ctx
+        };
 
         // Step 6: Initialize secret manager
         let (secret_key, using_default_key) = match self.secret_key {
@@ -1604,7 +1636,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_from_config_sqlite_filesystem() {
         use crate::config::{
-            AppConfig, CatalogConfig, PathsConfig, SecretsConfig, ServerConfig, StorageConfig,
+            AppConfig, CatalogConfig, LiquidCacheConfig, PathsConfig, SecretsConfig, ServerConfig,
+            StorageConfig,
         };
 
         let temp_dir = TempDir::new().unwrap();
@@ -1636,6 +1669,7 @@ mod tests {
             secrets: SecretsConfig {
                 encryption_key: Some(test_secret_key()),
             },
+            liquid_cache: LiquidCacheConfig { enabled: false, server_address: None },
         };
 
         let engine = RuntimeEngine::from_config(&config).await;

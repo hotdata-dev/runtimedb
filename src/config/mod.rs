@@ -10,6 +10,8 @@ pub struct AppConfig {
     pub paths: PathsConfig,
     #[serde(default)]
     pub secrets: SecretsConfig,
+    #[serde(default)]
+    pub liquid_cache: LiquidCacheConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -62,6 +64,15 @@ pub struct SecretsConfig {
     /// Encryption key for secrets (base64-encoded 32-byte key).
     /// Can also be set via RUNTIMEDB_SECRET_KEY environment variable.
     pub encryption_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct LiquidCacheConfig {
+    /// Whether liquid cache is enabled
+    #[serde(default)]
+    pub enabled: bool,
+    /// Liquid cache server address (e.g., "http://localhost:15214")
+    pub server_address: Option<String>,
 }
 
 impl AppConfig {
