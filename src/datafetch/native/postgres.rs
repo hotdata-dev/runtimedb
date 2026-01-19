@@ -200,7 +200,7 @@ pub async fn fetch_table(
 
     if schema_rows.is_empty() {
         return Err(DataFetchError::Query(format!(
-            "Table {}.{} has no columns",
+            "Table {}.{} not found or has no columns",
             schema, table
         )));
     }
