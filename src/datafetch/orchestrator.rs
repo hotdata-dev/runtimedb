@@ -75,13 +75,23 @@ impl FetchOrchestrator {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to finalize cache write: {}", e))?;
 
-        // Update catalog with new path
+        // Update catalog with new path. If this fails, clean up orphaned files.
         if let Ok(Some(info)) = self
             .catalog
             .get_table(connection_id, schema_name, table_name)
             .await
         {
-            let _ = self.catalog.update_table_sync(info.id, &parquet_url).await;
+            if let Err(e) = self.catalog.update_table_sync(info.id, &parquet_url).await {
+                // Clean up orphaned cache files to prevent storage leaks
+                if let Err(cleanup_err) = self.storage.delete_prefix(&parquet_url).await {
+                    tracing::warn!(
+                        "Failed to clean up orphaned directory {} after catalog update failure: {}",
+                        parquet_url,
+                        cleanup_err
+                    );
+                }
+                return Err(anyhow::anyhow!("Failed to update catalog: {}", e));
+            }
         }
 
         Ok((parquet_url, row_count))
@@ -767,6 +777,58 @@ mod tests {
             deleted.len(),
             0,
             "No cleanup should be needed since we fail before writing any data"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cache_table_cleans_up_on_catalog_failure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_path = temp_dir.path().join("cache");
+        std::fs::create_dir_all(&cache_path).unwrap();
+
+        let fetcher = Arc::new(MockFetcher);
+        let storage = Arc::new(MockStorage::new(cache_path.clone()));
+        let catalog = Arc::new(MockCatalog::new());
+        let secret_manager = Arc::new(create_test_secret_manager(temp_dir.path()).await);
+
+        // Add a table to the mock catalog
+        catalog.add_table(1, "test", "orders");
+
+        // Configure catalog to fail on update
+        catalog.set_fail_update(true);
+
+        let orchestrator =
+            FetchOrchestrator::new(fetcher, storage.clone(), catalog, secret_manager);
+
+        let source = Source::Duckdb {
+            path: ":memory:".to_string(),
+        };
+
+        // This should fail because catalog update is configured to fail
+        let result = orchestrator.cache_table(&source, 1, "test", "orders").await;
+
+        assert!(result.is_err(), "cache_table should fail");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Failed to update catalog"),
+            "Error should be from catalog, got: {}",
+            err_msg
+        );
+
+        // Verify that cleanup was attempted (storage.delete_prefix was called)
+        let deleted = storage.get_deleted_urls();
+        assert_eq!(
+            deleted.len(),
+            1,
+            "Should have deleted exactly one URL (the orphaned file)"
+        );
+
+        // Verify the deleted URL matches the expected pattern
+        let deleted_url = &deleted[0];
+        assert!(
+            deleted_url.contains("/1/test/orders/"),
+            "Deleted URL should be for the test table: {}",
+            deleted_url
         );
     }
 }
