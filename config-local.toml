@@ -29,4 +29,5 @@ secret_key = "minioadmin"
 
 [liquid_cache]
 enabled = true
-server_address = "http://localhost:15214"
+max_cache_bytes = 5368709120 # 1GB (optional defaults to 1GB)
+# cache_dir = "/path/to/cache"  # optional, defaults to {base_dir}/liquid_cache

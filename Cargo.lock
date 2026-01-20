@@ -1868,6 +1868,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "congee"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72819224a9c43e0a5d64bdad35a71fde68bf479992fb8989635c72bc547909be"
+dependencies = [
+ "crossbeam-epoch",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1892,6 +1901,12 @@ dependencies = [
  "once_cell",
  "tiny-keccak",
 ]
+
+[[package]]
+name = "const_for"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9c50fcfdf972929aff202c16b80086aa3cfc6a3a820af714096c58c7c1d0582"
 
 [[package]]
 name = "constant_time_eq"
@@ -2725,33 +2740,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "datafusion-proto"
-version = "50.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7df9f606892e6af45763d94d210634eec69b9bb6ced5353381682ff090028a3"
-dependencies = [
- "arrow 56.2.0",
- "chrono",
- "datafusion",
- "datafusion-common",
- "datafusion-expr",
- "datafusion-proto-common",
- "object_store 0.12.4",
- "prost 0.13.5",
-]
-
-[[package]]
-name = "datafusion-proto-common"
-version = "50.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4b14f288ca4ef77743d9672cafecf3adfffff0b9b04af9af79ecbeaaf736901"
-dependencies = [
- "arrow 56.2.0",
- "datafusion-common",
- "prost 0.13.5",
-]
-
-[[package]]
 name = "datafusion-pruning"
 version = "50.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3066,6 +3054,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastlanes"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b32ae222e7610a7d2ed53b733ec7a4f2fe15b8bd1d4cffc80d1a6e9b2d91959"
+dependencies = [
+ "arrayref",
+ "const_for",
+ "num-traits",
+ "paste",
+ "seq-macro",
+]
+
+[[package]]
 name = "fastrace"
 version = "0.7.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3090,18 +3091,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.110",
-]
-
-[[package]]
-name = "fastrace-tonic"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9bfe91596cd82e4b4fbd390f0e789fe3cf327b635fa713347f1509db97aa482c"
-dependencies = [
- "fastrace",
- "http 1.3.1",
- "tower-layer",
- "tower-service",
 ]
 
 [[package]]
@@ -3213,6 +3202,12 @@ name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
+
+[[package]]
+name = "fsst-rs"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "561f2458a3407836ab8f1acc9113b8cda91b9d6378ba8dad13b2fe1a1d3af5ce"
 
 [[package]]
 name = "funty"
@@ -4014,6 +4009,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8bb03732005da905c88227371639bf1ad885cc712789c011c31c5fb3ab3ccf02"
 
 [[package]]
+name = "io-uring"
+version = "0.7.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdd7bddefd0a8833b88a4b68f90dae22c7450d11b354198baee3874fd811b344"
+dependencies = [
+ "bitflags 2.10.0",
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4264,28 +4270,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df1d3c3b53da64cf5760482273a98e575c651a67eec7f77df96b5b642de8f039"
 
 [[package]]
-name = "liquid-cache-client"
-version = "0.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f9573c84ac172673a1790875898057fa904168c2b44e36c70e449dc1c32293f"
-dependencies = [
- "arrow 56.2.0",
- "arrow-flight",
- "arrow-schema 56.2.0",
- "datafusion",
- "datafusion-proto",
- "fastrace",
- "fastrace-tonic",
- "futures",
- "liquid-cache-common",
- "object_store 0.12.4",
- "tokio",
- "tonic 0.13.1",
- "tower",
- "uuid",
-]
-
-[[package]]
 name = "liquid-cache-common"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4302,6 +4286,74 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "liquid-cache-local"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "abe3a98f97f80fff9d6c411beb9a8330339ecc288201242d2c55b13a3ff86a33"
+dependencies = [
+ "arrow 56.2.0",
+ "arrow-schema 56.2.0",
+ "datafusion",
+ "fastrace",
+ "liquid-cache-common",
+ "liquid-cache-parquet",
+ "liquid-cache-storage",
+ "tokio",
+]
+
+[[package]]
+name = "liquid-cache-parquet"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a90ac2ff9239955168311203483784f0be9c5e5feb292430aedc39b6bcb898f"
+dependencies = [
+ "ahash 0.8.12",
+ "arrow 56.2.0",
+ "arrow-schema 56.2.0",
+ "async-trait",
+ "bytes",
+ "crossbeam-channel",
+ "datafusion",
+ "fastrace",
+ "futures",
+ "io-uring",
+ "libc",
+ "liquid-cache-common",
+ "liquid-cache-storage",
+ "log",
+ "object_store 0.12.4",
+ "parquet 56.2.0",
+ "tokio",
+]
+
+[[package]]
+name = "liquid-cache-storage"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1062956b821b67fbfac5edecee9bcaa8ec56cd09e9696db82cad7d5c67295f6"
+dependencies = [
+ "ahash 0.8.12",
+ "arrow 56.2.0",
+ "arrow-schema 56.2.0",
+ "async-stream",
+ "async-trait",
+ "bytes",
+ "congee",
+ "datafusion",
+ "fastlanes",
+ "fastrace",
+ "fsst-rs",
+ "futures",
+ "liquid-cache-common",
+ "log",
+ "num-traits",
+ "object_store 0.12.4",
+ "parquet 56.2.0",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -4912,6 +4964,9 @@ dependencies = [
  "num",
  "num-bigint",
  "object_store 0.12.4",
+ "parquet-variant",
+ "parquet-variant-compute",
+ "parquet-variant-json",
  "paste",
  "ring",
  "seq-macro",
@@ -4921,6 +4976,48 @@ dependencies = [
  "tokio",
  "twox-hash",
  "zstd",
+]
+
+[[package]]
+name = "parquet-variant"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a56bf96fdaf5f9392b447cf1e60bfe4b72149ab3309aa3855c02813cc89ad93f"
+dependencies = [
+ "arrow-schema 56.2.0",
+ "chrono",
+ "half",
+ "indexmap 2.12.0",
+ "simdutf8",
+ "uuid",
+]
+
+[[package]]
+name = "parquet-variant-compute"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc7ce683368c9f2672379c12e35b5cd664e81964e234d891b4073a8355015ce7"
+dependencies = [
+ "arrow 56.2.0",
+ "arrow-schema 56.2.0",
+ "chrono",
+ "half",
+ "parquet-variant",
+ "parquet-variant-json",
+]
+
+[[package]]
+name = "parquet-variant-json"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af8bde078e883e197efe49d315bfa0ecf8f68879d32a2abf34eb09f40ea88f21"
+dependencies = [
+ "arrow-schema 56.2.0",
+ "base64 0.22.1",
+ "chrono",
+ "parquet-variant",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -5845,7 +5942,7 @@ dependencies = [
  "iceberg",
  "iceberg-catalog-glue",
  "iceberg-catalog-rest",
- "liquid-cache-client",
+ "liquid-cache-local",
  "log",
  "nanoid",
  "object_store 0.12.4",

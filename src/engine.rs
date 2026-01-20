@@ -13,7 +13,7 @@ use crate::http::models::{
 use crate::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
-use liquid_cache_client::LiquidCacheBuilder;
+use liquid_cache_local::LiquidCacheLocalBuilder;
 use anyhow::Result;
 use chrono::Utc;
 use datafusion::arrow::datatypes::Schema;
@@ -129,11 +129,18 @@ impl RuntimeEngine {
         }
 
         if config.liquid_cache.enabled {
-            let server = config.liquid_cache.server_address.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("liquid cache enabled but server_address not set")
-            })?;
-            info!("Creating liquid cache builder for server: {}", server);
-            let liquid_cache_builder = LiquidCacheBuilder::new(server);
+            info!("Creating liquid cache builder (embed mode)");
+            let mut liquid_cache_builder = LiquidCacheLocalBuilder::new();
+
+            if let Some(max_bytes) = config.liquid_cache.max_cache_bytes {
+                liquid_cache_builder = liquid_cache_builder.with_max_cache_bytes(max_bytes);
+            }
+
+            if let Some(cache_dir) = &config.liquid_cache.cache_dir {
+                liquid_cache_builder =
+                    liquid_cache_builder.with_cache_dir(std::path::PathBuf::from(cache_dir));
+            }
+
             builder = builder.liquid_cache_builder(liquid_cache_builder);
         }
 
@@ -1164,7 +1171,7 @@ pub struct RuntimeEngineBuilder {
     deletion_grace_period: Duration,
     deletion_worker_interval: Duration,
     parallel_refresh_count: usize,
-    liquid_cache_builder: Option<LiquidCacheBuilder>,
+    liquid_cache_builder: Option<LiquidCacheLocalBuilder>,
 }
 
 impl Default for RuntimeEngineBuilder {
@@ -1253,9 +1260,9 @@ impl RuntimeEngineBuilder {
         self
     }
 
-    /// Configure liquid cache for distributed query caching.
-    /// When enabled, queries are offloaded to a liquid-cache server for caching.
-    pub fn liquid_cache_builder(mut self, builder: LiquidCacheBuilder) -> Self {
+    /// Configure liquid cache for in-process query caching.
+    /// When enabled, queries benefit from liquid cache optimizations locally.
+    pub fn liquid_cache_builder(mut self, builder: LiquidCacheLocalBuilder) -> Self {
         self.liquid_cache_builder = Some(builder);
         self
     }
@@ -1316,18 +1323,16 @@ impl RuntimeEngineBuilder {
         // Step 5: Run migrations and set up DataFusion
         catalog.run_migrations().await?;
 
-        let df_ctx = if let Some(mut liquid_cache_builder) = self.liquid_cache_builder {
-            info!("Building liquid cache session context");
+        let df_ctx = if let Some(liquid_cache_builder) = self.liquid_cache_builder {
+            info!("Building liquid cache session context (embed mode)");
 
-            // Register object stores from storage config
-            if let Some((url, options)) = storage.get_object_store_config() {
-                liquid_cache_builder = liquid_cache_builder.with_object_store(url, Some(options));
-            }
-
-            liquid_cache_builder.build(SessionConfig::new())?
+            let (ctx, _cache_ref) = liquid_cache_builder.build(SessionConfig::new())?;
+            // Register object stores with the context after building
+            storage.register_with_datafusion(&ctx)?;
+            ctx
         } else {
             let ctx = SessionContext::new();
-            // Register storage with DataFusion (only when not using liquid cache)
+            // Register storage with DataFusion
             storage.register_with_datafusion(&ctx)?;
             ctx
         };
@@ -1669,7 +1674,7 @@ mod tests {
             secrets: SecretsConfig {
                 encryption_key: Some(test_secret_key()),
             },
-            liquid_cache: LiquidCacheConfig { enabled: false, server_address: None },
+            liquid_cache: LiquidCacheConfig { enabled: false, max_cache_bytes: None, cache_dir: None },
         };
 
         let engine = RuntimeEngine::from_config(&config).await;

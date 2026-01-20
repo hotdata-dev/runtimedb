@@ -71,8 +71,10 @@ pub struct LiquidCacheConfig {
     /// Whether liquid cache is enabled
     #[serde(default)]
     pub enabled: bool,
-    /// Liquid cache server address (e.g., "http://localhost:15214")
-    pub server_address: Option<String>,
+    /// Maximum cache size in bytes (defaults to 1GB)
+    pub max_cache_bytes: Option<usize>,
+    /// Custom cache directory. If not set, uses {base_dir}/liquid_cache
+    pub cache_dir: Option<String>,
 }
 
 impl AppConfig {
