@@ -287,6 +287,289 @@ mod mysql_container_tests {
         assert!(schema.field_with_name("price").is_ok());
         assert!(schema.field_with_name("in_stock").is_ok());
     }
+
+    /// Test that nullable flags from the database are correctly preserved in Parquet schema.
+    /// This verifies fix for issue #59: columns declared as NOT NULL should have nullable=false
+    /// in the resulting Arrow/Parquet schema.
+    #[tokio::test]
+    async fn test_mysql_fetch_preserves_nullable_flags() {
+        use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use runtimedb::datafetch::StreamingParquetWriter;
+        use std::fs::File;
+
+        let temp_dir = TempDir::new().unwrap();
+        let secrets =
+            create_test_secret_manager_with_password(&temp_dir, "mysql-pass", TEST_PASSWORD).await;
+
+        // Start MySQL container
+        let container = Mysql::default()
+            .with_tag("8.0")
+            .with_env_var("MYSQL_ROOT_PASSWORD", TEST_PASSWORD)
+            .start()
+            .await
+            .expect("Failed to start mysql");
+        let port = container.get_host_port_ipv4(3306).await.unwrap();
+
+        // Create test database with explicit nullable/non-nullable columns
+        let conn_str = format!("mysql://root:{}@localhost:{}/mysql", TEST_PASSWORD, port);
+        let pool = sqlx::MySqlPool::connect(&conn_str).await.unwrap();
+
+        sqlx::query("CREATE DATABASE IF NOT EXISTS testdb")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Create table with mix of nullable and non-nullable columns
+        // c_custkey and c_name are NOT NULL (like TPC-H customer table)
+        // c_acctbal and c_comment are nullable
+        sqlx::query(
+            "CREATE TABLE testdb.customer (
+                c_custkey INT NOT NULL,
+                c_name VARCHAR(100) NOT NULL,
+                c_acctbal DECIMAL(15,2),
+                c_comment VARCHAR(255)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Insert data including NULL values for nullable columns
+        sqlx::query(
+            "INSERT INTO testdb.customer VALUES
+                (1, 'Customer One', 1234.56, 'Regular customer'),
+                (2, 'Customer Two', NULL, NULL),
+                (3, 'Customer Three', 9999.99, 'VIP customer')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        // Fetch to parquet
+        let fetcher = NativeFetcher::new();
+        let source = Source::Mysql {
+            host: "localhost".to_string(),
+            port,
+            user: "root".to_string(),
+            database: "testdb".to_string(),
+            credential: runtimedb::source::Credential::SecretRef {
+                name: "mysql-pass".to_string(),
+            },
+        };
+
+        let output_path = temp_dir.path().join("customer_output.parquet");
+        let mut writer = StreamingParquetWriter::new(output_path.clone());
+
+        let result = fetcher
+            .fetch_table(&source, &secrets, None, "testdb", "customer", &mut writer)
+            .await;
+        assert!(result.is_ok(), "Fetch should succeed: {:?}", result.err());
+
+        writer.close().unwrap();
+
+        // Verify parquet file schema has correct nullable flags
+        let file = File::open(&output_path).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let mut batches = Vec::new();
+        for batch_result in reader {
+            batches.push(batch_result.unwrap());
+        }
+
+        let schema = batches[0].schema();
+
+        // Verify non-nullable columns
+        let c_custkey = schema.field_with_name("c_custkey").unwrap();
+        assert!(
+            !c_custkey.is_nullable(),
+            "c_custkey should be NOT NULL, but schema has nullable={}",
+            c_custkey.is_nullable()
+        );
+
+        let c_name = schema.field_with_name("c_name").unwrap();
+        assert!(
+            !c_name.is_nullable(),
+            "c_name should be NOT NULL, but schema has nullable={}",
+            c_name.is_nullable()
+        );
+
+        // Verify nullable columns
+        let c_acctbal = schema.field_with_name("c_acctbal").unwrap();
+        assert!(
+            c_acctbal.is_nullable(),
+            "c_acctbal should be nullable, but schema has nullable={}",
+            c_acctbal.is_nullable()
+        );
+
+        let c_comment = schema.field_with_name("c_comment").unwrap();
+        assert!(
+            c_comment.is_nullable(),
+            "c_comment should be nullable, but schema has nullable={}",
+            c_comment.is_nullable()
+        );
+
+        // Verify we have all 3 rows (including rows with NULLs)
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 3, "Should have 3 rows");
+    }
+}
+
+// PostgreSQL tests using testcontainers
+mod postgres_container_tests {
+    use super::*;
+    use testcontainers::{runners::AsyncRunner, ImageExt};
+    use testcontainers_modules::postgres::Postgres;
+
+    const TEST_PASSWORD: &str = "postgres";
+
+    async fn create_test_secret_manager_with_password(
+        dir: &TempDir,
+        secret_name: &str,
+        password: &str,
+    ) -> SecretManager {
+        let secrets = test_secret_manager(dir).await;
+        secrets
+            .create(secret_name, password.as_bytes())
+            .await
+            .unwrap();
+        secrets
+    }
+
+    /// Test that nullable flags from the database are correctly preserved in Parquet schema.
+    /// This verifies fix for issue #59: columns declared as NOT NULL should have nullable=false
+    /// in the resulting Arrow/Parquet schema.
+    #[tokio::test]
+    async fn test_postgres_fetch_preserves_nullable_flags() {
+        use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use runtimedb::datafetch::StreamingParquetWriter;
+        use std::fs::File;
+
+        let temp_dir = TempDir::new().unwrap();
+        let secrets =
+            create_test_secret_manager_with_password(&temp_dir, "pg-pass", TEST_PASSWORD).await;
+
+        // Start PostgreSQL container
+        let container = Postgres::default()
+            .with_tag("15")
+            .with_env_var("POSTGRES_PASSWORD", TEST_PASSWORD)
+            .start()
+            .await
+            .expect("Failed to start postgres");
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+
+        // Create test database with explicit nullable/non-nullable columns
+        let conn_str = format!(
+            "postgres://postgres:{}@localhost:{}/postgres",
+            TEST_PASSWORD, port
+        );
+        let pool = sqlx::PgPool::connect(&conn_str).await.unwrap();
+
+        sqlx::query("CREATE SCHEMA testdb")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Create table with mix of nullable and non-nullable columns
+        // c_custkey and c_name are NOT NULL (like TPC-H customer table)
+        // c_acctbal and c_comment are nullable
+        sqlx::query(
+            "CREATE TABLE testdb.customer (
+                c_custkey INTEGER NOT NULL,
+                c_name VARCHAR(100) NOT NULL,
+                c_acctbal DOUBLE PRECISION,
+                c_comment VARCHAR(255)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Insert data including NULL values for nullable columns
+        sqlx::query(
+            "INSERT INTO testdb.customer VALUES
+                (1, 'Customer One', 1234.56, 'Regular customer'),
+                (2, 'Customer Two', NULL, NULL),
+                (3, 'Customer Three', 9999.99, 'VIP customer')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        // Fetch to parquet
+        let fetcher = NativeFetcher::new();
+        let source = Source::Postgres {
+            host: "localhost".to_string(),
+            port,
+            user: "postgres".to_string(),
+            database: "postgres".to_string(),
+            credential: runtimedb::source::Credential::SecretRef {
+                name: "pg-pass".to_string(),
+            },
+        };
+
+        let output_path = temp_dir.path().join("customer_output.parquet");
+        let mut writer = StreamingParquetWriter::new(output_path.clone());
+
+        let result = fetcher
+            .fetch_table(&source, &secrets, None, "testdb", "customer", &mut writer)
+            .await;
+        assert!(result.is_ok(), "Fetch should succeed: {:?}", result.err());
+
+        writer.close().unwrap();
+
+        // Verify parquet file schema has correct nullable flags
+        let file = File::open(&output_path).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let mut batches = Vec::new();
+        for batch_result in reader {
+            batches.push(batch_result.unwrap());
+        }
+
+        let schema = batches[0].schema();
+
+        // Verify non-nullable columns
+        let c_custkey = schema.field_with_name("c_custkey").unwrap();
+        assert!(
+            !c_custkey.is_nullable(),
+            "c_custkey should be NOT NULL, but schema has nullable={}",
+            c_custkey.is_nullable()
+        );
+
+        let c_name = schema.field_with_name("c_name").unwrap();
+        assert!(
+            !c_name.is_nullable(),
+            "c_name should be NOT NULL, but schema has nullable={}",
+            c_name.is_nullable()
+        );
+
+        // Verify nullable columns
+        let c_acctbal = schema.field_with_name("c_acctbal").unwrap();
+        assert!(
+            c_acctbal.is_nullable(),
+            "c_acctbal should be nullable, but schema has nullable={}",
+            c_acctbal.is_nullable()
+        );
+
+        let c_comment = schema.field_with_name("c_comment").unwrap();
+        assert!(
+            c_comment.is_nullable(),
+            "c_comment should be nullable, but schema has nullable={}",
+            c_comment.is_nullable()
+        );
+
+        // Verify we have all 3 rows (including rows with NULLs)
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 3, "Should have 3 rows");
+    }
 }
 
 #[tokio::test]

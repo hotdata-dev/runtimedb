@@ -28,29 +28,34 @@ use tower::util::ServiceExt;
 struct QueryResult {
     row_count: usize,
     columns: Vec<String>,
+    /// Nullable flags for each column (parallel to columns vec)
+    nullable_flags: Vec<bool>,
     result_id: Option<String>,
 }
 
 impl QueryResult {
     fn from_engine(response: &runtimedb::QueryResponse) -> Self {
-        let batch = response.results.first();
+        // Use the schema field which is always present, even for empty results
+        let columns: Vec<String> = response
+            .schema
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
 
-        let (columns, row_count) = match batch {
-            Some(b) => {
-                let cols: Vec<String> = b
-                    .schema()
-                    .fields()
-                    .iter()
-                    .map(|f| f.name().clone())
-                    .collect();
-                (cols, b.num_rows())
-            }
-            None => (vec![], 0),
-        };
+        let nullable_flags: Vec<bool> = response
+            .schema
+            .fields()
+            .iter()
+            .map(|f| f.is_nullable())
+            .collect();
+
+        let row_count: usize = response.results.iter().map(|b| b.num_rows()).sum();
 
         Self {
             row_count,
             columns,
+            nullable_flags,
             result_id: None, // Engine doesn't return result_id directly
         }
     }
@@ -65,12 +70,18 @@ impl QueryResult {
             })
             .unwrap_or_default();
 
+        let nullable_flags = json["nullable"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_bool()).collect())
+            .unwrap_or_default();
+
         let row_count = json["row_count"].as_u64().unwrap_or(0) as usize;
         let result_id = json["result_id"].as_str().map(String::from);
 
         Self {
             row_count,
             columns,
+            nullable_flags,
             result_id,
         }
     }
@@ -86,6 +97,25 @@ impl QueryResult {
     fn assert_columns(&self, expected: &[&str]) {
         let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(self.columns, expected, "Column mismatch");
+    }
+
+    /// Assert nullable flags match expected values.
+    /// Takes a slice of (column_name, expected_nullable) tuples.
+    fn assert_nullable_flags(&self, expected: &[(&str, bool)]) {
+        for (col_name, expected_nullable) in expected {
+            let idx = self
+                .columns
+                .iter()
+                .position(|c| c == *col_name)
+                .unwrap_or_else(|| panic!("Column '{}' not found in result", col_name));
+
+            let actual_nullable = self.nullable_flags.get(idx).copied().unwrap_or(true);
+            assert_eq!(
+                actual_nullable, *expected_nullable,
+                "Column '{}' nullable mismatch: expected {}, got {}",
+                col_name, expected_nullable, actual_nullable
+            );
+        }
     }
 
     fn assert_has_result_id(&self) {
@@ -757,6 +787,20 @@ mod queries {
     pub fn select_all(conn: &str, schema: &str, table: &str) -> String {
         format!("SELECT * FROM {}.{}.{}", conn, schema, table)
     }
+
+    pub fn select_nullable_test(conn: &str, schema: &str) -> String {
+        format!(
+            "SELECT c_custkey, c_name, c_acctbal, c_comment FROM {}.{}.customer ORDER BY c_custkey",
+            conn, schema
+        )
+    }
+
+    pub fn select_empty_nullable_test(conn: &str, schema: &str) -> String {
+        format!(
+            "SELECT c_custkey, c_name, c_acctbal, c_comment FROM {}.{}.empty_customer ORDER BY c_custkey",
+            conn, schema
+        )
+    }
 }
 
 /// Run the golden path test scenario against any executor and source.
@@ -893,6 +937,69 @@ async fn run_purge_table_cache_test(executor: &dyn TestExecutor, source: &Source
     tables.assert_has_table("sales", "orders");
 }
 
+/// Run nullable flags preservation test scenario.
+/// Verifies fix for issue #59: columns declared as NOT NULL should have nullable=false
+/// in the resulting Arrow schema after sync.
+async fn run_nullable_flags_test(
+    executor: &dyn TestExecutor,
+    source: &Source,
+    conn_name: &str,
+    schema_name: &str,
+) {
+    // Connect
+    let _conn_id = executor.connect(conn_name, source).await;
+
+    // Query to trigger sync - this will create the parquet cache with schema
+    let result = executor
+        .query(&queries::select_nullable_test(conn_name, schema_name))
+        .await;
+
+    // Verify we got all 3 rows (including rows with NULLs in nullable columns)
+    result.assert_row_count(3);
+    result.assert_columns(&["c_custkey", "c_name", "c_acctbal", "c_comment"]);
+
+    // Verify nullable flags are correctly preserved (issue #59)
+    // c_custkey and c_name are NOT NULL, c_acctbal and c_comment are nullable
+    result.assert_nullable_flags(&[
+        ("c_custkey", false), // NOT NULL
+        ("c_name", false),    // NOT NULL
+        ("c_acctbal", true),  // nullable
+        ("c_comment", true),  // nullable
+    ]);
+}
+
+/// Run empty table nullable flags preservation test scenario.
+/// Verifies that nullable flags are correctly preserved even when table has no data rows.
+/// This is critical because the fix queries information_schema rather than inferring from data.
+async fn run_empty_nullable_flags_test(
+    executor: &dyn TestExecutor,
+    source: &Source,
+    conn_name: &str,
+    schema_name: &str,
+) {
+    // Connect
+    let _conn_id = executor.connect(conn_name, source).await;
+
+    // Query to trigger sync - this will create the parquet cache with schema
+    // The table is empty, so we expect 0 rows but correct column schema
+    let result = executor
+        .query(&queries::select_empty_nullable_test(conn_name, schema_name))
+        .await;
+
+    // Verify we got 0 rows but correct columns
+    result.assert_row_count(0);
+    result.assert_columns(&["c_custkey", "c_name", "c_acctbal", "c_comment"]);
+
+    // Verify nullable flags are correctly preserved even for empty tables (issue #59)
+    // This is the critical case - nullable must come from information_schema, not data
+    result.assert_nullable_flags(&[
+        ("c_custkey", false), // NOT NULL
+        ("c_name", false),    // NOT NULL
+        ("c_acctbal", true),  // nullable
+        ("c_comment", true),  // nullable
+    ]);
+}
+
 // ============================================================================
 // Data Source Fixtures
 // ============================================================================
@@ -943,6 +1050,71 @@ mod fixtures {
             .unwrap();
         conn.execute("INSERT INTO inventory.products VALUES (1, 'Widget')", [])
             .unwrap();
+
+        (
+            temp_dir,
+            Source::Duckdb {
+                path: db_path.to_str().unwrap().to_string(),
+            },
+        )
+    }
+
+    /// Creates a DuckDB with nullable test data.
+    /// Table has mix of nullable and non-nullable columns to verify issue #59 fix.
+    pub fn duckdb_nullable_test() -> (TempDir, Source) {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("source.duckdb");
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+
+        conn.execute("CREATE SCHEMA testschema", []).unwrap();
+        // c_custkey and c_name are NOT NULL, c_acctbal and c_comment are nullable
+        conn.execute(
+            "CREATE TABLE testschema.customer (
+                c_custkey INTEGER NOT NULL,
+                c_name VARCHAR NOT NULL,
+                c_acctbal DOUBLE,
+                c_comment VARCHAR
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO testschema.customer VALUES
+                (1, 'Customer One', 1234.56, 'Regular customer'),
+                (2, 'Customer Two', NULL, NULL),
+                (3, 'Customer Three', 9999.99, 'VIP customer')",
+            [],
+        )
+        .unwrap();
+
+        (
+            temp_dir,
+            Source::Duckdb {
+                path: db_path.to_str().unwrap().to_string(),
+            },
+        )
+    }
+
+    /// Creates a DuckDB with empty nullable test table.
+    /// Verifies nullable flags are preserved even when table has no rows.
+    pub fn duckdb_empty_nullable_test() -> (TempDir, Source) {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("source.duckdb");
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+
+        conn.execute("CREATE SCHEMA testschema", []).unwrap();
+        // Same schema as nullable_test but with no data
+        conn.execute(
+            "CREATE TABLE testschema.empty_customer (
+                c_custkey INTEGER NOT NULL,
+                c_name VARCHAR NOT NULL,
+                c_acctbal DOUBLE,
+                c_comment VARCHAR
+            )",
+            [],
+        )
+        .unwrap();
+        // No INSERT - table is intentionally empty
 
         (
             temp_dir,
@@ -1056,6 +1228,94 @@ mod postgres_fixtures {
             },
         }
     }
+
+    /// Creates a PostgreSQL with nullable test data.
+    /// Table has mix of nullable and non-nullable columns to verify issue #59 fix.
+    pub async fn nullable_test(secret_name: &str) -> PostgresFixture {
+        let (container, conn_str) = start_container().await;
+        let pool = sqlx::PgPool::connect(&conn_str).await.unwrap();
+
+        sqlx::query("CREATE SCHEMA testschema")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // c_custkey and c_name are NOT NULL, c_acctbal and c_comment are nullable
+        sqlx::query(
+            "CREATE TABLE testschema.customer (
+                c_custkey INTEGER NOT NULL,
+                c_name VARCHAR(100) NOT NULL,
+                c_acctbal DOUBLE PRECISION,
+                c_comment VARCHAR(255)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO testschema.customer VALUES
+                (1, 'Customer One', 1234.56, 'Regular customer'),
+                (2, 'Customer Two', NULL, NULL),
+                (3, 'Customer Three', 9999.99, 'VIP customer')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        PostgresFixture {
+            container,
+            source: Source::Postgres {
+                host: "localhost".into(),
+                port,
+                user: "postgres".into(),
+                database: "postgres".into(),
+                credential: runtimedb::source::Credential::SecretRef {
+                    name: secret_name.to_string(),
+                },
+            },
+        }
+    }
+
+    /// Creates a PostgreSQL with empty nullable test table.
+    /// Verifies nullable flags are preserved even when table has no rows.
+    pub async fn empty_nullable_test(secret_name: &str) -> PostgresFixture {
+        let (container, conn_str) = start_container().await;
+        let pool = sqlx::PgPool::connect(&conn_str).await.unwrap();
+
+        sqlx::query("CREATE SCHEMA testschema")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Same schema as nullable_test but with no data
+        sqlx::query(
+            "CREATE TABLE testschema.empty_customer (
+                c_custkey INTEGER NOT NULL,
+                c_name VARCHAR(100) NOT NULL,
+                c_acctbal DOUBLE PRECISION,
+                c_comment VARCHAR(255)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // No INSERT - table is intentionally empty
+        pool.close().await;
+
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        PostgresFixture {
+            container,
+            source: Source::Postgres {
+                host: "localhost".into(),
+                port,
+                user: "postgres".into(),
+                database: "postgres".into(),
+                credential: runtimedb::source::Credential::SecretRef {
+                    name: secret_name.to_string(),
+                },
+            },
+        }
+    }
 }
 
 mod mysql_fixtures {
@@ -1109,6 +1369,96 @@ mod mysql_fixtures {
                 port,
                 user: "root".into(),
                 database: "sales".into(),
+                credential: runtimedb::source::Credential::SecretRef {
+                    name: secret_name.to_string(),
+                },
+            },
+        }
+    }
+
+    /// Creates a MySQL with nullable test data.
+    /// Table has mix of nullable and non-nullable columns to verify issue #59 fix.
+    pub async fn nullable_test(secret_name: &str) -> MysqlFixture {
+        let (container, conn_str) = start_container().await;
+        let pool = sqlx::MySqlPool::connect(&conn_str).await.unwrap();
+
+        // Create database (MySQL uses database = schema)
+        sqlx::query("CREATE DATABASE IF NOT EXISTS testschema")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // c_custkey and c_name are NOT NULL, c_acctbal and c_comment are nullable
+        sqlx::query(
+            "CREATE TABLE testschema.customer (
+                c_custkey INTEGER NOT NULL,
+                c_name VARCHAR(100) NOT NULL,
+                c_acctbal DOUBLE,
+                c_comment VARCHAR(255)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO testschema.customer VALUES
+                (1, 'Customer One', 1234.56, 'Regular customer'),
+                (2, 'Customer Two', NULL, NULL),
+                (3, 'Customer Three', 9999.99, 'VIP customer')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let port = container.get_host_port_ipv4(3306).await.unwrap();
+        MysqlFixture {
+            container,
+            source: Source::Mysql {
+                host: "localhost".into(),
+                port,
+                user: "root".into(),
+                database: "testschema".into(),
+                credential: runtimedb::source::Credential::SecretRef {
+                    name: secret_name.to_string(),
+                },
+            },
+        }
+    }
+
+    /// Creates a MySQL with empty nullable test table.
+    /// Verifies nullable flags are preserved even when table has no rows.
+    pub async fn empty_nullable_test(secret_name: &str) -> MysqlFixture {
+        let (container, conn_str) = start_container().await;
+        let pool = sqlx::MySqlPool::connect(&conn_str).await.unwrap();
+
+        // Create database (MySQL uses database = schema)
+        sqlx::query("CREATE DATABASE IF NOT EXISTS testschema")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Same schema as nullable_test but with no data
+        sqlx::query(
+            "CREATE TABLE testschema.empty_customer (
+                c_custkey INTEGER NOT NULL,
+                c_name VARCHAR(100) NOT NULL,
+                c_acctbal DOUBLE,
+                c_comment VARCHAR(255)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // No INSERT - table is intentionally empty
+        pool.close().await;
+
+        let port = container.get_host_port_ipv4(3306).await.unwrap();
+        MysqlFixture {
+            container,
+            source: Source::Mysql {
+                host: "localhost".into(),
+                port,
+                user: "root".into(),
+                database: "testschema".into(),
                 credential: runtimedb::source::Credential::SecretRef {
                     name: secret_name.to_string(),
                 },
@@ -1193,6 +1543,38 @@ mod duckdb_tests {
         let harness = TestHarness::new().await;
         run_purge_table_cache_test(harness.api(), &source, "duckdb_conn").await;
     }
+
+    /// Test that nullable flags are preserved through sync (issue #59).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_engine_nullable_flags() {
+        let (_dir, source) = fixtures::duckdb_nullable_test();
+        let harness = TestHarness::new().await;
+        run_nullable_flags_test(harness.engine(), &source, "duckdb_conn", "testschema").await;
+    }
+
+    /// Test that nullable flags are preserved through sync via API (issue #59).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_api_nullable_flags() {
+        let (_dir, source) = fixtures::duckdb_nullable_test();
+        let harness = TestHarness::new().await;
+        run_nullable_flags_test(harness.api(), &source, "duckdb_conn", "testschema").await;
+    }
+
+    /// Test that nullable flags are preserved for empty tables (issue #59).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_engine_empty_table_nullable_flags() {
+        let (_dir, source) = fixtures::duckdb_empty_nullable_test();
+        let harness = TestHarness::new().await;
+        run_empty_nullable_flags_test(harness.engine(), &source, "duckdb_conn", "testschema").await;
+    }
+
+    /// Test that nullable flags are preserved for empty tables via API (issue #59).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_api_empty_table_nullable_flags() {
+        let (_dir, source) = fixtures::duckdb_empty_nullable_test();
+        let harness = TestHarness::new().await;
+        run_empty_nullable_flags_test(harness.api(), &source, "duckdb_conn", "testschema").await;
+    }
 }
 
 // ============================================================================
@@ -1244,6 +1626,52 @@ mod postgres_tests {
         let fixture = postgres_fixtures::multi_schema(PG_SECRET_NAME).await;
         run_multi_schema_test(harness.api(), &fixture.source, "pg_conn").await;
     }
+
+    /// Test that nullable flags are preserved through sync (issue #59).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_engine_nullable_flags() {
+        let harness = TestHarness::new().await;
+        harness
+            .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
+            .await;
+        let fixture = postgres_fixtures::nullable_test(PG_SECRET_NAME).await;
+        run_nullable_flags_test(harness.engine(), &fixture.source, "pg_conn", "testschema").await;
+    }
+
+    /// Test that nullable flags are preserved through sync via API (issue #59).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_api_nullable_flags() {
+        let harness = TestHarness::new().await;
+        harness
+            .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
+            .await;
+        let fixture = postgres_fixtures::nullable_test(PG_SECRET_NAME).await;
+        run_nullable_flags_test(harness.api(), &fixture.source, "pg_conn", "testschema").await;
+    }
+
+    /// Test that nullable flags are preserved for empty tables (issue #59).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_engine_empty_table_nullable_flags() {
+        let harness = TestHarness::new().await;
+        harness
+            .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
+            .await;
+        let fixture = postgres_fixtures::empty_nullable_test(PG_SECRET_NAME).await;
+        run_empty_nullable_flags_test(harness.engine(), &fixture.source, "pg_conn", "testschema")
+            .await;
+    }
+
+    /// Test that nullable flags are preserved for empty tables via API (issue #59).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_api_empty_table_nullable_flags() {
+        let harness = TestHarness::new().await;
+        harness
+            .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
+            .await;
+        let fixture = postgres_fixtures::empty_nullable_test(PG_SECRET_NAME).await;
+        run_empty_nullable_flags_test(harness.api(), &fixture.source, "pg_conn", "testschema")
+            .await;
+    }
 }
 
 // ============================================================================
@@ -1273,6 +1701,63 @@ mod mysql_tests {
             .await;
         let fixture = mysql_fixtures::standard(MYSQL_SECRET_NAME).await;
         run_golden_path_test(harness.api(), &fixture.source, "mysql_conn").await;
+    }
+
+    /// Test that nullable flags are preserved through sync (issue #59).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_engine_nullable_flags() {
+        let harness = TestHarness::new().await;
+        harness
+            .store_secret(MYSQL_SECRET_NAME, mysql_fixtures::TEST_PASSWORD)
+            .await;
+        let fixture = mysql_fixtures::nullable_test(MYSQL_SECRET_NAME).await;
+        run_nullable_flags_test(
+            harness.engine(),
+            &fixture.source,
+            "mysql_conn",
+            "testschema",
+        )
+        .await;
+    }
+
+    /// Test that nullable flags are preserved through sync via API (issue #59).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_api_nullable_flags() {
+        let harness = TestHarness::new().await;
+        harness
+            .store_secret(MYSQL_SECRET_NAME, mysql_fixtures::TEST_PASSWORD)
+            .await;
+        let fixture = mysql_fixtures::nullable_test(MYSQL_SECRET_NAME).await;
+        run_nullable_flags_test(harness.api(), &fixture.source, "mysql_conn", "testschema").await;
+    }
+
+    /// Test that nullable flags are preserved for empty tables (issue #59).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_engine_empty_table_nullable_flags() {
+        let harness = TestHarness::new().await;
+        harness
+            .store_secret(MYSQL_SECRET_NAME, mysql_fixtures::TEST_PASSWORD)
+            .await;
+        let fixture = mysql_fixtures::empty_nullable_test(MYSQL_SECRET_NAME).await;
+        run_empty_nullable_flags_test(
+            harness.engine(),
+            &fixture.source,
+            "mysql_conn",
+            "testschema",
+        )
+        .await;
+    }
+
+    /// Test that nullable flags are preserved for empty tables via API (issue #59).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_api_empty_table_nullable_flags() {
+        let harness = TestHarness::new().await;
+        harness
+            .store_secret(MYSQL_SECRET_NAME, mysql_fixtures::TEST_PASSWORD)
+            .await;
+        let fixture = mysql_fixtures::empty_nullable_test(MYSQL_SECRET_NAME).await;
+        run_empty_nullable_flags_test(harness.api(), &fixture.source, "mysql_conn", "testschema")
+            .await;
     }
 }
 

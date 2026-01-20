@@ -15,6 +15,9 @@ pub struct QueryResponse {
     /// Null if persistence failed (see `warning` field for details).
     pub result_id: Option<String>,
     pub columns: Vec<String>,
+    /// Nullable flags for each column (parallel to columns vec).
+    /// True if the column allows NULL values, false if NOT NULL.
+    pub nullable: Vec<bool>,
     pub rows: Vec<Vec<serde_json::Value>>,
     pub row_count: usize,
     pub execution_time_ms: u64,
