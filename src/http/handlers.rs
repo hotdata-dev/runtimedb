@@ -24,6 +24,9 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{error, warn};
 
+/// Result type for serialized batch data: (columns, nullable flags, rows)
+type SerializedBatchData = (Vec<String>, Vec<bool>, Vec<Vec<serde_json::Value>>);
+
 /// Handler for POST /query
 pub async fn query_handler(
     State(engine): State<Arc<RuntimeEngine>>,
@@ -71,7 +74,7 @@ pub async fn query_handler(
 fn serialize_batches(
     schema: &Arc<Schema>,
     batches: &[RecordBatch],
-) -> Result<(Vec<String>, Vec<bool>, Vec<Vec<serde_json::Value>>), ApiError> {
+) -> Result<SerializedBatchData, ApiError> {
     // Get column names and nullable flags from schema
     let columns: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
     let nullable: Vec<bool> = schema.fields().iter().map(|f| f.is_nullable()).collect();
