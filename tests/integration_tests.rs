@@ -357,20 +357,23 @@ struct EngineExecutor {
 impl TestExecutor for EngineExecutor {
     async fn connect(&self, name: &str, source: &Source, secret_name: Option<&str>) -> String {
         // Resolve secret name to ID if provided (matching HTTP handler behavior)
-        let secret_id = if let Some(sn) = secret_name {
+        // Build Source with credential embedded
+        let source_with_cred = if let Some(sn) = secret_name {
             let metadata = self
                 .engine
                 .secret_manager()
                 .get_metadata(sn)
                 .await
                 .expect("Failed to get secret metadata");
-            Some(metadata.id)
+            source
+                .clone()
+                .with_credential(runtimedb::source::Credential::secret_ref(metadata.id))
         } else {
-            None
+            source.clone()
         };
 
         self.engine
-            .connect(name, source.clone(), secret_id.as_deref())
+            .connect(name, source_with_cred)
             .await
             .expect("Engine connect failed");
         name.to_string() // Engine uses name as identifier
@@ -455,20 +458,20 @@ impl TestExecutor for ApiExecutor {
                 port,
                 user,
                 database,
-                auth,
+                credential: _,
             } => (
                 "postgres",
-                json!({ "host": host, "port": port, "user": user, "database": database, "auth": auth }),
+                json!({ "host": host, "port": port, "user": user, "database": database }),
             ),
             Source::Mysql {
                 host,
                 port,
                 user,
                 database,
-                auth,
+                credential: _,
             } => (
                 "mysql",
-                json!({ "host": host, "port": port, "user": user, "database": database, "auth": auth }),
+                json!({ "host": host, "port": port, "user": user, "database": database }),
             ),
             _ => panic!("Unsupported source type"),
         };
@@ -1199,7 +1202,7 @@ mod postgres_fixtures {
                 port,
                 user: "postgres".into(),
                 database: "postgres".into(),
-                auth: runtimedb::source::AuthType::Password,
+                credential: runtimedb::source::Credential::None,
             },
         }
     }
@@ -1242,7 +1245,7 @@ mod postgres_fixtures {
                 port,
                 user: "postgres".into(),
                 database: "postgres".into(),
-                auth: runtimedb::source::AuthType::Password,
+                credential: runtimedb::source::Credential::None,
             },
         }
     }
@@ -1288,7 +1291,7 @@ mod postgres_fixtures {
                 port,
                 user: "postgres".into(),
                 database: "postgres".into(),
-                auth: runtimedb::source::AuthType::Password,
+                credential: runtimedb::source::Credential::None,
             },
         }
     }
@@ -1326,7 +1329,7 @@ mod postgres_fixtures {
                 port,
                 user: "postgres".into(),
                 database: "postgres".into(),
-                auth: runtimedb::source::AuthType::Password,
+                credential: runtimedb::source::Credential::None,
             },
         }
     }
@@ -1383,7 +1386,7 @@ mod mysql_fixtures {
                 port,
                 user: "root".into(),
                 database: "sales".into(),
-                auth: runtimedb::source::AuthType::Password,
+                credential: runtimedb::source::Credential::None,
             },
         }
     }
@@ -1430,7 +1433,7 @@ mod mysql_fixtures {
                 port,
                 user: "root".into(),
                 database: "testschema".into(),
-                auth: runtimedb::source::AuthType::Password,
+                credential: runtimedb::source::Credential::None,
             },
         }
     }
@@ -1469,7 +1472,7 @@ mod mysql_fixtures {
                 port,
                 user: "root".into(),
                 database: "testschema".into(),
-                auth: runtimedb::source::AuthType::Password,
+                credential: runtimedb::source::Credential::None,
             },
         }
     }

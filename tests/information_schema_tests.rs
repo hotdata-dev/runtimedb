@@ -47,12 +47,12 @@ async fn create_test_engine_with_data(temp_dir: &TempDir) -> RuntimeEngine {
 
     drop(db);
 
-    // Register the DuckDB connection
+    // Register the DuckDB connection (DuckDB doesn't need credentials)
     let source = Source::Duckdb {
         path: duckdb_path.to_str().unwrap().to_string(),
     };
     engine
-        .connect("testdb", source, None)
+        .connect("testdb", source)
         .await
         .expect("Failed to connect");
 

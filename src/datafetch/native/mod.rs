@@ -23,25 +23,32 @@ impl NativeFetcher {
     }
 }
 
-/// Resolve the secret for a source from the secret manager.
-/// Returns the secret value (password, token, etc.) or None if not applicable.
-async fn resolve_secret(
-    _source: &Source,
+/// Resolve the credential for a source, returning the secret value or None.
+/// Sources without credentials (DuckDB, Iceberg Glue) return Ok(None).
+async fn resolve_credential(
+    source: &Source,
     secrets: &SecretManager,
-    secret_id: Option<&str>,
 ) -> Result<Option<String>, DataFetchError> {
-    // If no secret_id provided, the source doesn't require a secret
-    let id = match secret_id {
-        Some(id) => id,
-        None => return Ok(None),
-    };
-
-    let value = secrets
-        .get_string_by_id(id)
-        .await
-        .map_err(|e| DataFetchError::Connection(format!("Failed to resolve secret: {}", e)))?;
-
-    Ok(Some(value))
+    match source.credential() {
+        None => Ok(None),
+        Some(cred) => {
+            // Try to resolve - if it's Credential::None, this will fail
+            match cred.resolve(secrets).await {
+                Ok(value) => Ok(Some(value)),
+                Err(e) => {
+                    // Check if this is a "no credential configured" error (Credential::None)
+                    if e.to_string().contains("no credential configured") {
+                        Ok(None)
+                    } else {
+                        Err(DataFetchError::Connection(format!(
+                            "Failed to resolve credential: {}",
+                            e
+                        )))
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -50,9 +57,8 @@ impl DataFetcher for NativeFetcher {
         &self,
         source: &Source,
         secrets: &SecretManager,
-        secret_id: Option<&str>,
     ) -> Result<Vec<TableMetadata>, DataFetchError> {
-        let secret = resolve_secret(source, secrets, secret_id).await?;
+        let secret = resolve_credential(source, secrets).await?;
 
         match source {
             Source::Duckdb { .. } | Source::Motherduck { .. } => {
@@ -88,13 +94,12 @@ impl DataFetcher for NativeFetcher {
         &self,
         source: &Source,
         secrets: &SecretManager,
-        secret_id: Option<&str>,
         catalog: Option<&str>,
         schema: &str,
         table: &str,
         writer: &mut StreamingParquetWriter,
     ) -> Result<(), DataFetchError> {
-        let secret = resolve_secret(source, secrets, secret_id).await?;
+        let secret = resolve_credential(source, secrets).await?;
 
         match source {
             Source::Duckdb { .. } | Source::Motherduck { .. } => {

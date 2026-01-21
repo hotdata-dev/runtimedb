@@ -9,7 +9,7 @@ use crate::http::models::{
     UpdateSecretResponse,
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
-use crate::source::Source;
+use crate::source::{Credential, Source};
 use crate::RuntimeEngine;
 use axum::{
     extract::{Path, Query as QueryParams, State},
@@ -359,9 +359,18 @@ pub async fn create_connection_handler(
         auto_secret_id
     };
 
+    // Build Source with credential embedded
+    // The credential field is stored inside the Source, which will be serialized to config_json
+    let source = if let Some(secret_id) = effective_secret_id {
+        source.with_credential(Credential::secret_ref(secret_id))
+    } else {
+        source
+    };
+
     // Step 1: Register the connection
+    // Source contains the credential internally; engine extracts secret_id for DB queryability
     let conn_id = engine
-        .register_connection(&request.name, source, effective_secret_id.as_deref())
+        .register_connection(&request.name, source)
         .await
         .map_err(|e| {
             error!("Failed to register connection: {}", e);

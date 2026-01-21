@@ -13,7 +13,7 @@
 use runtimedb::catalog::{CatalogManager, SqliteCatalogManager};
 use runtimedb::datafetch::{DataFetcher, NativeFetcher, StreamingParquetWriter};
 use runtimedb::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
-use runtimedb::source::{AuthType, IcebergCatalogType, Source};
+use runtimedb::source::{Credential, IcebergCatalogType, Source};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -378,10 +378,11 @@ async fn test_iceberg_rest_catalog_discovery() {
     // Create Iceberg source pointing to our test catalog
     // URI is the catalog base URL (Lakekeeper serves at /catalog)
     // The REST client will add /v1/config?warehouse=... etc
+    // Lakekeeper doesn't require auth for our test setup (Credential::None)
     let source = Source::Iceberg {
         catalog_type: IcebergCatalogType::Rest {
             uri: format!("{}/catalog", infra.catalog_uri),
-            auth: AuthType::BearerToken,
+            credential: Credential::None,
         },
         warehouse: "test_warehouse".to_string(),
         namespace: None, // Discover all namespaces
@@ -389,7 +390,7 @@ async fn test_iceberg_rest_catalog_discovery() {
 
     // Test table discovery
     let fetcher = NativeFetcher::new();
-    let result = fetcher.discover_tables(&source, &secrets, None).await;
+    let result = fetcher.discover_tables(&source, &secrets).await;
 
     match result {
         Ok(tables) => {
@@ -439,10 +440,11 @@ async fn test_iceberg_rest_catalog_fetch_empty_table() {
 
     // Create Iceberg source
     // URI is the catalog base URL (Lakekeeper serves at /catalog)
+    // Lakekeeper doesn't require auth for our test setup (Credential::None)
     let source = Source::Iceberg {
         catalog_type: IcebergCatalogType::Rest {
             uri: format!("{}/catalog", infra.catalog_uri),
-            auth: AuthType::BearerToken,
+            credential: Credential::None,
         },
         warehouse: "test_warehouse".to_string(),
         namespace: Some("test_namespace".to_string()),
@@ -457,7 +459,6 @@ async fn test_iceberg_rest_catalog_fetch_empty_table() {
         .fetch_table(
             &source,
             &secrets,
-            None,
             None,
             "test_namespace",
             "test_table",
@@ -510,10 +511,11 @@ async fn test_iceberg_rest_catalog_with_namespace_filter() {
 
     // Create Iceberg source with namespace filter
     // URI is the catalog base URL (Lakekeeper serves at /catalog)
+    // Lakekeeper doesn't require auth for our test setup (Credential::None)
     let source = Source::Iceberg {
         catalog_type: IcebergCatalogType::Rest {
             uri: format!("{}/catalog", infra.catalog_uri),
-            auth: AuthType::BearerToken,
+            credential: Credential::None,
         },
         warehouse: "test_warehouse".to_string(),
         namespace: Some("test_namespace".to_string()),
@@ -521,7 +523,7 @@ async fn test_iceberg_rest_catalog_with_namespace_filter() {
 
     // Test table discovery with namespace filter
     let fetcher = NativeFetcher::new();
-    let result = fetcher.discover_tables(&source, &secrets, None).await;
+    let result = fetcher.discover_tables(&source, &secrets).await;
 
     match result {
         Ok(tables) => {

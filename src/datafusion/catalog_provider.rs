@@ -15,18 +15,20 @@ pub struct RuntimeCatalogProvider {
     connection_id: i32,
     connection_name: String,
     source: Arc<Source>,
-    secret_id: Option<String>,
     catalog: Arc<dyn CatalogManager>,
     orchestrator: Arc<FetchOrchestrator>,
     schemas: Arc<RwLock<HashMap<String, Arc<dyn SchemaProvider>>>>,
 }
 
 impl RuntimeCatalogProvider {
+    /// Create a new catalog provider for a connection.
+    ///
+    /// The Source contains the credential reference internally.
+    /// Credential resolution happens when tables are accessed via the orchestrator.
     pub fn new(
         connection_id: i32,
         connection_name: String,
         source: Arc<Source>,
-        secret_id: Option<String>,
         catalog: Arc<dyn CatalogManager>,
         orchestrator: Arc<FetchOrchestrator>,
     ) -> Self {
@@ -34,7 +36,6 @@ impl RuntimeCatalogProvider {
             connection_id,
             connection_name,
             source,
-            secret_id,
             catalog,
             orchestrator,
             schemas: Arc::new(RwLock::new(HashMap::new())),
@@ -60,12 +61,12 @@ impl RuntimeCatalogProvider {
         }
 
         // Create new schema provider
+        // Source contains the credential internally
         let schema_provider = Arc::new(RuntimeSchemaProvider::new(
             self.connection_id,
             self.connection_name.clone(),
             schema_name.to_string(),
             self.source.clone(),
-            self.secret_id.clone(),
             self.catalog.clone(),
             self.orchestrator.clone(),
         )) as Arc<dyn SchemaProvider>;

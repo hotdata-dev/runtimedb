@@ -17,6 +17,9 @@ use crate::source::Source;
 /// This provider stores the table schema from catalog metadata and only triggers
 /// the actual data fetch when a query scan is executed. This enables efficient
 /// query planning without unnecessary I/O operations.
+///
+/// The Source contains the credential reference internally.
+/// Credential resolution happens when tables are fetched via the orchestrator.
 #[derive(Debug)]
 pub struct LazyTableProvider {
     schema: SchemaRef,
@@ -26,7 +29,6 @@ pub struct LazyTableProvider {
     connection_id: i32,
     schema_name: String,
     table_name: String,
-    secret_id: Option<String>,
 }
 
 impl LazyTableProvider {
@@ -38,7 +40,6 @@ impl LazyTableProvider {
         connection_id: i32,
         schema_name: String,
         table_name: String,
-        secret_id: Option<String>,
     ) -> Self {
         Self {
             schema,
@@ -48,7 +49,6 @@ impl LazyTableProvider {
             connection_id,
             schema_name,
             table_name,
-            secret_id,
         }
     }
 
@@ -91,13 +91,13 @@ impl LazyTableProvider {
         table.scan(state, projection, filters, limit).await
     }
 
-    /// Fetch the table data and update catalog
+    /// Fetch the table data and update catalog.
+    /// Credential is resolved internally by the orchestrator using source.credential().
     async fn fetch_and_cache(&self) -> Result<String, DataFusionError> {
         let (url, _row_count) = self
             .orchestrator
             .cache_table(
                 &self.source,
-                self.secret_id.as_deref(),
                 self.connection_id,
                 &self.schema_name,
                 &self.table_name,

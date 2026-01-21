@@ -18,19 +18,21 @@ pub struct RuntimeSchemaProvider {
     connection_name: String,
     schema_name: String,
     source: Arc<Source>,
-    secret_id: Option<String>,
     catalog: Arc<dyn CatalogManager>,
     orchestrator: Arc<FetchOrchestrator>,
     inner: Arc<MemorySchemaProvider>,
 }
 
 impl RuntimeSchemaProvider {
+    /// Create a new schema provider for a connection's schema.
+    ///
+    /// The Source contains the credential reference internally.
+    /// Credential resolution happens when tables are accessed via the orchestrator.
     pub fn new(
         connection_id: i32,
         connection_name: String,
         schema_name: String,
         source: Arc<Source>,
-        secret_id: Option<String>,
         catalog: Arc<dyn CatalogManager>,
         orchestrator: Arc<FetchOrchestrator>,
     ) -> Self {
@@ -39,7 +41,6 @@ impl RuntimeSchemaProvider {
             connection_name,
             schema_name,
             source,
-            secret_id,
             catalog,
             orchestrator,
             inner: Arc::new(MemorySchemaProvider::new()),
@@ -104,6 +105,7 @@ impl SchemaProvider for RuntimeSchemaProvider {
         })?;
 
         // Create LazyTableProvider
+        // Source contains the credential internally
         let provider = Arc::new(LazyTableProvider::new(
             schema,
             self.source.clone(),
@@ -112,7 +114,6 @@ impl SchemaProvider for RuntimeSchemaProvider {
             self.connection_id,
             self.schema_name.clone(),
             name.to_string(),
-            self.secret_id.clone(),
         )) as Arc<dyn TableProvider>;
 
         // Cache it in memory for future queries

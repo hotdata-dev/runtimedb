@@ -34,11 +34,11 @@ impl FetchOrchestrator {
 
     /// Fetch table data from source, write to cache storage, and update catalog metadata.
     ///
+    /// Credentials are resolved internally from the Source's credential field.
     /// Returns the URL of the cached parquet file and the row count.
     pub async fn cache_table(
         &self,
         source: &Source,
-        secret_id: Option<&str>,
         connection_id: i32,
         schema_name: &str,
         table_name: &str,
@@ -52,11 +52,11 @@ impl FetchOrchestrator {
         let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
 
         // Fetch the table data into writer
+        // Credential is resolved internally by the fetcher using source.credential()
         self.fetcher
             .fetch_table(
                 source,
                 &self.secret_manager,
-                secret_id,
                 None, // catalog
                 schema_name,
                 table_name,
@@ -101,13 +101,13 @@ impl FetchOrchestrator {
 
     /// Discover tables from a remote source.
     /// Delegates to the underlying fetcher.
+    /// Credentials are resolved internally from the Source's credential field.
     pub async fn discover_tables(
         &self,
         source: &Source,
-        secret_id: Option<&str>,
     ) -> Result<Vec<TableMetadata>, DataFetchError> {
         self.fetcher
-            .discover_tables(source, &self.secret_manager, secret_id)
+            .discover_tables(source, &self.secret_manager)
             .await
     }
 
@@ -116,11 +116,11 @@ impl FetchOrchestrator {
     /// If catalog update fails, cleans up orphaned files to prevent storage leaks.
     /// Returns (new_url, old_path, rows_synced).
     ///
+    /// Credentials are resolved internally from the Source's credential field.
     /// Returns an error if the table doesn't exist in the catalog (use cache_table for initial sync).
     pub async fn refresh_table(
         &self,
         source: &Source,
-        secret_id: Option<&str>,
         connection_id: i32,
         schema_name: &str,
         table_name: &str,
@@ -145,12 +145,12 @@ impl FetchOrchestrator {
             .prepare_cache_write(connection_id, schema_name, table_name);
 
         // 3. Fetch and write to new path
+        // Credential is resolved internally by the fetcher using source.credential()
         let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
         self.fetcher
             .fetch_table(
                 source,
                 &self.secret_manager,
-                secret_id,
                 None,
                 schema_name,
                 table_name,
@@ -249,7 +249,6 @@ mod tests {
             &self,
             _source: &Source,
             _secret_manager: &SecretManager,
-            _secret_id: Option<&str>,
         ) -> Result<Vec<TableMetadata>, DataFetchError> {
             Ok(vec![TableMetadata {
                 catalog_name: None,
@@ -269,7 +268,6 @@ mod tests {
             &self,
             _source: &Source,
             _secret_manager: &SecretManager,
-            _secret_id: Option<&str>,
             _catalog: Option<&str>,
             _schema: &str,
             _table: &str,
@@ -679,7 +677,7 @@ mod tests {
 
         // This should fail because catalog update is configured to fail
         let result = orchestrator
-            .refresh_table(&source, None, 1, "test", "orders")
+            .refresh_table(&source, 1, "test", "orders")
             .await;
 
         assert!(result.is_err(), "refresh_table should fail");
@@ -730,7 +728,7 @@ mod tests {
         };
 
         let result = orchestrator
-            .refresh_table(&source, None, 1, "test", "orders")
+            .refresh_table(&source, 1, "test", "orders")
             .await;
 
         assert!(result.is_ok(), "refresh_table should succeed");
@@ -772,7 +770,7 @@ mod tests {
         };
 
         let result = orchestrator
-            .refresh_table(&source, None, 1, "test", "orders")
+            .refresh_table(&source, 1, "test", "orders")
             .await;
 
         assert!(result.is_err(), "refresh_table should fail");
@@ -817,9 +815,7 @@ mod tests {
         };
 
         // This should fail because catalog update is configured to fail
-        let result = orchestrator
-            .cache_table(&source, None, 1, "test", "orders")
-            .await;
+        let result = orchestrator.cache_table(&source, 1, "test", "orders").await;
 
         assert!(result.is_err(), "cache_table should fail");
         let err_msg = result.unwrap_err().to_string();

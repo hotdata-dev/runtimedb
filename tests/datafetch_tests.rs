@@ -34,7 +34,7 @@ async fn test_duckdb_discovery_empty() {
         path: ":memory:".to_string(),
     };
 
-    let result = fetcher.discover_tables(&source, &secrets, None).await;
+    let result = fetcher.discover_tables(&source, &secrets).await;
     assert!(
         result.is_ok(),
         "Discovery should succeed: {:?}",
@@ -69,7 +69,7 @@ async fn test_duckdb_discovery_with_table() {
         path: db_path.to_str().unwrap().to_string(),
     };
 
-    let result = fetcher.discover_tables(&source, &secrets, None).await;
+    let result = fetcher.discover_tables(&source, &secrets).await;
     assert!(
         result.is_ok(),
         "Discovery should succeed: {:?}",
@@ -102,10 +102,10 @@ async fn test_unsupported_driver() {
         database: "fake".to_string(),
         schema: None,
         role: None,
-        auth: runtimedb::source::AuthType::Password,
+        credential: runtimedb::source::Credential::None,
     };
 
-    let result = fetcher.discover_tables(&source, &secrets, None).await;
+    let result = fetcher.discover_tables(&source, &secrets).await;
     assert!(result.is_err(), "Should fail without valid credentials");
 }
 
@@ -161,19 +161,17 @@ mod mysql_container_tests {
             .unwrap();
         pool.close().await;
 
-        // Test discovery
+        // Test discovery - build source with embedded credential
         let fetcher = NativeFetcher::new();
         let source = Source::Mysql {
             host: "localhost".to_string(),
             port,
             user: "root".to_string(),
             database: "testdb".to_string(),
-            auth: runtimedb::source::AuthType::Password,
+            credential: runtimedb::source::Credential::secret_ref(&secret_id),
         };
 
-        let result = fetcher
-            .discover_tables(&source, &secrets, Some(&secret_id))
-            .await;
+        let result = fetcher.discover_tables(&source, &secrets).await;
         assert!(
             result.is_ok(),
             "Discovery should succeed: {:?}",
@@ -242,29 +240,21 @@ mod mysql_container_tests {
         .unwrap();
         pool.close().await;
 
-        // Fetch to parquet
+        // Fetch to parquet - build source with embedded credential
         let fetcher = NativeFetcher::new();
         let source = Source::Mysql {
             host: "localhost".to_string(),
             port,
             user: "root".to_string(),
             database: "testdb".to_string(),
-            auth: runtimedb::source::AuthType::Password,
+            credential: runtimedb::source::Credential::secret_ref(&secret_id),
         };
 
         let output_path = temp_dir.path().join("mysql_output.parquet");
         let mut writer = StreamingParquetWriter::new(output_path.clone());
 
         let result = fetcher
-            .fetch_table(
-                &source,
-                &secrets,
-                Some(&secret_id),
-                None,
-                "testdb",
-                "products",
-                &mut writer,
-            )
+            .fetch_table(&source, &secrets, None, "testdb", "products", &mut writer)
             .await;
         assert!(result.is_ok(), "Fetch should succeed: {:?}", result.err());
 
@@ -354,29 +344,21 @@ mod mysql_container_tests {
         .unwrap();
         pool.close().await;
 
-        // Fetch to parquet
+        // Fetch to parquet - build source with embedded credential
         let fetcher = NativeFetcher::new();
         let source = Source::Mysql {
             host: "localhost".to_string(),
             port,
             user: "root".to_string(),
             database: "testdb".to_string(),
-            auth: runtimedb::source::AuthType::Password,
+            credential: runtimedb::source::Credential::secret_ref(&secret_id),
         };
 
         let output_path = temp_dir.path().join("customer_output.parquet");
         let mut writer = StreamingParquetWriter::new(output_path.clone());
 
         let result = fetcher
-            .fetch_table(
-                &source,
-                &secrets,
-                Some(&secret_id),
-                None,
-                "testdb",
-                "customer",
-                &mut writer,
-            )
+            .fetch_table(&source, &secrets, None, "testdb", "customer", &mut writer)
             .await;
         assert!(result.is_ok(), "Fetch should succeed: {:?}", result.err());
 
@@ -516,29 +498,21 @@ mod postgres_container_tests {
         .unwrap();
         pool.close().await;
 
-        // Fetch to parquet
+        // Fetch to parquet - build source with embedded credential
         let fetcher = NativeFetcher::new();
         let source = Source::Postgres {
             host: "localhost".to_string(),
             port,
             user: "postgres".to_string(),
             database: "postgres".to_string(),
-            auth: runtimedb::source::AuthType::Password,
+            credential: runtimedb::source::Credential::secret_ref(&secret_id),
         };
 
         let output_path = temp_dir.path().join("customer_output.parquet");
         let mut writer = StreamingParquetWriter::new(output_path.clone());
 
         let result = fetcher
-            .fetch_table(
-                &source,
-                &secrets,
-                Some(&secret_id),
-                None,
-                "testdb",
-                "customer",
-                &mut writer,
-            )
+            .fetch_table(&source, &secrets, None, "testdb", "customer", &mut writer)
             .await;
         assert!(result.is_ok(), "Fetch should succeed: {:?}", result.err());
 
@@ -631,7 +605,7 @@ async fn test_duckdb_fetch_table() {
         .unwrap();
     }
 
-    // Fetch to parquet using StreamingParquetWriter
+    // Fetch to parquet using StreamingParquetWriter (DuckDB doesn't need credentials)
     let fetcher = NativeFetcher::new();
     let source = Source::Duckdb {
         path: db_path.to_str().unwrap().to_string(),
@@ -644,7 +618,6 @@ async fn test_duckdb_fetch_table() {
         .fetch_table(
             &source,
             &secrets,
-            None,
             None,
             "test_schema",
             "products",
