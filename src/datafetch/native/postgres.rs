@@ -13,11 +13,10 @@ use std::sync::Arc;
 use tracing::warn;
 use urlencoding::encode;
 
+use crate::datafetch::batch_writer::BatchWriter;
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::secrets::SecretManager;
 use crate::source::Source;
-
-use super::StreamingParquetWriter;
 
 /// Build a PostgreSQL connection string from source configuration and resolved password.
 fn build_connection_string(
@@ -169,7 +168,7 @@ pub async fn fetch_table(
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
-    writer: &mut StreamingParquetWriter,
+    writer: &mut dyn BatchWriter,
 ) -> Result<(), DataFetchError> {
     let connection_string = resolve_connection_string(source, secrets).await?;
     let mut conn = connect_with_ssl_retry(&connection_string).await?;

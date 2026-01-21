@@ -9,6 +9,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::datafetch::batch_writer::{BatchWriteResult, BatchWriter};
 use crate::datafetch::DataFetchError;
 
 /// Streaming Parquet writer that writes batches incrementally to disk.
@@ -31,9 +32,14 @@ impl StreamingParquetWriter {
         }
     }
 
-    /// Initialize the writer with the Arrow schema.
-    /// Creates the file and configures Parquet properties.
-    pub fn init(&mut self, schema: &Schema) -> Result<(), DataFetchError> {
+    /// Get the path this writer will write to.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl BatchWriter for StreamingParquetWriter {
+    fn init(&mut self, schema: &Schema) -> Result<(), DataFetchError> {
         // Create parent directories if needed
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -57,8 +63,7 @@ impl StreamingParquetWriter {
         Ok(())
     }
 
-    /// Write a batch to the Parquet file.
-    pub fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), DataFetchError> {
+    fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), DataFetchError> {
         let writer = self.writer.as_mut().ok_or_else(|| {
             DataFetchError::Storage("Writer not initialized - call init() first".into())
         })?;
@@ -70,8 +75,7 @@ impl StreamingParquetWriter {
             .map_err(|e| DataFetchError::Storage(e.to_string()))
     }
 
-    /// Close the writer and return the path to the written file along with the row count.
-    pub fn close(mut self) -> Result<(PathBuf, usize), DataFetchError> {
+    fn close(mut self: Box<Self>) -> Result<BatchWriteResult, DataFetchError> {
         let writer = self
             .writer
             .take()
@@ -81,12 +85,13 @@ impl StreamingParquetWriter {
             .close()
             .map_err(|e| DataFetchError::Storage(e.to_string()))?;
 
-        Ok((self.path, self.row_count))
-    }
+        // Get file size for bytes_written
+        let bytes_written = std::fs::metadata(&self.path).ok().map(|m| m.len());
 
-    /// Get the path this writer will write to.
-    pub fn path(&self) -> &Path {
-        &self.path
+        Ok(BatchWriteResult {
+            rows: self.row_count,
+            bytes_written,
+        })
     }
 }
 
@@ -104,7 +109,7 @@ mod tests {
 
         let schema = Schema::new(vec![Field::new("id", DataType::Int32, false)]);
 
-        let mut writer = StreamingParquetWriter::new(path.clone());
+        let mut writer: Box<dyn BatchWriter> = Box::new(StreamingParquetWriter::new(path.clone()));
         writer.init(&schema).unwrap();
 
         // Write two batches
@@ -123,9 +128,9 @@ mod tests {
         writer.write_batch(&batch1).unwrap();
         writer.write_batch(&batch2).unwrap();
 
-        let (result_path, row_count) = writer.close().unwrap();
-        assert_eq!(result_path, path);
-        assert_eq!(row_count, 6); // 3 rows from each batch
+        let result = writer.close().unwrap();
+        assert_eq!(result.rows, 6); // 3 rows from each batch
+        assert!(result.bytes_written.is_some());
         assert!(path.exists());
     }
 
@@ -136,16 +141,16 @@ mod tests {
 
         let schema = Schema::new(vec![Field::new("id", DataType::Int32, false)]);
 
-        let mut writer = StreamingParquetWriter::new(path.clone());
+        let mut writer: Box<dyn BatchWriter> = Box::new(StreamingParquetWriter::new(path.clone()));
         writer.init(&schema).unwrap();
 
         // Write empty batch
         let empty_batch = RecordBatch::new_empty(Arc::new(schema));
         writer.write_batch(&empty_batch).unwrap();
 
-        let (result_path, row_count) = writer.close().unwrap();
-        assert_eq!(row_count, 0);
-        assert!(result_path.exists());
+        let result = writer.close().unwrap();
+        assert_eq!(result.rows, 0);
+        assert!(path.exists());
     }
 
     #[test]
@@ -160,7 +165,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut writer = StreamingParquetWriter::new(path);
+        let mut writer: Box<dyn BatchWriter> = Box::new(StreamingParquetWriter::new(path));
 
         // Attempt to write without calling init() first
         let result = writer.write_batch(&batch);
@@ -173,7 +178,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.parquet");
 
-        let writer = StreamingParquetWriter::new(path);
+        let writer: Box<dyn BatchWriter> = Box::new(StreamingParquetWriter::new(path));
 
         // Attempt to close without calling init() first
         let result = writer.close();
@@ -193,13 +198,13 @@ mod tests {
             Field::new("name", DataType::Utf8, true),
         ]);
 
-        let mut writer = StreamingParquetWriter::new(path.clone());
+        let mut writer: Box<dyn BatchWriter> = Box::new(StreamingParquetWriter::new(path.clone()));
         writer.init(&schema).unwrap();
 
         // Close without writing any batches
-        let (result_path, row_count) = writer.close().unwrap();
-        assert_eq!(row_count, 0);
-        assert!(result_path.exists());
+        let result = writer.close().unwrap();
+        assert_eq!(result.rows, 0);
+        assert!(path.exists());
 
         // Verify the parquet file is readable and has the correct schema
         use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
@@ -228,7 +233,7 @@ mod tests {
             Field::new("name", DataType::Utf8, true),
         ]);
 
-        let mut writer = StreamingParquetWriter::new(path.clone());
+        let mut writer: Box<dyn BatchWriter> = Box::new(StreamingParquetWriter::new(path.clone()));
         writer.init(&schema).unwrap();
 
         // Write some data

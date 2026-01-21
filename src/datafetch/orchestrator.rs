@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::sync::Arc;
 
+use super::batch_writer::BatchWriter;
 use super::native::StreamingParquetWriter;
 use super::{DataFetchError, DataFetcher, TableMetadata};
 use crate::catalog::CatalogManager;
@@ -48,7 +49,8 @@ impl FetchOrchestrator {
             .prepare_cache_write(connection_id, schema_name, table_name);
 
         // Create writer
-        let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
+        let mut writer: Box<dyn BatchWriter> =
+            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
 
         // Fetch the table data into writer
         self.fetcher
@@ -58,15 +60,16 @@ impl FetchOrchestrator {
                 None, // catalog
                 schema_name,
                 table_name,
-                &mut writer,
+                writer.as_mut(),
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to fetch table: {}", e))?;
 
         // Close writer and get row count
-        let (_, row_count) = writer
+        let result = writer
             .close()
             .map_err(|e| anyhow::anyhow!("Failed to close writer: {}", e))?;
+        let row_count = result.rows;
 
         // Finalize cache write (uploads to S3 if needed, returns URL)
         let parquet_url = self
@@ -141,7 +144,8 @@ impl FetchOrchestrator {
             .prepare_cache_write(connection_id, schema_name, table_name);
 
         // 3. Fetch and write to new path
-        let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
+        let mut writer: Box<dyn BatchWriter> =
+            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
         self.fetcher
             .fetch_table(
                 source,
@@ -149,15 +153,16 @@ impl FetchOrchestrator {
                 None,
                 schema_name,
                 table_name,
-                &mut writer,
+                writer.as_mut(),
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to fetch table: {}", e))?;
 
         // 4. Close writer and get row count
-        let (_, row_count) = writer
+        let result = writer
             .close()
             .map_err(|e| anyhow::anyhow!("Failed to close writer: {}", e))?;
+        let row_count = result.rows;
 
         // 5. Finalize (upload to S3 if needed)
         let new_url = self
@@ -222,7 +227,9 @@ mod tests {
     use crate::catalog::{
         CatalogManager, ConnectionInfo, OptimisticLock, PendingDeletion, TableInfo,
     };
-    use crate::datafetch::{ColumnMetadata, DataFetchError, DataFetcher, TableMetadata};
+    use crate::datafetch::{
+        BatchWriter, ColumnMetadata, DataFetchError, DataFetcher, TableMetadata,
+    };
     use crate::secrets::{SecretMetadata, SecretStatus};
     use crate::storage::{CacheWriteHandle, StorageManager};
     use async_trait::async_trait;
@@ -266,7 +273,7 @@ mod tests {
             _catalog: Option<&str>,
             _schema: &str,
             _table: &str,
-            writer: &mut super::StreamingParquetWriter,
+            writer: &mut dyn BatchWriter,
         ) -> Result<(), DataFetchError> {
             use datafusion::arrow::array::Int32Array;
             use datafusion::arrow::datatypes::{DataType, Field, Schema};

@@ -11,11 +11,10 @@ use iceberg_catalog_rest::RestCatalogBuilder;
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::datafetch::batch_writer::BatchWriter;
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::secrets::SecretManager;
 use crate::source::{AwsCredentials, Credential, IcebergCatalogType, Source};
-
-use super::StreamingParquetWriter;
 
 // Re-exports of arrow 55 for iceberg compatibility
 use arrow_array_55 as arrow55_array;
@@ -210,7 +209,7 @@ pub async fn fetch_table(
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
-    writer: &mut StreamingParquetWriter,
+    writer: &mut dyn BatchWriter,
 ) -> Result<(), DataFetchError> {
     use futures::StreamExt;
 

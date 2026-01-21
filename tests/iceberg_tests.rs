@@ -11,7 +11,7 @@
 //! Run these tests with: cargo test --test iceberg_tests
 
 use runtimedb::catalog::{CatalogManager, SqliteCatalogManager};
-use runtimedb::datafetch::{DataFetcher, NativeFetcher, StreamingParquetWriter};
+use runtimedb::datafetch::{BatchWriter, DataFetcher, NativeFetcher, StreamingParquetWriter};
 use runtimedb::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
 use runtimedb::source::{Credential, IcebergCatalogType, Source};
 use std::sync::Arc;
@@ -471,7 +471,7 @@ async fn test_iceberg_rest_catalog_fetch_empty_table() {
         result.err()
     );
 
-    writer.close().unwrap();
+    Box::new(writer).close().unwrap();
 
     // Verify the parquet file was created with correct schema
     use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
