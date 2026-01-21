@@ -13,11 +13,10 @@ use sqlx::{ConnectOptions, Row};
 use std::sync::Arc;
 use tracing::warn;
 
+use crate::datafetch::batch_writer::BatchWriter;
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::secrets::SecretManager;
 use crate::source::Source;
-
-use super::StreamingParquetWriter;
 
 /// Build MySQL connection options from source configuration and resolved password.
 /// Uses MySqlConnectOptions to avoid embedding credentials in a URL string.
@@ -173,7 +172,7 @@ pub async fn fetch_table(
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
-    writer: &mut StreamingParquetWriter,
+    writer: &mut dyn BatchWriter,
 ) -> Result<(), DataFetchError> {
     let options = resolve_connect_options(source, secrets).await?;
     let mut conn = connect_with_ssl_retry(options).await?;

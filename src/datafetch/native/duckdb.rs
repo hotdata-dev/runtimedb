@@ -4,11 +4,10 @@ use duckdb::Connection;
 use std::collections::HashMap;
 use urlencoding::encode;
 
+use crate::datafetch::batch_writer::BatchWriter;
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::secrets::SecretManager;
 use crate::source::Source;
-
-use super::StreamingParquetWriter;
 
 /// Discover tables and columns from DuckDB/MotherDuck
 pub async fn discover_tables(
@@ -143,7 +142,7 @@ pub async fn fetch_table(
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
-    writer: &mut StreamingParquetWriter,
+    writer: &mut dyn BatchWriter,
 ) -> Result<(), DataFetchError> {
     use datafusion::arrow::record_batch::RecordBatch;
     use std::sync::Arc;

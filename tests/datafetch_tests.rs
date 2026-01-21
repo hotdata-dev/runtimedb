@@ -194,7 +194,7 @@ mod mysql_container_tests {
     #[tokio::test]
     async fn test_mysql_fetch_table() {
         use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-        use runtimedb::datafetch::StreamingParquetWriter;
+        use runtimedb::datafetch::{BatchWriter, StreamingParquetWriter};
         use std::fs::File;
 
         let temp_dir = TempDir::new().unwrap();
@@ -260,7 +260,7 @@ mod mysql_container_tests {
             .await;
         assert!(result.is_ok(), "Fetch should succeed: {:?}", result.err());
 
-        writer.close().unwrap();
+        Box::new(writer).close().unwrap();
 
         // Verify parquet file
         let file = File::open(&output_path).unwrap();
@@ -294,7 +294,7 @@ mod mysql_container_tests {
     #[tokio::test]
     async fn test_mysql_fetch_preserves_nullable_flags() {
         use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-        use runtimedb::datafetch::StreamingParquetWriter;
+        use runtimedb::datafetch::{BatchWriter, StreamingParquetWriter};
         use std::fs::File;
 
         let temp_dir = TempDir::new().unwrap();
@@ -366,7 +366,7 @@ mod mysql_container_tests {
             .await;
         assert!(result.is_ok(), "Fetch should succeed: {:?}", result.err());
 
-        writer.close().unwrap();
+        Box::new(writer).close().unwrap();
 
         // Verify parquet file schema has correct nullable flags
         let file = File::open(&output_path).unwrap();
@@ -445,7 +445,7 @@ mod postgres_container_tests {
     #[tokio::test]
     async fn test_postgres_fetch_preserves_nullable_flags() {
         use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-        use runtimedb::datafetch::StreamingParquetWriter;
+        use runtimedb::datafetch::{BatchWriter, StreamingParquetWriter};
         use std::fs::File;
 
         let temp_dir = TempDir::new().unwrap();
@@ -520,7 +520,7 @@ mod postgres_container_tests {
             .await;
         assert!(result.is_ok(), "Fetch should succeed: {:?}", result.err());
 
-        writer.close().unwrap();
+        Box::new(writer).close().unwrap();
 
         // Verify parquet file schema has correct nullable flags
         let file = File::open(&output_path).unwrap();
@@ -581,7 +581,7 @@ mod postgres_container_tests {
     #[tokio::test]
     async fn test_postgres_fetch_numeric_not_null_columns() {
         use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-        use runtimedb::datafetch::StreamingParquetWriter;
+        use runtimedb::datafetch::{BatchWriter, StreamingParquetWriter};
         use std::fs::File;
 
         let temp_dir = TempDir::new().unwrap();
@@ -659,7 +659,7 @@ mod postgres_container_tests {
             result.err()
         );
 
-        writer.close().unwrap();
+        Box::new(writer).close().unwrap();
 
         // Verify parquet file has correct data
         let file = File::open(&output_path).unwrap();
@@ -694,7 +694,7 @@ mod postgres_container_tests {
     async fn test_postgres_fetch_numeric_nullable_columns() {
         use datafusion::arrow::array::{Array, StringArray};
         use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-        use runtimedb::datafetch::StreamingParquetWriter;
+        use runtimedb::datafetch::{BatchWriter, StreamingParquetWriter};
         use std::fs::File;
 
         let temp_dir = TempDir::new().unwrap();
@@ -769,7 +769,7 @@ mod postgres_container_tests {
             result.err()
         );
 
-        writer.close().unwrap();
+        Box::new(writer).close().unwrap();
 
         // Verify parquet file has correct data
         let file = File::open(&output_path).unwrap();
@@ -818,7 +818,7 @@ mod postgres_container_tests {
 #[tokio::test]
 async fn test_duckdb_fetch_table() {
     use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    use runtimedb::datafetch::StreamingParquetWriter;
+    use runtimedb::datafetch::{BatchWriter, StreamingParquetWriter};
     use std::fs::File;
 
     let temp_dir = TempDir::new().unwrap();
@@ -873,7 +873,7 @@ async fn test_duckdb_fetch_table() {
         .await;
     assert!(result.is_ok(), "Fetch should succeed: {:?}", result.err());
 
-    writer.close().unwrap();
+    Box::new(writer).close().unwrap();
 
     // Read back the parquet and verify data
     let file = File::open(&output_path).unwrap();

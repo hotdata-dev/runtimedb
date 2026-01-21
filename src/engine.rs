@@ -2,7 +2,7 @@ use crate::catalog::{
     CatalogManager, ConnectionInfo, QueryResult, SqliteCatalogManager, TableInfo,
 };
 use crate::datafetch::native::StreamingParquetWriter;
-use crate::datafetch::{FetchOrchestrator, NativeFetcher};
+use crate::datafetch::{BatchWriter, FetchOrchestrator, NativeFetcher};
 use crate::datafusion::{
     block_on, InformationSchemaProvider, RuntimeCatalogProvider, RuntimeDbCatalogProvider,
 };
@@ -456,7 +456,8 @@ impl RuntimeEngine {
         );
 
         // Write parquet file
-        let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
+        let mut writer: Box<dyn BatchWriter> =
+            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
         writer.init(schema)?;
 
         for batch in batches {

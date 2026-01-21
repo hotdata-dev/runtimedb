@@ -9,11 +9,10 @@ use serde::Deserialize;
 use snowflake_api::{QueryResult, SnowflakeApi};
 use std::sync::Arc;
 
+use crate::datafetch::batch_writer::BatchWriter;
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::secrets::SecretManager;
 use crate::source::Source;
-
-use super::StreamingParquetWriter;
 
 // Re-exports of arrow 54 for snowflake-api compatibility
 use arrow_array_54 as arrow54_array;
@@ -241,7 +240,7 @@ pub async fn fetch_table(
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
-    writer: &mut StreamingParquetWriter,
+    writer: &mut dyn BatchWriter,
 ) -> Result<(), DataFetchError> {
     let client = build_client(source, secrets).await?;
 
