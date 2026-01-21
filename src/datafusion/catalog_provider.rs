@@ -61,7 +61,6 @@ impl RuntimeCatalogProvider {
         }
 
         // Create new schema provider
-        // Source contains the credential internally
         let schema_provider = Arc::new(RuntimeSchemaProvider::new(
             self.connection_id,
             self.connection_name.clone(),

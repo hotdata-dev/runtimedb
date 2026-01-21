@@ -92,7 +92,6 @@ impl LazyTableProvider {
     }
 
     /// Fetch the table data and update catalog.
-    /// Credential is resolved internally by the orchestrator using source.credential().
     async fn fetch_and_cache(&self) -> Result<String, DataFusionError> {
         let (url, _row_count) = self
             .orchestrator

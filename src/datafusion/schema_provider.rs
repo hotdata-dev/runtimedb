@@ -105,7 +105,6 @@ impl SchemaProvider for RuntimeSchemaProvider {
         })?;
 
         // Create LazyTableProvider
-        // Source contains the credential internally
         let provider = Arc::new(LazyTableProvider::new(
             schema,
             self.source.clone(),

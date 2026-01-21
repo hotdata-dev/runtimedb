@@ -34,7 +34,6 @@ impl FetchOrchestrator {
 
     /// Fetch table data from source, write to cache storage, and update catalog metadata.
     ///
-    /// Credentials are resolved internally from the Source's credential field.
     /// Returns the URL of the cached parquet file and the row count.
     pub async fn cache_table(
         &self,
@@ -52,7 +51,6 @@ impl FetchOrchestrator {
         let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
 
         // Fetch the table data into writer
-        // Credential is resolved internally by the fetcher using source.credential()
         self.fetcher
             .fetch_table(
                 source,
@@ -101,7 +99,6 @@ impl FetchOrchestrator {
 
     /// Discover tables from a remote source.
     /// Delegates to the underlying fetcher.
-    /// Credentials are resolved internally from the Source's credential field.
     pub async fn discover_tables(
         &self,
         source: &Source,
@@ -116,7 +113,6 @@ impl FetchOrchestrator {
     /// If catalog update fails, cleans up orphaned files to prevent storage leaks.
     /// Returns (new_url, old_path, rows_synced).
     ///
-    /// Credentials are resolved internally from the Source's credential field.
     /// Returns an error if the table doesn't exist in the catalog (use cache_table for initial sync).
     pub async fn refresh_table(
         &self,
@@ -145,7 +141,6 @@ impl FetchOrchestrator {
             .prepare_cache_write(connection_id, schema_name, table_name);
 
         // 3. Fetch and write to new path
-        // Credential is resolved internally by the fetcher using source.credential()
         let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
         self.fetcher
             .fetch_table(
