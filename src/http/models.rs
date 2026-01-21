@@ -79,6 +79,10 @@ pub struct CreateConnectionRequest {
     pub name: String,
     pub source_type: String,
     pub config: serde_json::Value,
+    /// Optional reference to a secret in the secret manager.
+    /// If provided, this secret will be used for authentication.
+    #[serde(default)]
+    pub secret_name: Option<String>,
 }
 
 /// Discovery status for connection creation
@@ -147,6 +151,7 @@ pub struct UpdateSecretRequest {
 /// Response body for POST /secrets
 #[derive(Debug, Serialize)]
 pub struct CreateSecretResponse {
+    pub id: String,
     pub name: String,
     pub created_at: DateTime<Utc>,
 }

@@ -21,6 +21,7 @@ pub struct PostgresCatalogManager {
 /// Row type for secret metadata queries (Postgres handles timestamps natively)
 #[derive(sqlx::FromRow)]
 struct SecretMetadataRow {
+    id: String,
     name: String,
     provider: String,
     provider_ref: Option<String>,
@@ -32,6 +33,7 @@ struct SecretMetadataRow {
 impl SecretMetadataRow {
     fn into_metadata(self) -> SecretMetadata {
         SecretMetadata {
+            id: self.id,
             name: self.name,
             provider: self.provider,
             provider_ref: self.provider_ref,
@@ -71,9 +73,10 @@ impl CatalogManager for PostgresCatalogManager {
         name: &str,
         source_type: &str,
         config_json: &str,
+        secret_id: Option<&str>,
     ) -> Result<i32> {
         self.backend
-            .add_connection(name, source_type, config_json)
+            .add_connection(name, source_type, config_json, secret_id)
             .await
     }
 
@@ -184,7 +187,7 @@ impl CatalogManager for PostgresCatalogManager {
 
     async fn get_secret_metadata(&self, name: &str) -> Result<Option<SecretMetadata>> {
         let row: Option<SecretMetadataRow> = sqlx::query_as(
-            "SELECT name, provider, provider_ref, status, created_at, updated_at \
+            "SELECT id, name, provider, provider_ref, status, created_at, updated_at \
              FROM secrets WHERE name = $1 AND status = 'active'",
         )
         .bind(name)
@@ -196,7 +199,7 @@ impl CatalogManager for PostgresCatalogManager {
 
     async fn get_secret_metadata_any_status(&self, name: &str) -> Result<Option<SecretMetadata>> {
         let row: Option<SecretMetadataRow> = sqlx::query_as(
-            "SELECT name, provider, provider_ref, status, created_at, updated_at \
+            "SELECT id, name, provider, provider_ref, status, created_at, updated_at \
              FROM secrets WHERE name = $1",
         )
         .bind(name)
@@ -208,9 +211,10 @@ impl CatalogManager for PostgresCatalogManager {
 
     async fn create_secret_metadata(&self, metadata: &SecretMetadata) -> Result<()> {
         sqlx::query(
-            "INSERT INTO secrets (name, provider, provider_ref, status, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO secrets (id, name, provider, provider_ref, status, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
+        .bind(&metadata.id)
         .bind(&metadata.name)
         .bind(&metadata.provider)
         .bind(&metadata.provider_ref)
@@ -239,8 +243,8 @@ impl CatalogManager for PostgresCatalogManager {
             .push_bind(metadata.status.as_str())
             .push(", updated_at = ")
             .push_bind(metadata.updated_at)
-            .push(" WHERE name = ")
-            .push_bind(&metadata.name);
+            .push(" WHERE id = ")
+            .push_bind(&metadata.id);
 
         if let Some(lock) = lock {
             qb.push(" AND created_at = ").push_bind(lock.created_at);
@@ -269,22 +273,28 @@ impl CatalogManager for PostgresCatalogManager {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn get_encrypted_secret(&self, name: &str) -> Result<Option<Vec<u8>>> {
-        sqlx::query_scalar("SELECT encrypted_value FROM encrypted_secret_values WHERE name = $1")
-            .bind(name)
-            .fetch_optional(self.backend.pool())
-            .await
-            .map_err(Into::into)
+    async fn get_encrypted_secret(&self, secret_id: &str) -> Result<Option<Vec<u8>>> {
+        sqlx::query_scalar(
+            "SELECT encrypted_value FROM encrypted_secret_values WHERE secret_id = $1",
+        )
+        .bind(secret_id)
+        .fetch_optional(self.backend.pool())
+        .await
+        .map_err(Into::into)
     }
 
-    async fn put_encrypted_secret_value(&self, name: &str, encrypted_value: &[u8]) -> Result<()> {
+    async fn put_encrypted_secret_value(
+        &self,
+        secret_id: &str,
+        encrypted_value: &[u8],
+    ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO encrypted_secret_values (name, encrypted_value) \
+            "INSERT INTO encrypted_secret_values (secret_id, encrypted_value) \
              VALUES ($1, $2) \
-             ON CONFLICT (name) DO UPDATE SET \
+             ON CONFLICT (secret_id) DO UPDATE SET \
              encrypted_value = excluded.encrypted_value",
         )
-        .bind(name)
+        .bind(secret_id)
         .bind(encrypted_value)
         .execute(self.backend.pool())
         .await?;
@@ -292,9 +302,9 @@ impl CatalogManager for PostgresCatalogManager {
         Ok(())
     }
 
-    async fn delete_encrypted_secret_value(&self, name: &str) -> Result<bool> {
-        let result = sqlx::query("DELETE FROM encrypted_secret_values WHERE name = $1")
-            .bind(name)
+    async fn delete_encrypted_secret_value(&self, secret_id: &str) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM encrypted_secret_values WHERE secret_id = $1")
+            .bind(secret_id)
             .execute(self.backend.pool())
             .await?;
 
@@ -303,7 +313,7 @@ impl CatalogManager for PostgresCatalogManager {
 
     async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
         let rows: Vec<SecretMetadataRow> = sqlx::query_as(
-            "SELECT name, provider, provider_ref, status, created_at, updated_at \
+            "SELECT id, name, provider, provider_ref, status, created_at, updated_at \
              FROM secrets WHERE status = 'active' ORDER BY name",
         )
         .fetch_all(self.backend.pool())
@@ -313,6 +323,18 @@ impl CatalogManager for PostgresCatalogManager {
             .into_iter()
             .map(SecretMetadataRow::into_metadata)
             .collect())
+    }
+
+    async fn get_secret_metadata_by_id(&self, id: &str) -> Result<Option<SecretMetadata>> {
+        let row: Option<SecretMetadataRow> = sqlx::query_as(
+            "SELECT id, name, provider, provider_ref, status, created_at, updated_at \
+             FROM secrets WHERE id = $1 AND status = 'active'",
+        )
+        .bind(id)
+        .fetch_optional(self.backend.pool())
+        .await?;
+
+        Ok(row.map(SecretMetadataRow::into_metadata))
     }
 
     async fn store_result(&self, result: &QueryResult) -> Result<()> {

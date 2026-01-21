@@ -79,13 +79,14 @@ impl SecretBackend for EncryptedCatalogBackend {
     async fn get(&self, record: &SecretRecord) -> Result<Option<BackendRead>, BackendError> {
         let encrypted = self
             .catalog
-            .get_encrypted_secret(&record.name)
+            .get_encrypted_secret(&record.id)
             .await
             .map_err(|e| BackendError::Storage(e.to_string()))?;
 
         match encrypted {
             Some(ciphertext) => {
-                let plaintext = decrypt(&self.key, &ciphertext, &record.name)
+                // Use secret ID as AAD to prevent ciphertext swapping between secrets
+                let plaintext = decrypt(&self.key, &ciphertext, &record.id)
                     .map_err(|e| BackendError::Storage(format!("Decryption failed: {}", e)))?;
 
                 Ok(Some(BackendRead {
@@ -98,21 +99,21 @@ impl SecretBackend for EncryptedCatalogBackend {
     }
 
     async fn put(&self, record: &SecretRecord, value: &[u8]) -> Result<BackendWrite, BackendError> {
-        // Encrypt the value using the secret name as AAD
-        let ciphertext = encrypt(&self.key, value, &record.name)
+        // Encrypt the value using the secret ID as AAD
+        let ciphertext = encrypt(&self.key, value, &record.id)
             .map_err(|e| BackendError::Storage(format!("Encryption failed: {}", e)))?;
 
         // Check if secret already exists to determine Created vs Updated
         let exists = self
             .catalog
-            .get_encrypted_secret(&record.name)
+            .get_encrypted_secret(&record.id)
             .await
             .map_err(|e| BackendError::Storage(e.to_string()))?
             .is_some();
 
         // Store encrypted value
         self.catalog
-            .put_encrypted_secret_value(&record.name, &ciphertext)
+            .put_encrypted_secret_value(&record.id, &ciphertext)
             .await
             .map_err(|e| BackendError::Storage(e.to_string()))?;
 
@@ -128,7 +129,7 @@ impl SecretBackend for EncryptedCatalogBackend {
 
     async fn delete(&self, record: &SecretRecord) -> Result<bool, BackendError> {
         self.catalog
-            .delete_encrypted_secret_value(&record.name)
+            .delete_encrypted_secret_value(&record.id)
             .await
             .map_err(|e| BackendError::Storage(e.to_string()))
     }
@@ -138,6 +139,7 @@ impl SecretBackend for EncryptedCatalogBackend {
 mod tests {
     use super::*;
     use crate::catalog::SqliteCatalogManager;
+    use crate::secrets::{SecretMetadata, SecretStatus, ENCRYPTED_PROVIDER_TYPE};
     use tempfile::TempDir;
 
     fn test_key() -> [u8; 32] {
@@ -156,18 +158,40 @@ mod tests {
         (EncryptedCatalogBackend::new(test_key(), catalog), dir)
     }
 
-    fn record(name: &str) -> SecretRecord {
+    fn record(id: &str) -> SecretRecord {
         SecretRecord {
-            name: name.to_string(),
+            id: id.to_string(),
             provider_ref: None,
         }
+    }
+
+    /// Helper to create a secret metadata record (required before put due to FK constraint)
+    async fn create_secret_metadata(backend: &EncryptedCatalogBackend, id: &str) {
+        let now = chrono::Utc::now();
+        let metadata = SecretMetadata {
+            id: id.to_string(),
+            name: format!("test-{}", id),
+            provider: ENCRYPTED_PROVIDER_TYPE.to_string(),
+            provider_ref: None,
+            status: SecretStatus::Active,
+            created_at: now,
+            updated_at: now,
+        };
+        backend
+            .catalog
+            .create_secret_metadata(&metadata)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn test_put_and_get() {
         let (backend, _dir) = test_backend().await;
-        let rec = record("test-secret");
+        let rec = record("secr_test123456789012345678");
         let value = b"my-secret-password";
+
+        // Create metadata first (required due to FK constraint)
+        create_secret_metadata(&backend, &rec.id).await;
 
         let write = backend.put(&rec, value).await.unwrap();
         assert_eq!(write.status, WriteStatus::Created);
@@ -179,15 +203,18 @@ mod tests {
     #[tokio::test]
     async fn test_encryption_is_applied() {
         let (backend, _dir) = test_backend().await;
-        let rec = record("encrypted-test");
+        let rec = record("secr_encrypted123456789012");
         let plaintext = b"sensitive-data";
+
+        // Create metadata first (required due to FK constraint)
+        create_secret_metadata(&backend, &rec.id).await;
 
         backend.put(&rec, plaintext).await.unwrap();
 
         // Read raw from catalog - should be encrypted, not plaintext
         let raw = backend
             .catalog
-            .get_encrypted_secret(&rec.name)
+            .get_encrypted_secret(&rec.id)
             .await
             .unwrap()
             .unwrap();
@@ -208,7 +235,10 @@ mod tests {
     #[tokio::test]
     async fn test_put_update() {
         let (backend, _dir) = test_backend().await;
-        let rec = record("updatable");
+        let rec = record("secr_updatable123456789012");
+
+        // Create metadata first (required due to FK constraint)
+        create_secret_metadata(&backend, &rec.id).await;
 
         let write1 = backend.put(&rec, b"old-value").await.unwrap();
         assert_eq!(write1.status, WriteStatus::Created);
@@ -223,7 +253,10 @@ mod tests {
     #[tokio::test]
     async fn test_delete() {
         let (backend, _dir) = test_backend().await;
-        let rec = record("to-delete");
+        let rec = record("secr_todelete12345678901234");
+
+        // Create metadata first (required due to FK constraint)
+        create_secret_metadata(&backend, &rec.id).await;
 
         backend.put(&rec, b"value").await.unwrap();
 
@@ -256,7 +289,11 @@ mod tests {
 
         // Store with one key
         let backend1 = EncryptedCatalogBackend::new([0x42; 32], catalog.clone());
-        let rec = record("key-test");
+        let rec = record("secr_keytest12345678901234");
+
+        // Create metadata first (required due to FK constraint)
+        create_secret_metadata(&backend1, &rec.id).await;
+
         backend1.put(&rec, b"secret").await.unwrap();
 
         // Try to read with different key

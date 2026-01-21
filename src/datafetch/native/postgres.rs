@@ -13,7 +13,6 @@ use std::sync::Arc;
 use urlencoding::encode;
 
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
-use crate::secrets::SecretManager;
 use crate::source::Source;
 
 use super::StreamingParquetWriter;
@@ -36,19 +35,19 @@ fn build_connection_string(
     )
 }
 
-/// Resolve credentials and build connection string for a Postgres source.
-pub async fn resolve_connection_string(
+/// Build connection string for a Postgres source with a pre-resolved password.
+pub fn resolve_connection_string(
     source: &Source,
-    secrets: &SecretManager,
+    password: &str,
 ) -> Result<String, DataFetchError> {
-    let (host, port, user, database, credential) = match source {
+    let (host, port, user, database) = match source {
         Source::Postgres {
             host,
             port,
             user,
             database,
-            credential,
-        } => (host, *port, user, database, credential),
+            ..
+        } => (host, *port, user, database),
         _ => {
             return Err(DataFetchError::Connection(
                 "Expected Postgres source".to_string(),
@@ -56,13 +55,8 @@ pub async fn resolve_connection_string(
         }
     };
 
-    let password = credential
-        .resolve(secrets)
-        .await
-        .map_err(|e| DataFetchError::Connection(e.to_string()))?;
-
     Ok(build_connection_string(
-        host, port, user, database, &password,
+        host, port, user, database, password,
     ))
 }
 
@@ -94,9 +88,9 @@ async fn connect_with_ssl_retry(connection_string: &str) -> Result<PgConnection,
 /// Discover tables and columns from PostgreSQL
 pub async fn discover_tables(
     source: &Source,
-    secrets: &SecretManager,
+    password: &str,
 ) -> Result<Vec<TableMetadata>, DataFetchError> {
-    let connection_string = resolve_connection_string(source, secrets).await?;
+    let connection_string = resolve_connection_string(source, password)?;
     let mut conn = connect_with_ssl_retry(&connection_string).await?;
 
     let rows = sqlx::query(
@@ -164,13 +158,13 @@ pub async fn discover_tables(
 /// Fetch table data and write to Parquet using streaming to avoid OOM on large tables
 pub async fn fetch_table(
     source: &Source,
-    secrets: &SecretManager,
+    password: &str,
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
     writer: &mut StreamingParquetWriter,
 ) -> Result<(), DataFetchError> {
-    let connection_string = resolve_connection_string(source, secrets).await?;
+    let connection_string = resolve_connection_string(source, password)?;
     let mut conn = connect_with_ssl_retry(&connection_string).await?;
 
     // Build query - properly escape identifiers

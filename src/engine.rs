@@ -265,6 +265,7 @@ impl RuntimeEngine {
                 conn.id,
                 conn.name.clone(),
                 Arc::new(source),
+                conn.secret_id.clone(),
                 self.catalog.clone(),
                 self.orchestrator.clone(),
             )) as Arc<dyn CatalogProvider>;
@@ -280,14 +281,19 @@ impl RuntimeEngine {
     /// This persists the connection config to the catalog and registers it with DataFusion,
     /// but does not attempt to connect to the remote database or discover tables.
     /// Use `refresh_schema()` to discover tables after registration.
-    pub async fn register_connection(&self, name: &str, source: Source) -> Result<i32> {
+    pub async fn register_connection(
+        &self,
+        name: &str,
+        source: Source,
+        secret_id: Option<&str>,
+    ) -> Result<i32> {
         let source_type = source.source_type();
 
         // Store config as JSON (includes "type" from serde tag)
         let config_json = serde_json::to_string(&source)?;
         let conn_id = self
             .catalog
-            .add_connection(name, source_type, &config_json)
+            .add_connection(name, source_type, &config_json, secret_id)
             .await?;
 
         // Register with DataFusion (empty catalog - no tables yet)
@@ -295,6 +301,7 @@ impl RuntimeEngine {
             conn_id,
             name.to_string(),
             Arc::new(source),
+            secret_id.map(|s| s.to_string()),
             self.catalog.clone(),
             self.orchestrator.clone(),
         )) as Arc<dyn CatalogProvider>;
@@ -310,8 +317,8 @@ impl RuntimeEngine {
     ///
     /// This is a convenience method that combines `register_connection()` and
     /// `refresh_schema()`. For more control, use those methods separately.
-    pub async fn connect(&self, name: &str, source: Source) -> Result<()> {
-        let conn_id = self.register_connection(name, source).await?;
+    pub async fn connect(&self, name: &str, source: Source, secret_id: Option<&str>) -> Result<()> {
+        let conn_id = self.register_connection(name, source, secret_id).await?;
         self.refresh_schema(conn_id).await?;
         Ok(())
     }
@@ -488,6 +495,7 @@ impl RuntimeEngine {
             conn.id,
             conn.name.clone(),
             Arc::new(source),
+            conn.secret_id.clone(),
             self.catalog.clone(),
             self.orchestrator.clone(),
         )) as Arc<dyn CatalogProvider>;
@@ -530,6 +538,7 @@ impl RuntimeEngine {
             conn.id,
             conn.name.clone(),
             Arc::new(source),
+            conn.secret_id.clone(),
             self.catalog.clone(),
             self.orchestrator.clone(),
         )) as Arc<dyn CatalogProvider>;
@@ -632,7 +641,10 @@ impl RuntimeEngine {
             .collect();
 
         let source: Source = serde_json::from_str(&conn.config_json)?;
-        let discovered = self.orchestrator.discover_tables(&source).await?;
+        let discovered = self
+            .orchestrator
+            .discover_tables(&source, conn.secret_id.as_deref())
+            .await?;
 
         let current_set: HashSet<(String, String)> = discovered
             .iter()
@@ -727,7 +739,13 @@ impl RuntimeEngine {
 
         let (_, old_path, rows_synced) = self
             .orchestrator
-            .refresh_table(&source, connection_id, schema_name, table_name)
+            .refresh_table(
+                &source,
+                conn.secret_id.as_deref(),
+                connection_id,
+                schema_name,
+                table_name,
+            )
             .await?;
 
         if let Some(path) = old_path {
@@ -804,12 +822,19 @@ impl RuntimeEngine {
             let permit = semaphore.clone().acquire_owned().await?;
             let orchestrator = self.orchestrator.clone();
             let source = source.clone();
+            let secret_id = conn.secret_id.clone();
             let schema_name = table.schema_name.clone();
             let table_name = table.table_name.clone();
 
             let handle = tokio::spawn(async move {
                 let result = orchestrator
-                    .refresh_table(&source, connection_id, &schema_name, &table_name)
+                    .refresh_table(
+                        &source,
+                        secret_id.as_deref(),
+                        connection_id,
+                        &schema_name,
+                        &table_name,
+                    )
                     .await;
                 drop(permit);
                 (schema_name, table_name, result)

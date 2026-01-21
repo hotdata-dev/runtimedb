@@ -26,6 +26,7 @@ pub struct LazyTableProvider {
     connection_id: i32,
     schema_name: String,
     table_name: String,
+    secret_id: Option<String>,
 }
 
 impl LazyTableProvider {
@@ -37,6 +38,7 @@ impl LazyTableProvider {
         connection_id: i32,
         schema_name: String,
         table_name: String,
+        secret_id: Option<String>,
     ) -> Self {
         Self {
             schema,
@@ -46,6 +48,7 @@ impl LazyTableProvider {
             connection_id,
             schema_name,
             table_name,
+            secret_id,
         }
     }
 
@@ -94,6 +97,7 @@ impl LazyTableProvider {
             .orchestrator
             .cache_table(
                 &self.source,
+                self.secret_id.as_deref(),
                 self.connection_id,
                 &self.schema_name,
                 &self.table_name,

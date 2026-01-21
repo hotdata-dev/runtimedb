@@ -60,7 +60,7 @@ async fn test_sync_connection_no_tables() -> Result<()> {
     let catalog = engine.catalog();
     let config_json = serde_json::to_string(&config)?;
     catalog
-        .add_connection("empty_conn", "postgres", &config_json)
+        .add_connection("empty_conn", "postgres", &config_json, None)
         .await?;
 
     // Try to sync - should succeed but do nothing

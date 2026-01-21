@@ -217,38 +217,115 @@ pub async fn create_connection_handler(
         )));
     }
 
-    // Build config object, handling password-to-secret conversion
-    let config_with_type = {
+    // Build config object, handling inline credential-to-secret conversion
+    let (config_with_type, auto_secret_id) = {
         let mut obj = match request.config {
             serde_json::Value::Object(m) => m,
             _ => return Err(ApiError::bad_request("Configuration must be a JSON object")),
         };
 
-        // If "password" is provided, auto-create a secret and replace with credential ref
-        if let Some(password_value) = obj.remove("password") {
-            if let Some(password) = password_value.as_str() {
-                if !password.is_empty() {
-                    // Generate secret name from connection name
-                    let secret_name = format!("conn-{}-password", request.name);
+        // Track if we auto-create a secret (stores the generated secret ID)
+        let mut auto_secret_id: Option<String> = None;
 
-                    // Create the secret
-                    engine
-                        .secret_manager()
-                        .create(&secret_name, password.as_bytes())
-                        .await
-                        .map_err(|e| {
-                            ApiError::internal_error(format!("Failed to store password: {}", e))
-                        })?;
+        // Helper to normalize connection name for use in secret name
+        // Replaces spaces with dashes, removes invalid chars, lowercases
+        let normalize_for_secret = |name: &str| -> String {
+            name.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                        c.to_ascii_lowercase()
+                    } else if c.is_whitespace() {
+                        '-'
+                    } else {
+                        '_'
+                    }
+                })
+                .collect()
+        };
 
-                    // Replace password with credential reference
-                    obj.insert(
-                        "credential".to_string(),
-                        serde_json::json!({
-                            "type": "secret_ref",
-                            "name": secret_name
-                        }),
-                    );
+        // Check for inline credential fields: password, token, bearer_token
+        // Only process if no explicit secret_name is provided (to avoid creating unused secrets)
+        // Only one should be present; first match wins
+        let credential_fields = [
+            ("password", "password"),
+            ("token", "token"),
+            ("bearer_token", "bearer_token"),
+        ];
+
+        // Skip inline credential processing if user already provided a secret_name
+        if request.secret_name.is_none() {
+            for (field_name, auth_type) in credential_fields {
+                if let Some(value) = obj.remove(field_name) {
+                    if let Some(secret_value) = value.as_str() {
+                        if !secret_value.is_empty() {
+                            // For Iceberg, check if it's a REST catalog (not Glue)
+                            // Glue uses IAM credentials, not bearer tokens
+                            if request.source_type == "iceberg" {
+                                let is_rest_catalog = obj
+                                    .get("catalog_type")
+                                    .and_then(|ct| ct.as_object())
+                                    .map(|ct_obj| {
+                                        ct_obj.get("type").and_then(|v| v.as_str()) == Some("rest")
+                                            || ct_obj.contains_key("uri")
+                                    })
+                                    .unwrap_or(false);
+
+                                if !is_rest_catalog {
+                                    // Reject inline credentials for Iceberg Glue
+                                    return Err(ApiError::bad_request(
+                                        "Iceberg Glue catalogs use IAM credentials, not inline tokens. \
+                                         Remove the bearer_token field.",
+                                    ));
+                                }
+                            }
+
+                            // Generate normalized secret name from connection name
+                            let normalized_conn = normalize_for_secret(&request.name);
+                            let secret_name = format!("conn-{}-{}", normalized_conn, field_name);
+
+                            // Create the secret and get the generated ID
+                            let secret_id = engine
+                                .secret_manager()
+                                .create(&secret_name, secret_value.as_bytes())
+                                .await
+                                .map_err(|e| {
+                                    ApiError::internal_error(format!(
+                                        "Failed to store {}: {}",
+                                        field_name, e
+                                    ))
+                                })?;
+
+                            // Set auth type for the source config
+                            // For Iceberg REST, auth goes inside catalog_type, not at the top level
+                            if request.source_type == "iceberg" {
+                                // For Iceberg, inject auth into catalog_type (we know it's REST at this point)
+                                if let Some(catalog_type) = obj.get_mut("catalog_type") {
+                                    if let Some(ct_obj) = catalog_type.as_object_mut() {
+                                        ct_obj.insert(
+                                            "auth".to_string(),
+                                            serde_json::Value::String(auth_type.to_string()),
+                                        );
+                                    }
+                                }
+                            } else {
+                                // For all other sources, auth goes at the top level
+                                obj.insert(
+                                    "auth".to_string(),
+                                    serde_json::Value::String(auth_type.to_string()),
+                                );
+                            }
+
+                            auto_secret_id = Some(secret_id);
+                            break; // Only process first matching credential field
+                        }
+                    }
                 }
+            }
+        } else {
+            // User provided secret_name, just remove any inline credential fields
+            // without processing them (they shouldn't be there, but clean up if present)
+            for (field_name, _) in credential_fields {
+                obj.remove(field_name);
             }
         }
 
@@ -256,7 +333,7 @@ pub async fn create_connection_handler(
             "type".to_string(),
             serde_json::Value::String(request.source_type.clone()),
         );
-        serde_json::Value::Object(obj)
+        (serde_json::Value::Object(obj), auto_secret_id)
     };
 
     // Deserialize to Source enum
@@ -265,9 +342,26 @@ pub async fn create_connection_handler(
 
     let source_type = source.source_type().to_string();
 
+    // Determine which secret_id to use: explicit request takes precedence, then auto-created
+    // Note: request.secret_name refers to the user-facing secret name, need to resolve to ID
+    let effective_secret_id = if let Some(ref secret_name) = request.secret_name {
+        // User provided a secret name, resolve it to its ID
+        let metadata = engine
+            .secret_manager()
+            .get_metadata(secret_name)
+            .await
+            .map_err(|e| {
+                ApiError::bad_request(format!("Secret '{}' not found: {}", secret_name, e))
+            })?;
+        Some(metadata.id)
+    } else {
+        // Use auto-created secret ID if any
+        auto_secret_id
+    };
+
     // Step 1: Register the connection
     let conn_id = engine
-        .register_connection(&request.name, source)
+        .register_connection(&request.name, source, effective_secret_id.as_deref())
         .await
         .map_err(|e| {
             error!("Failed to register connection: {}", e);
@@ -453,7 +547,7 @@ pub async fn create_secret_handler(
 ) -> Result<(StatusCode, Json<CreateSecretResponse>), ApiError> {
     let secret_manager = engine.secret_manager();
 
-    secret_manager
+    let secret_id = secret_manager
         .create(&request.name, request.value.as_bytes())
         .await?;
 
@@ -462,6 +556,7 @@ pub async fn create_secret_handler(
     Ok((
         StatusCode::CREATED,
         Json(CreateSecretResponse {
+            id: secret_id,
             name: metadata.name,
             created_at: metadata.created_at,
         }),

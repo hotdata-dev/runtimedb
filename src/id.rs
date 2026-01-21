@@ -117,6 +117,7 @@ macro_rules! define_resource_ids {
 define_resource_ids! {
     Connection => "conn",
     Result => "rslt",
+    Secret => "secr",
 }
 
 /// Generate a 30-char ID: 4-char prefix + 26-char nanoid (lowercase alphanumeric).
@@ -133,6 +134,11 @@ pub fn generate_connection_id() -> String {
 /// Generate a result ID (prefix: "rslt").
 pub fn generate_result_id() -> String {
     generate_id(ResourceId::Result)
+}
+
+/// Generate a secret ID (prefix: "secr").
+pub fn generate_secret_id() -> String {
+    generate_id(ResourceId::Secret)
 }
 
 #[cfg(test)]
@@ -170,5 +176,16 @@ mod tests {
     fn test_resource_id_prefixes() {
         assert_eq!(ResourceId::Connection.prefix(), "conn");
         assert_eq!(ResourceId::Result.prefix(), "rslt");
+        assert_eq!(ResourceId::Secret.prefix(), "secr");
+    }
+
+    #[test]
+    fn test_secret_id_format() {
+        let id = generate_secret_id();
+        assert_eq!(id.len(), 30);
+        assert!(id.starts_with("secr"));
+        assert!(id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
     }
 }

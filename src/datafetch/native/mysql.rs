@@ -14,7 +14,6 @@ use std::sync::Arc;
 use tracing::warn;
 
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
-use crate::secrets::SecretManager;
 use crate::source::Source;
 
 use super::StreamingParquetWriter;
@@ -36,19 +35,19 @@ fn build_connect_options(
         .database(database)
 }
 
-/// Resolve credentials and build connection options for a MySQL source.
-pub async fn resolve_connect_options(
+/// Build connection options for a MySQL source with a pre-resolved password.
+pub fn resolve_connect_options(
     source: &Source,
-    secrets: &SecretManager,
+    password: &str,
 ) -> Result<MySqlConnectOptions, DataFetchError> {
-    let (host, port, user, database, credential) = match source {
+    let (host, port, user, database) = match source {
         Source::Mysql {
             host,
             port,
             user,
             database,
-            credential,
-        } => (host, *port, user, database, credential),
+            ..
+        } => (host, *port, user, database),
         _ => {
             return Err(DataFetchError::Connection(
                 "Expected MySQL source".to_string(),
@@ -56,12 +55,7 @@ pub async fn resolve_connect_options(
         }
     };
 
-    let password = credential
-        .resolve(secrets)
-        .await
-        .map_err(|e| DataFetchError::Connection(e.to_string()))?;
-
-    Ok(build_connect_options(host, port, user, database, &password))
+    Ok(build_connect_options(host, port, user, database, password))
 }
 
 /// Connect to MySQL with automatic SSL retry.
@@ -88,9 +82,9 @@ async fn connect_with_ssl_retry(
 /// Discover tables and columns from MySQL
 pub async fn discover_tables(
     source: &Source,
-    secrets: &SecretManager,
+    password: &str,
 ) -> Result<Vec<TableMetadata>, DataFetchError> {
-    let options = resolve_connect_options(source, secrets).await?;
+    let options = resolve_connect_options(source, password)?;
     let mut conn = connect_with_ssl_retry(options).await?;
 
     // Get the database name for filtering
@@ -169,13 +163,13 @@ pub async fn discover_tables(
 /// Fetch table data and write to Parquet using streaming to avoid OOM on large tables
 pub async fn fetch_table(
     source: &Source,
-    secrets: &SecretManager,
+    password: &str,
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
     writer: &mut StreamingParquetWriter,
 ) -> Result<(), DataFetchError> {
-    let options = resolve_connect_options(source, secrets).await?;
+    let options = resolve_connect_options(source, password)?;
     let mut conn = connect_with_ssl_retry(options).await?;
 
     // Build query - use backticks for MySQL identifier escaping

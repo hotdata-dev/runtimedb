@@ -15,6 +15,7 @@ pub struct RuntimeCatalogProvider {
     connection_id: i32,
     connection_name: String,
     source: Arc<Source>,
+    secret_id: Option<String>,
     catalog: Arc<dyn CatalogManager>,
     orchestrator: Arc<FetchOrchestrator>,
     schemas: Arc<RwLock<HashMap<String, Arc<dyn SchemaProvider>>>>,
@@ -25,6 +26,7 @@ impl RuntimeCatalogProvider {
         connection_id: i32,
         connection_name: String,
         source: Arc<Source>,
+        secret_id: Option<String>,
         catalog: Arc<dyn CatalogManager>,
         orchestrator: Arc<FetchOrchestrator>,
     ) -> Self {
@@ -32,6 +34,7 @@ impl RuntimeCatalogProvider {
             connection_id,
             connection_name,
             source,
+            secret_id,
             catalog,
             orchestrator,
             schemas: Arc::new(RwLock::new(HashMap::new())),
@@ -62,6 +65,7 @@ impl RuntimeCatalogProvider {
             self.connection_name.clone(),
             schema_name.to_string(),
             self.source.clone(),
+            self.secret_id.clone(),
             self.catalog.clone(),
             self.orchestrator.clone(),
         )) as Arc<dyn SchemaProvider>;

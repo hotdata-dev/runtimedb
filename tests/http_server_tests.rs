@@ -715,7 +715,8 @@ async fn test_delete_nonexistent_secret() -> Result<()> {
         )
         .await?;
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    // Delete is idempotent - returns 204 even for non-existent secrets
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     Ok(())
 }

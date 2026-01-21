@@ -38,6 +38,7 @@ impl FetchOrchestrator {
     pub async fn cache_table(
         &self,
         source: &Source,
+        secret_id: Option<&str>,
         connection_id: i32,
         schema_name: &str,
         table_name: &str,
@@ -55,6 +56,7 @@ impl FetchOrchestrator {
             .fetch_table(
                 source,
                 &self.secret_manager,
+                secret_id,
                 None, // catalog
                 schema_name,
                 table_name,
@@ -102,9 +104,10 @@ impl FetchOrchestrator {
     pub async fn discover_tables(
         &self,
         source: &Source,
+        secret_id: Option<&str>,
     ) -> Result<Vec<TableMetadata>, DataFetchError> {
         self.fetcher
-            .discover_tables(source, &self.secret_manager)
+            .discover_tables(source, &self.secret_manager, secret_id)
             .await
     }
 
@@ -117,6 +120,7 @@ impl FetchOrchestrator {
     pub async fn refresh_table(
         &self,
         source: &Source,
+        secret_id: Option<&str>,
         connection_id: i32,
         schema_name: &str,
         table_name: &str,
@@ -146,6 +150,7 @@ impl FetchOrchestrator {
             .fetch_table(
                 source,
                 &self.secret_manager,
+                secret_id,
                 None,
                 schema_name,
                 table_name,
@@ -244,6 +249,7 @@ mod tests {
             &self,
             _source: &Source,
             _secret_manager: &SecretManager,
+            _secret_id: Option<&str>,
         ) -> Result<Vec<TableMetadata>, DataFetchError> {
             Ok(vec![TableMetadata {
                 catalog_name: None,
@@ -263,6 +269,7 @@ mod tests {
             &self,
             _source: &Source,
             _secret_manager: &SecretManager,
+            _secret_id: Option<&str>,
             _catalog: Option<&str>,
             _schema: &str,
             _table: &str,
@@ -458,6 +465,7 @@ mod tests {
             _name: &str,
             _source_type: &str,
             _config_json: &str,
+            _secret_id: Option<&str>,
         ) -> Result<i32> {
             Ok(1)
         }
@@ -601,8 +609,12 @@ mod tests {
             Ok(())
         }
 
-        async fn delete_encrypted_secret_value(&self, _name: &str) -> Result<bool> {
+        async fn delete_encrypted_secret_value(&self, _secret_id: &str) -> Result<bool> {
             Ok(true)
+        }
+
+        async fn get_secret_metadata_by_id(&self, _id: &str) -> Result<Option<SecretMetadata>> {
+            Ok(None)
         }
 
         async fn store_result(&self, _result: &crate::catalog::QueryResult) -> Result<()> {
@@ -667,7 +679,7 @@ mod tests {
 
         // This should fail because catalog update is configured to fail
         let result = orchestrator
-            .refresh_table(&source, 1, "test", "orders")
+            .refresh_table(&source, None, 1, "test", "orders")
             .await;
 
         assert!(result.is_err(), "refresh_table should fail");
@@ -718,7 +730,7 @@ mod tests {
         };
 
         let result = orchestrator
-            .refresh_table(&source, 1, "test", "orders")
+            .refresh_table(&source, None, 1, "test", "orders")
             .await;
 
         assert!(result.is_ok(), "refresh_table should succeed");
@@ -760,7 +772,7 @@ mod tests {
         };
 
         let result = orchestrator
-            .refresh_table(&source, 1, "test", "orders")
+            .refresh_table(&source, None, 1, "test", "orders")
             .await;
 
         assert!(result.is_err(), "refresh_table should fail");
@@ -805,7 +817,9 @@ mod tests {
         };
 
         // This should fail because catalog update is configured to fail
-        let result = orchestrator.cache_table(&source, 1, "test", "orders").await;
+        let result = orchestrator
+            .cache_table(&source, None, 1, "test", "orders")
+            .await;
 
         assert!(result.is_err(), "cache_table should fail");
         let err_msg = result.unwrap_err().to_string();

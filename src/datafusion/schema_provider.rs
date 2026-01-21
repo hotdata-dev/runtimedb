@@ -18,6 +18,7 @@ pub struct RuntimeSchemaProvider {
     connection_name: String,
     schema_name: String,
     source: Arc<Source>,
+    secret_id: Option<String>,
     catalog: Arc<dyn CatalogManager>,
     orchestrator: Arc<FetchOrchestrator>,
     inner: Arc<MemorySchemaProvider>,
@@ -29,6 +30,7 @@ impl RuntimeSchemaProvider {
         connection_name: String,
         schema_name: String,
         source: Arc<Source>,
+        secret_id: Option<String>,
         catalog: Arc<dyn CatalogManager>,
         orchestrator: Arc<FetchOrchestrator>,
     ) -> Self {
@@ -37,6 +39,7 @@ impl RuntimeSchemaProvider {
             connection_name,
             schema_name,
             source,
+            secret_id,
             catalog,
             orchestrator,
             inner: Arc::new(MemorySchemaProvider::new()),
@@ -109,6 +112,7 @@ impl SchemaProvider for RuntimeSchemaProvider {
             self.connection_id,
             self.schema_name.clone(),
             name.to_string(),
+            self.secret_id.clone(),
         )) as Arc<dyn TableProvider>;
 
         // Cache it in memory for future queries

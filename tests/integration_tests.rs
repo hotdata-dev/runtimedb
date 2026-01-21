@@ -332,7 +332,7 @@ impl ConnectionDetails {
 #[async_trait::async_trait]
 trait TestExecutor: Send + Sync {
     /// Connect and return an identifier (name for engine, connection_id for API)
-    async fn connect(&self, name: &str, source: &Source) -> String;
+    async fn connect(&self, name: &str, source: &Source, secret_name: Option<&str>) -> String;
     async fn list_connections(&self) -> ConnectionResult;
     async fn list_tables(&self, connection_name: &str) -> TablesResult;
     async fn query(&self, sql: &str) -> QueryResult;
@@ -355,9 +355,22 @@ struct EngineExecutor {
 
 #[async_trait::async_trait]
 impl TestExecutor for EngineExecutor {
-    async fn connect(&self, name: &str, source: &Source) -> String {
+    async fn connect(&self, name: &str, source: &Source, secret_name: Option<&str>) -> String {
+        // Resolve secret name to ID if provided (matching HTTP handler behavior)
+        let secret_id = if let Some(sn) = secret_name {
+            let metadata = self
+                .engine
+                .secret_manager()
+                .get_metadata(sn)
+                .await
+                .expect("Failed to get secret metadata");
+            Some(metadata.id)
+        } else {
+            None
+        };
+
         self.engine
-            .connect(name, source.clone())
+            .connect(name, source.clone(), secret_id.as_deref())
             .await
             .expect("Engine connect failed");
         name.to_string() // Engine uses name as identifier
@@ -434,7 +447,7 @@ struct ApiExecutor {
 
 #[async_trait::async_trait]
 impl TestExecutor for ApiExecutor {
-    async fn connect(&self, name: &str, source: &Source) -> String {
+    async fn connect(&self, name: &str, source: &Source, secret_name: Option<&str>) -> String {
         let (source_type, config) = match source {
             Source::Duckdb { path } => ("duckdb", json!({ "path": path })),
             Source::Postgres {
@@ -442,39 +455,32 @@ impl TestExecutor for ApiExecutor {
                 port,
                 user,
                 database,
-                credential,
-            } => {
-                let cred_json = match credential {
-                    runtimedb::source::Credential::None => json!({"type": "none"}),
-                    runtimedb::source::Credential::SecretRef { name } => {
-                        json!({"type": "secret_ref", "name": name})
-                    }
-                };
-                (
-                    "postgres",
-                    json!({ "host": host, "port": port, "user": user, "database": database, "credential": cred_json }),
-                )
-            }
+                auth,
+            } => (
+                "postgres",
+                json!({ "host": host, "port": port, "user": user, "database": database, "auth": auth }),
+            ),
             Source::Mysql {
                 host,
                 port,
                 user,
                 database,
-                credential,
-            } => {
-                let cred_json = match credential {
-                    runtimedb::source::Credential::None => json!({"type": "none"}),
-                    runtimedb::source::Credential::SecretRef { name } => {
-                        json!({"type": "secret_ref", "name": name})
-                    }
-                };
-                (
-                    "mysql",
-                    json!({ "host": host, "port": port, "user": user, "database": database, "credential": cred_json }),
-                )
-            }
+                auth,
+            } => (
+                "mysql",
+                json!({ "host": host, "port": port, "user": user, "database": database, "auth": auth }),
+            ),
             _ => panic!("Unsupported source type"),
         };
+
+        let mut body_json = json!({
+            "name": name,
+            "source_type": source_type,
+            "config": config,
+        });
+        if let Some(sn) = secret_name {
+            body_json["secret_name"] = json!(sn);
+        }
 
         let response = self
             .router
@@ -484,14 +490,7 @@ impl TestExecutor for ApiExecutor {
                     .method("POST")
                     .uri(PATH_CONNECTIONS)
                     .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::to_string(&json!({
-                            "name": name,
-                            "source_type": source_type,
-                            "config": config,
-                        }))
-                        .unwrap(),
-                    ))
+                    .body(Body::from(serde_json::to_string(&body_json).unwrap()))
                     .unwrap(),
             )
             .await
@@ -804,9 +803,14 @@ mod queries {
 }
 
 /// Run the golden path test scenario against any executor and source.
-async fn run_golden_path_test(executor: &dyn TestExecutor, source: &Source, conn_name: &str) {
+async fn run_golden_path_test(
+    executor: &dyn TestExecutor,
+    source: &Source,
+    conn_name: &str,
+    secret_name: Option<&str>,
+) {
     // Connect and get identifier
-    let _conn_id = executor.connect(conn_name, source).await;
+    let _conn_id = executor.connect(conn_name, source, secret_name).await;
 
     // Verify connection exists
     let connections = executor.list_connections().await;
@@ -829,8 +833,13 @@ async fn run_golden_path_test(executor: &dyn TestExecutor, source: &Source, conn
 }
 
 /// Run multi-schema test scenario.
-async fn run_multi_schema_test(executor: &dyn TestExecutor, source: &Source, conn_name: &str) {
-    let _conn_id = executor.connect(conn_name, source).await;
+async fn run_multi_schema_test(
+    executor: &dyn TestExecutor,
+    source: &Source,
+    conn_name: &str,
+    secret_name: Option<&str>,
+) {
+    let _conn_id = executor.connect(conn_name, source, secret_name).await;
 
     let tables = executor.list_tables(conn_name).await;
     tables.assert_has_table("sales", "orders");
@@ -848,9 +857,14 @@ async fn run_multi_schema_test(executor: &dyn TestExecutor, source: &Source, con
 }
 
 /// Run delete connection test scenario.
-async fn run_delete_connection_test(executor: &dyn TestExecutor, source: &Source, conn_name: &str) {
+async fn run_delete_connection_test(
+    executor: &dyn TestExecutor,
+    source: &Source,
+    conn_name: &str,
+    secret_name: Option<&str>,
+) {
     // Create connection and get identifier
-    let conn_id = executor.connect(conn_name, source).await;
+    let conn_id = executor.connect(conn_name, source, secret_name).await;
 
     // Verify it exists using identifier
     let conn = executor.get_connection(&conn_id).await;
@@ -874,9 +888,10 @@ async fn run_purge_connection_cache_test(
     executor: &dyn TestExecutor,
     source: &Source,
     conn_name: &str,
+    secret_name: Option<&str>,
 ) {
     // Create connection and get identifier
-    let conn_id = executor.connect(conn_name, source).await;
+    let conn_id = executor.connect(conn_name, source, secret_name).await;
 
     // Query to trigger sync (uses connection name in SQL)
     let _ = executor.query(&queries::select_orders(conn_name)).await;
@@ -906,9 +921,14 @@ async fn run_purge_connection_cache_test(
 }
 
 /// Run purge table cache test scenario.
-async fn run_purge_table_cache_test(executor: &dyn TestExecutor, source: &Source, conn_name: &str) {
+async fn run_purge_table_cache_test(
+    executor: &dyn TestExecutor,
+    source: &Source,
+    conn_name: &str,
+    secret_name: Option<&str>,
+) {
     // Create connection and get identifier
-    let conn_id = executor.connect(conn_name, source).await;
+    let conn_id = executor.connect(conn_name, source, secret_name).await;
 
     // Query to trigger sync of orders table (uses connection name in SQL)
     let _ = executor.query(&queries::select_orders(conn_name)).await;
@@ -945,9 +965,10 @@ async fn run_nullable_flags_test(
     source: &Source,
     conn_name: &str,
     schema_name: &str,
+    secret_name: Option<&str>,
 ) {
     // Connect
-    let _conn_id = executor.connect(conn_name, source).await;
+    let _conn_id = executor.connect(conn_name, source, secret_name).await;
 
     // Query to trigger sync - this will create the parquet cache with schema
     let result = executor
@@ -976,9 +997,10 @@ async fn run_empty_nullable_flags_test(
     source: &Source,
     conn_name: &str,
     schema_name: &str,
+    secret_name: Option<&str>,
 ) {
     // Connect
-    let _conn_id = executor.connect(conn_name, source).await;
+    let _conn_id = executor.connect(conn_name, source, secret_name).await;
 
     // Query to trigger sync - this will create the parquet cache with schema
     // The table is empty, so we expect 0 rows but correct column schema
@@ -1153,7 +1175,7 @@ mod postgres_fixtures {
         (container, conn_str)
     }
 
-    pub async fn standard(secret_name: &str) -> PostgresFixture {
+    pub async fn standard() -> PostgresFixture {
         let (container, conn_str) = start_container().await;
         let pool = sqlx::PgPool::connect(&conn_str).await.unwrap();
 
@@ -1177,14 +1199,12 @@ mod postgres_fixtures {
                 port,
                 user: "postgres".into(),
                 database: "postgres".into(),
-                credential: runtimedb::source::Credential::SecretRef {
-                    name: secret_name.to_string(),
-                },
+                auth: runtimedb::source::AuthType::Password,
             },
         }
     }
 
-    pub async fn multi_schema(secret_name: &str) -> PostgresFixture {
+    pub async fn multi_schema() -> PostgresFixture {
         let (container, conn_str) = start_container().await;
         let pool = sqlx::PgPool::connect(&conn_str).await.unwrap();
 
@@ -1222,16 +1242,14 @@ mod postgres_fixtures {
                 port,
                 user: "postgres".into(),
                 database: "postgres".into(),
-                credential: runtimedb::source::Credential::SecretRef {
-                    name: secret_name.to_string(),
-                },
+                auth: runtimedb::source::AuthType::Password,
             },
         }
     }
 
     /// Creates a PostgreSQL with nullable test data.
     /// Table has mix of nullable and non-nullable columns to verify issue #59 fix.
-    pub async fn nullable_test(secret_name: &str) -> PostgresFixture {
+    pub async fn nullable_test() -> PostgresFixture {
         let (container, conn_str) = start_container().await;
         let pool = sqlx::PgPool::connect(&conn_str).await.unwrap();
 
@@ -1270,16 +1288,14 @@ mod postgres_fixtures {
                 port,
                 user: "postgres".into(),
                 database: "postgres".into(),
-                credential: runtimedb::source::Credential::SecretRef {
-                    name: secret_name.to_string(),
-                },
+                auth: runtimedb::source::AuthType::Password,
             },
         }
     }
 
     /// Creates a PostgreSQL with empty nullable test table.
     /// Verifies nullable flags are preserved even when table has no rows.
-    pub async fn empty_nullable_test(secret_name: &str) -> PostgresFixture {
+    pub async fn empty_nullable_test() -> PostgresFixture {
         let (container, conn_str) = start_container().await;
         let pool = sqlx::PgPool::connect(&conn_str).await.unwrap();
 
@@ -1310,9 +1326,7 @@ mod postgres_fixtures {
                 port,
                 user: "postgres".into(),
                 database: "postgres".into(),
-                credential: runtimedb::source::Credential::SecretRef {
-                    name: secret_name.to_string(),
-                },
+                auth: runtimedb::source::AuthType::Password,
             },
         }
     }
@@ -1344,7 +1358,7 @@ mod mysql_fixtures {
         (container, conn_str)
     }
 
-    pub async fn standard(secret_name: &str) -> MysqlFixture {
+    pub async fn standard() -> MysqlFixture {
         let (container, conn_str) = start_container().await;
         let pool = sqlx::MySqlPool::connect(&conn_str).await.unwrap();
 
@@ -1369,16 +1383,14 @@ mod mysql_fixtures {
                 port,
                 user: "root".into(),
                 database: "sales".into(),
-                credential: runtimedb::source::Credential::SecretRef {
-                    name: secret_name.to_string(),
-                },
+                auth: runtimedb::source::AuthType::Password,
             },
         }
     }
 
     /// Creates a MySQL with nullable test data.
     /// Table has mix of nullable and non-nullable columns to verify issue #59 fix.
-    pub async fn nullable_test(secret_name: &str) -> MysqlFixture {
+    pub async fn nullable_test() -> MysqlFixture {
         let (container, conn_str) = start_container().await;
         let pool = sqlx::MySqlPool::connect(&conn_str).await.unwrap();
 
@@ -1418,16 +1430,14 @@ mod mysql_fixtures {
                 port,
                 user: "root".into(),
                 database: "testschema".into(),
-                credential: runtimedb::source::Credential::SecretRef {
-                    name: secret_name.to_string(),
-                },
+                auth: runtimedb::source::AuthType::Password,
             },
         }
     }
 
     /// Creates a MySQL with empty nullable test table.
     /// Verifies nullable flags are preserved even when table has no rows.
-    pub async fn empty_nullable_test(secret_name: &str) -> MysqlFixture {
+    pub async fn empty_nullable_test() -> MysqlFixture {
         let (container, conn_str) = start_container().await;
         let pool = sqlx::MySqlPool::connect(&conn_str).await.unwrap();
 
@@ -1459,9 +1469,7 @@ mod mysql_fixtures {
                 port,
                 user: "root".into(),
                 database: "testschema".into(),
-                credential: runtimedb::source::Credential::SecretRef {
-                    name: secret_name.to_string(),
-                },
+                auth: runtimedb::source::AuthType::Password,
             },
         }
     }
@@ -1478,70 +1486,70 @@ mod duckdb_tests {
     async fn test_engine_golden_path() {
         let (_dir, source) = fixtures::duckdb_standard();
         let harness = TestHarness::new().await;
-        run_golden_path_test(harness.engine(), &source, "duckdb_conn").await;
+        run_golden_path_test(harness.engine(), &source, "duckdb_conn", None).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api_golden_path() {
         let (_dir, source) = fixtures::duckdb_standard();
         let harness = TestHarness::new().await;
-        run_golden_path_test(harness.api(), &source, "duckdb_conn").await;
+        run_golden_path_test(harness.api(), &source, "duckdb_conn", None).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_multi_schema() {
         let (_dir, source) = fixtures::duckdb_multi_schema();
         let harness = TestHarness::new().await;
-        run_multi_schema_test(harness.engine(), &source, "duckdb_conn").await;
+        run_multi_schema_test(harness.engine(), &source, "duckdb_conn", None).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api_multi_schema() {
         let (_dir, source) = fixtures::duckdb_multi_schema();
         let harness = TestHarness::new().await;
-        run_multi_schema_test(harness.api(), &source, "duckdb_conn").await;
+        run_multi_schema_test(harness.api(), &source, "duckdb_conn", None).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_delete_connection() {
         let (_dir, source) = fixtures::duckdb_standard();
         let harness = TestHarness::new().await;
-        run_delete_connection_test(harness.engine(), &source, "duckdb_conn").await;
+        run_delete_connection_test(harness.engine(), &source, "duckdb_conn", None).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api_delete_connection() {
         let (_dir, source) = fixtures::duckdb_standard();
         let harness = TestHarness::new().await;
-        run_delete_connection_test(harness.api(), &source, "duckdb_conn").await;
+        run_delete_connection_test(harness.api(), &source, "duckdb_conn", None).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_purge_connection_cache() {
         let (_dir, source) = fixtures::duckdb_standard();
         let harness = TestHarness::new().await;
-        run_purge_connection_cache_test(harness.engine(), &source, "duckdb_conn").await;
+        run_purge_connection_cache_test(harness.engine(), &source, "duckdb_conn", None).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api_purge_connection_cache() {
         let (_dir, source) = fixtures::duckdb_standard();
         let harness = TestHarness::new().await;
-        run_purge_connection_cache_test(harness.api(), &source, "duckdb_conn").await;
+        run_purge_connection_cache_test(harness.api(), &source, "duckdb_conn", None).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_purge_table_cache() {
         let (_dir, source) = fixtures::duckdb_standard();
         let harness = TestHarness::new().await;
-        run_purge_table_cache_test(harness.engine(), &source, "duckdb_conn").await;
+        run_purge_table_cache_test(harness.engine(), &source, "duckdb_conn", None).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api_purge_table_cache() {
         let (_dir, source) = fixtures::duckdb_standard();
         let harness = TestHarness::new().await;
-        run_purge_table_cache_test(harness.api(), &source, "duckdb_conn").await;
+        run_purge_table_cache_test(harness.api(), &source, "duckdb_conn", None).await;
     }
 
     /// Test that nullable flags are preserved through sync (issue #59).
@@ -1549,7 +1557,7 @@ mod duckdb_tests {
     async fn test_engine_nullable_flags() {
         let (_dir, source) = fixtures::duckdb_nullable_test();
         let harness = TestHarness::new().await;
-        run_nullable_flags_test(harness.engine(), &source, "duckdb_conn", "testschema").await;
+        run_nullable_flags_test(harness.engine(), &source, "duckdb_conn", "testschema", None).await;
     }
 
     /// Test that nullable flags are preserved through sync via API (issue #59).
@@ -1557,7 +1565,7 @@ mod duckdb_tests {
     async fn test_api_nullable_flags() {
         let (_dir, source) = fixtures::duckdb_nullable_test();
         let harness = TestHarness::new().await;
-        run_nullable_flags_test(harness.api(), &source, "duckdb_conn", "testschema").await;
+        run_nullable_flags_test(harness.api(), &source, "duckdb_conn", "testschema", None).await;
     }
 
     /// Test that nullable flags are preserved for empty tables (issue #59).
@@ -1565,7 +1573,8 @@ mod duckdb_tests {
     async fn test_engine_empty_table_nullable_flags() {
         let (_dir, source) = fixtures::duckdb_empty_nullable_test();
         let harness = TestHarness::new().await;
-        run_empty_nullable_flags_test(harness.engine(), &source, "duckdb_conn", "testschema").await;
+        run_empty_nullable_flags_test(harness.engine(), &source, "duckdb_conn", "testschema", None)
+            .await;
     }
 
     /// Test that nullable flags are preserved for empty tables via API (issue #59).
@@ -1573,7 +1582,8 @@ mod duckdb_tests {
     async fn test_api_empty_table_nullable_flags() {
         let (_dir, source) = fixtures::duckdb_empty_nullable_test();
         let harness = TestHarness::new().await;
-        run_empty_nullable_flags_test(harness.api(), &source, "duckdb_conn", "testschema").await;
+        run_empty_nullable_flags_test(harness.api(), &source, "duckdb_conn", "testschema", None)
+            .await;
     }
 }
 
@@ -1593,8 +1603,14 @@ mod postgres_tests {
         harness
             .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
             .await;
-        let fixture = postgres_fixtures::standard(PG_SECRET_NAME).await;
-        run_golden_path_test(harness.engine(), &fixture.source, "pg_conn").await;
+        let fixture = postgres_fixtures::standard().await;
+        run_golden_path_test(
+            harness.engine(),
+            &fixture.source,
+            "pg_conn",
+            Some(PG_SECRET_NAME),
+        )
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1603,8 +1619,14 @@ mod postgres_tests {
         harness
             .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
             .await;
-        let fixture = postgres_fixtures::standard(PG_SECRET_NAME).await;
-        run_golden_path_test(harness.api(), &fixture.source, "pg_conn").await;
+        let fixture = postgres_fixtures::standard().await;
+        run_golden_path_test(
+            harness.api(),
+            &fixture.source,
+            "pg_conn",
+            Some(PG_SECRET_NAME),
+        )
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1613,8 +1635,14 @@ mod postgres_tests {
         harness
             .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
             .await;
-        let fixture = postgres_fixtures::multi_schema(PG_SECRET_NAME).await;
-        run_multi_schema_test(harness.engine(), &fixture.source, "pg_conn").await;
+        let fixture = postgres_fixtures::multi_schema().await;
+        run_multi_schema_test(
+            harness.engine(),
+            &fixture.source,
+            "pg_conn",
+            Some(PG_SECRET_NAME),
+        )
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1623,8 +1651,14 @@ mod postgres_tests {
         harness
             .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
             .await;
-        let fixture = postgres_fixtures::multi_schema(PG_SECRET_NAME).await;
-        run_multi_schema_test(harness.api(), &fixture.source, "pg_conn").await;
+        let fixture = postgres_fixtures::multi_schema().await;
+        run_multi_schema_test(
+            harness.api(),
+            &fixture.source,
+            "pg_conn",
+            Some(PG_SECRET_NAME),
+        )
+        .await;
     }
 
     /// Test that nullable flags are preserved through sync (issue #59).
@@ -1634,8 +1668,15 @@ mod postgres_tests {
         harness
             .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
             .await;
-        let fixture = postgres_fixtures::nullable_test(PG_SECRET_NAME).await;
-        run_nullable_flags_test(harness.engine(), &fixture.source, "pg_conn", "testschema").await;
+        let fixture = postgres_fixtures::nullable_test().await;
+        run_nullable_flags_test(
+            harness.engine(),
+            &fixture.source,
+            "pg_conn",
+            "testschema",
+            Some(PG_SECRET_NAME),
+        )
+        .await;
     }
 
     /// Test that nullable flags are preserved through sync via API (issue #59).
@@ -1645,8 +1686,15 @@ mod postgres_tests {
         harness
             .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
             .await;
-        let fixture = postgres_fixtures::nullable_test(PG_SECRET_NAME).await;
-        run_nullable_flags_test(harness.api(), &fixture.source, "pg_conn", "testschema").await;
+        let fixture = postgres_fixtures::nullable_test().await;
+        run_nullable_flags_test(
+            harness.api(),
+            &fixture.source,
+            "pg_conn",
+            "testschema",
+            Some(PG_SECRET_NAME),
+        )
+        .await;
     }
 
     /// Test that nullable flags are preserved for empty tables (issue #59).
@@ -1656,9 +1704,15 @@ mod postgres_tests {
         harness
             .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
             .await;
-        let fixture = postgres_fixtures::empty_nullable_test(PG_SECRET_NAME).await;
-        run_empty_nullable_flags_test(harness.engine(), &fixture.source, "pg_conn", "testschema")
-            .await;
+        let fixture = postgres_fixtures::empty_nullable_test().await;
+        run_empty_nullable_flags_test(
+            harness.engine(),
+            &fixture.source,
+            "pg_conn",
+            "testschema",
+            Some(PG_SECRET_NAME),
+        )
+        .await;
     }
 
     /// Test that nullable flags are preserved for empty tables via API (issue #59).
@@ -1668,9 +1722,15 @@ mod postgres_tests {
         harness
             .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
             .await;
-        let fixture = postgres_fixtures::empty_nullable_test(PG_SECRET_NAME).await;
-        run_empty_nullable_flags_test(harness.api(), &fixture.source, "pg_conn", "testschema")
-            .await;
+        let fixture = postgres_fixtures::empty_nullable_test().await;
+        run_empty_nullable_flags_test(
+            harness.api(),
+            &fixture.source,
+            "pg_conn",
+            "testschema",
+            Some(PG_SECRET_NAME),
+        )
+        .await;
     }
 }
 
@@ -1689,8 +1749,14 @@ mod mysql_tests {
         harness
             .store_secret(MYSQL_SECRET_NAME, mysql_fixtures::TEST_PASSWORD)
             .await;
-        let fixture = mysql_fixtures::standard(MYSQL_SECRET_NAME).await;
-        run_golden_path_test(harness.engine(), &fixture.source, "mysql_conn").await;
+        let fixture = mysql_fixtures::standard().await;
+        run_golden_path_test(
+            harness.engine(),
+            &fixture.source,
+            "mysql_conn",
+            Some(MYSQL_SECRET_NAME),
+        )
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1699,8 +1765,14 @@ mod mysql_tests {
         harness
             .store_secret(MYSQL_SECRET_NAME, mysql_fixtures::TEST_PASSWORD)
             .await;
-        let fixture = mysql_fixtures::standard(MYSQL_SECRET_NAME).await;
-        run_golden_path_test(harness.api(), &fixture.source, "mysql_conn").await;
+        let fixture = mysql_fixtures::standard().await;
+        run_golden_path_test(
+            harness.api(),
+            &fixture.source,
+            "mysql_conn",
+            Some(MYSQL_SECRET_NAME),
+        )
+        .await;
     }
 
     /// Test that nullable flags are preserved through sync (issue #59).
@@ -1710,12 +1782,13 @@ mod mysql_tests {
         harness
             .store_secret(MYSQL_SECRET_NAME, mysql_fixtures::TEST_PASSWORD)
             .await;
-        let fixture = mysql_fixtures::nullable_test(MYSQL_SECRET_NAME).await;
+        let fixture = mysql_fixtures::nullable_test().await;
         run_nullable_flags_test(
             harness.engine(),
             &fixture.source,
             "mysql_conn",
             "testschema",
+            Some(MYSQL_SECRET_NAME),
         )
         .await;
     }
@@ -1727,8 +1800,15 @@ mod mysql_tests {
         harness
             .store_secret(MYSQL_SECRET_NAME, mysql_fixtures::TEST_PASSWORD)
             .await;
-        let fixture = mysql_fixtures::nullable_test(MYSQL_SECRET_NAME).await;
-        run_nullable_flags_test(harness.api(), &fixture.source, "mysql_conn", "testschema").await;
+        let fixture = mysql_fixtures::nullable_test().await;
+        run_nullable_flags_test(
+            harness.api(),
+            &fixture.source,
+            "mysql_conn",
+            "testschema",
+            Some(MYSQL_SECRET_NAME),
+        )
+        .await;
     }
 
     /// Test that nullable flags are preserved for empty tables (issue #59).
@@ -1738,12 +1818,13 @@ mod mysql_tests {
         harness
             .store_secret(MYSQL_SECRET_NAME, mysql_fixtures::TEST_PASSWORD)
             .await;
-        let fixture = mysql_fixtures::empty_nullable_test(MYSQL_SECRET_NAME).await;
+        let fixture = mysql_fixtures::empty_nullable_test().await;
         run_empty_nullable_flags_test(
             harness.engine(),
             &fixture.source,
             "mysql_conn",
             "testschema",
+            Some(MYSQL_SECRET_NAME),
         )
         .await;
     }
@@ -1755,9 +1836,15 @@ mod mysql_tests {
         harness
             .store_secret(MYSQL_SECRET_NAME, mysql_fixtures::TEST_PASSWORD)
             .await;
-        let fixture = mysql_fixtures::empty_nullable_test(MYSQL_SECRET_NAME).await;
-        run_empty_nullable_flags_test(harness.api(), &fixture.source, "mysql_conn", "testschema")
-            .await;
+        let fixture = mysql_fixtures::empty_nullable_test().await;
+        run_empty_nullable_flags_test(
+            harness.api(),
+            &fixture.source,
+            "mysql_conn",
+            "testschema",
+            Some(MYSQL_SECRET_NAME),
+        )
+        .await;
     }
 }
 
@@ -1827,7 +1914,7 @@ mod result_persistence_tests {
         let api = harness.api();
 
         // Connect
-        let _conn_id = api.connect("test_conn", &source).await;
+        let _conn_id = api.connect("test_conn", &source, None).await;
 
         // Execute query and verify we get a result_id
         let query_result = api.query(&queries::select_orders("test_conn")).await;
@@ -1861,7 +1948,7 @@ mod result_persistence_tests {
         let api = harness.api();
 
         // Connect
-        let _conn_id = api.connect("test_conn", &source).await;
+        let _conn_id = api.connect("test_conn", &source, None).await;
 
         // Execute first query
         let result1 = api.query(&queries::select_orders("test_conn")).await;

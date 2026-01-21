@@ -52,7 +52,7 @@ async fn create_test_engine_with_data(temp_dir: &TempDir) -> RuntimeEngine {
         path: duckdb_path.to_str().unwrap().to_string(),
     };
     engine
-        .connect("testdb", source)
+        .connect("testdb", source, None)
         .await
         .expect("Failed to connect");
 

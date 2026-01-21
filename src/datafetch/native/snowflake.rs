@@ -10,7 +10,6 @@ use snowflake_api::{QueryResult, SnowflakeApi};
 use std::sync::Arc;
 
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
-use crate::secrets::SecretManager;
 use crate::source::Source;
 
 use super::StreamingParquetWriter;
@@ -31,12 +30,11 @@ struct KeyPairCredential {
     private_key: String,
 }
 
-/// Parse credential JSON and build Snowflake client
-async fn build_client(
-    source: &Source,
-    secrets: &SecretManager,
-) -> Result<SnowflakeApi, DataFetchError> {
-    let (account, user, warehouse, database, schema, role, credential) = match source {
+/// Parse credential and build Snowflake client.
+/// The password parameter is the pre-resolved secret value.
+/// It can be either a plain password or a JSON object with 'password' or 'private_key' field.
+fn build_client(source: &Source, password: &str) -> Result<SnowflakeApi, DataFetchError> {
+    let (account, user, warehouse, database, schema, role) = match source {
         Source::Snowflake {
             account,
             user,
@@ -44,8 +42,8 @@ async fn build_client(
             database,
             schema,
             role,
-            credential,
-        } => (account, user, warehouse, database, schema, role, credential),
+            ..
+        } => (account, user, warehouse, database, schema, role),
         _ => {
             return Err(DataFetchError::Connection(
                 "Expected Snowflake source".to_string(),
@@ -53,27 +51,9 @@ async fn build_client(
         }
     };
 
-    let cred_json = credential
-        .resolve(secrets)
-        .await
-        .map_err(|e| DataFetchError::Connection(e.to_string()))?;
-
-    // Try to parse as password credential first, then key-pair
+    // Try to parse as JSON credential first (for key-pair auth), otherwise treat as plain password
     // API signature: with_password_auth(account, warehouse, database, schema, username, role, password)
-    let client = if let Ok(pwd_cred) = serde_json::from_str::<PasswordCredential>(&cred_json) {
-        SnowflakeApi::with_password_auth(
-            account,
-            Some(warehouse.as_str()),
-            Some(database.as_str()),
-            schema.as_deref(),
-            user,
-            role.as_deref(),
-            &pwd_cred.password,
-        )
-        .map_err(|e| {
-            DataFetchError::Connection(format!("Failed to create Snowflake client: {}", e))
-        })?
-    } else if let Ok(key_cred) = serde_json::from_str::<KeyPairCredential>(&cred_json) {
+    let client = if let Ok(key_cred) = serde_json::from_str::<KeyPairCredential>(password) {
         SnowflakeApi::with_certificate_auth(
             account,
             Some(warehouse.as_str()),
@@ -89,11 +69,34 @@ async fn build_client(
                 e
             ))
         })?
+    } else if let Ok(pwd_cred) = serde_json::from_str::<PasswordCredential>(password) {
+        // JSON with password field
+        SnowflakeApi::with_password_auth(
+            account,
+            Some(warehouse.as_str()),
+            Some(database.as_str()),
+            schema.as_deref(),
+            user,
+            role.as_deref(),
+            &pwd_cred.password,
+        )
+        .map_err(|e| {
+            DataFetchError::Connection(format!("Failed to create Snowflake client: {}", e))
+        })?
     } else {
-        return Err(DataFetchError::Connection(
-            "Invalid credential format: expected JSON with 'password' or 'private_key' field"
-                .to_string(),
-        ));
+        // Plain password string
+        SnowflakeApi::with_password_auth(
+            account,
+            Some(warehouse.as_str()),
+            Some(database.as_str()),
+            schema.as_deref(),
+            user,
+            role.as_deref(),
+            password,
+        )
+        .map_err(|e| {
+            DataFetchError::Connection(format!("Failed to create Snowflake client: {}", e))
+        })?
     };
 
     Ok(client)
@@ -102,9 +105,9 @@ async fn build_client(
 /// Discover tables and columns from Snowflake
 pub async fn discover_tables(
     source: &Source,
-    secrets: &SecretManager,
+    password: &str,
 ) -> Result<Vec<TableMetadata>, DataFetchError> {
-    let client = build_client(source, secrets).await?;
+    let client = build_client(source, password)?;
 
     // Extract database and optional schema filter
     let (database, schema_filter) = match source {
@@ -237,13 +240,13 @@ pub async fn discover_tables(
 /// Fetch table data and write to Parquet
 pub async fn fetch_table(
     source: &Source,
-    secrets: &SecretManager,
+    password: &str,
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
     writer: &mut StreamingParquetWriter,
 ) -> Result<(), DataFetchError> {
-    let client = build_client(source, secrets).await?;
+    let client = build_client(source, password)?;
 
     // Get database from source
     let database = match source {

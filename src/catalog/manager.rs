@@ -25,6 +25,8 @@ pub struct ConnectionInfo {
     pub name: String,
     pub source_type: String,
     pub config_json: String,
+    /// ID of the secret in the secret manager (if any).
+    pub secret_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -70,8 +72,13 @@ pub trait CatalogManager: Debug + Send + Sync {
     async fn run_migrations(&self) -> Result<()>;
 
     async fn list_connections(&self) -> Result<Vec<ConnectionInfo>>;
-    async fn add_connection(&self, name: &str, source_type: &str, config_json: &str)
-        -> Result<i32>;
+    async fn add_connection(
+        &self,
+        name: &str,
+        source_type: &str,
+        config_json: &str,
+        secret_id: Option<&str>,
+    ) -> Result<i32>;
     async fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>>;
     async fn get_connection_by_external_id(
         &self,
@@ -159,14 +166,21 @@ pub trait CatalogManager: Debug + Send + Sync {
 
     // Secret management methods - encrypted storage (used by EncryptedSecretManager only)
 
-    /// Get the encrypted value for a secret.
-    async fn get_encrypted_secret(&self, name: &str) -> Result<Option<Vec<u8>>>;
+    /// Get the encrypted value for a secret by its ID.
+    async fn get_encrypted_secret(&self, secret_id: &str) -> Result<Option<Vec<u8>>>;
 
     /// Store or update an encrypted secret value.
-    async fn put_encrypted_secret_value(&self, name: &str, encrypted_value: &[u8]) -> Result<()>;
+    async fn put_encrypted_secret_value(
+        &self,
+        secret_id: &str,
+        encrypted_value: &[u8],
+    ) -> Result<()>;
 
     /// Delete an encrypted secret value. Returns true if it existed.
-    async fn delete_encrypted_secret_value(&self, name: &str) -> Result<bool>;
+    async fn delete_encrypted_secret_value(&self, secret_id: &str) -> Result<bool>;
+
+    /// Get secret metadata by ID.
+    async fn get_secret_metadata_by_id(&self, id: &str) -> Result<Option<SecretMetadata>>;
 
     // Query result persistence methods
 
