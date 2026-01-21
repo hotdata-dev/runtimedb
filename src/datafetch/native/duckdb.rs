@@ -5,16 +5,45 @@ use std::collections::HashMap;
 use urlencoding::encode;
 
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
+use crate::secrets::SecretManager;
 use crate::source::Source;
 
 use super::StreamingParquetWriter;
 
+/// Resolve the credential (token) from the source using the secret manager.
+/// Returns None for DuckDB (no auth needed), or the token for Motherduck.
+async fn resolve_token(
+    source: &Source,
+    secrets: &SecretManager,
+) -> Result<Option<String>, DataFetchError> {
+    match source.credential() {
+        None => Ok(None),
+        Some(credential) => {
+            // For Credential::None, resolve() returns an error - treat as no token
+            match credential.resolve(secrets).await {
+                Ok(value) => Ok(Some(value)),
+                Err(e) => {
+                    if e.to_string().contains("no credential configured") {
+                        Ok(None)
+                    } else {
+                        Err(DataFetchError::Connection(format!(
+                            "Failed to resolve credential: {}",
+                            e
+                        )))
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Discover tables and columns from DuckDB/MotherDuck
 pub async fn discover_tables(
     source: &Source,
-    token: Option<&str>,
+    secrets: &SecretManager,
 ) -> Result<Vec<TableMetadata>, DataFetchError> {
-    let connection_string = resolve_connection_string(source, token)?;
+    let token = resolve_token(source, secrets).await?;
+    let connection_string = resolve_connection_string(source, token.as_deref())?;
     let catalog = source.catalog().map(|s| s.to_string());
 
     tokio::task::spawn_blocking(move || {
@@ -135,7 +164,7 @@ enum FetchMessage {
 /// Fetch table data and write to Parquet using streaming to avoid OOM on large tables
 pub async fn fetch_table(
     source: &Source,
-    token: Option<&str>,
+    secrets: &SecretManager,
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
@@ -144,7 +173,8 @@ pub async fn fetch_table(
     use datafusion::arrow::record_batch::RecordBatch;
     use std::sync::Arc;
 
-    let connection_string = resolve_connection_string(source, token)?;
+    let token = resolve_token(source, secrets).await?;
+    let connection_string = resolve_connection_string(source, token.as_deref())?;
     let schema = schema.to_string();
     let table = table.to_string();
 

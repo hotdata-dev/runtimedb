@@ -12,6 +12,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
+use crate::secrets::SecretManager;
 use crate::source::{IcebergCatalogType, Source};
 
 use super::StreamingParquetWriter;
@@ -28,6 +29,33 @@ const REST_TOKEN: &str = "token";
 // Property constants for Glue catalog
 const GLUE_WAREHOUSE: &str = "warehouse";
 const AWS_REGION: &str = "region_name";
+
+/// Resolve the credential (token) from the source using the secret manager.
+/// Returns None for Glue (uses IAM) or REST catalogs with Credential::None.
+async fn resolve_token(
+    source: &Source,
+    secrets: &SecretManager,
+) -> Result<Option<String>, DataFetchError> {
+    match source.credential() {
+        None => Ok(None),
+        Some(credential) => {
+            // For Credential::None, resolve() returns an error - treat as no token
+            match credential.resolve(secrets).await {
+                Ok(value) => Ok(Some(value)),
+                Err(e) => {
+                    if e.to_string().contains("no credential configured") {
+                        Ok(None)
+                    } else {
+                        Err(DataFetchError::Connection(format!(
+                            "Failed to resolve credential: {}",
+                            e
+                        )))
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// Build an Iceberg catalog from source configuration.
 /// For REST catalogs, the token parameter should be the bearer token.
@@ -82,12 +110,13 @@ async fn build_catalog(
 
 /// Discover tables and columns from an Iceberg catalog.
 /// Recursively discovers nested namespaces.
-/// For REST catalogs, pass the bearer token. For Glue, pass None (uses IAM/env).
+/// For REST catalogs, credentials are resolved via SecretManager. For Glue, uses IAM/env.
 pub async fn discover_tables(
     source: &Source,
-    token: Option<&str>,
+    secrets: &SecretManager,
 ) -> Result<Vec<TableMetadata>, DataFetchError> {
-    let catalog = build_catalog(source, token).await?;
+    let token = resolve_token(source, secrets).await?;
+    let catalog = build_catalog(source, token.as_deref()).await?;
 
     // Get namespace filter or discover all recursively
     let namespaces = match source {
@@ -181,10 +210,10 @@ fn discover_all_namespaces<'a>(
 ///
 /// Note: Due to arrow version mismatch between iceberg (arrow 55) and datafusion (arrow 56),
 /// we use IPC serialization to bridge the versions.
-/// For REST catalogs, pass the bearer token. For Glue, pass None (uses IAM/env).
+/// For REST catalogs, credentials are resolved via SecretManager. For Glue, uses IAM/env.
 pub async fn fetch_table(
     source: &Source,
-    token: Option<&str>,
+    secrets: &SecretManager,
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
@@ -192,7 +221,8 @@ pub async fn fetch_table(
 ) -> Result<(), DataFetchError> {
     use futures::StreamExt;
 
-    let catalog = build_catalog(source, token).await?;
+    let token = resolve_token(source, secrets).await?;
+    let catalog = build_catalog(source, token.as_deref()).await?;
 
     let parts: Vec<&str> = schema.split('.').collect();
     let namespace =

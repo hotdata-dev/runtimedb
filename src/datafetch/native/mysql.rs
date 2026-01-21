@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tracing::warn;
 
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
+use crate::secrets::SecretManager;
 use crate::source::Source;
 
 use super::StreamingParquetWriter;
@@ -79,12 +80,28 @@ async fn connect_with_ssl_retry(
     }
 }
 
+/// Resolve the credential (password) from the source using the secret manager.
+async fn resolve_password(
+    source: &Source,
+    secrets: &SecretManager,
+) -> Result<String, DataFetchError> {
+    let credential = source
+        .credential()
+        .ok_or_else(|| DataFetchError::Connection("Password required for MySQL".to_string()))?;
+
+    credential
+        .resolve(secrets)
+        .await
+        .map_err(|e| DataFetchError::Connection(format!("Failed to resolve credential: {}", e)))
+}
+
 /// Discover tables and columns from MySQL
 pub async fn discover_tables(
     source: &Source,
-    password: &str,
+    secrets: &SecretManager,
 ) -> Result<Vec<TableMetadata>, DataFetchError> {
-    let options = resolve_connect_options(source, password)?;
+    let password = resolve_password(source, secrets).await?;
+    let options = resolve_connect_options(source, &password)?;
     let mut conn = connect_with_ssl_retry(options).await?;
 
     // Get the database name for filtering
@@ -163,13 +180,14 @@ pub async fn discover_tables(
 /// Fetch table data and write to Parquet using streaming to avoid OOM on large tables
 pub async fn fetch_table(
     source: &Source,
-    password: &str,
+    secrets: &SecretManager,
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
     writer: &mut StreamingParquetWriter,
 ) -> Result<(), DataFetchError> {
-    let options = resolve_connect_options(source, password)?;
+    let password = resolve_password(source, secrets).await?;
+    let options = resolve_connect_options(source, &password)?;
     let mut conn = connect_with_ssl_retry(options).await?;
 
     // Build query - use backticks for MySQL identifier escaping

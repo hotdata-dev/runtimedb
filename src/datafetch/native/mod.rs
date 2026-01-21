@@ -13,41 +13,16 @@ use crate::datafetch::{DataFetchError, DataFetcher, TableMetadata};
 use crate::secrets::SecretManager;
 use crate::source::Source;
 
-/// Native Rust driver-based data fetcher
+/// Native Rust driver-based data fetcher.
+///
+/// This is a thin dispatcher that delegates to source-specific driver modules.
+/// Each driver module is responsible for resolving credentials via the SecretManager.
 #[derive(Debug, Default)]
 pub struct NativeFetcher;
 
 impl NativeFetcher {
     pub fn new() -> Self {
         Self
-    }
-}
-
-/// Resolve the credential for a source, returning the secret value or None.
-/// Sources without credentials (DuckDB, Iceberg Glue) return Ok(None).
-async fn resolve_credential(
-    source: &Source,
-    secrets: &SecretManager,
-) -> Result<Option<String>, DataFetchError> {
-    match source.credential() {
-        None => Ok(None),
-        Some(cred) => {
-            // Try to resolve - if it's Credential::None, this will fail
-            match cred.resolve(secrets).await {
-                Ok(value) => Ok(Some(value)),
-                Err(e) => {
-                    // Check if this is a "no credential configured" error (Credential::None)
-                    if e.to_string().contains("no credential configured") {
-                        Ok(None)
-                    } else {
-                        Err(DataFetchError::Connection(format!(
-                            "Failed to resolve credential: {}",
-                            e
-                        )))
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -58,35 +33,14 @@ impl DataFetcher for NativeFetcher {
         source: &Source,
         secrets: &SecretManager,
     ) -> Result<Vec<TableMetadata>, DataFetchError> {
-        let secret = resolve_credential(source, secrets).await?;
-
         match source {
             Source::Duckdb { .. } | Source::Motherduck { .. } => {
-                duckdb::discover_tables(source, secret.as_deref()).await
+                duckdb::discover_tables(source, secrets).await
             }
-            Source::Postgres { .. } => {
-                let password = secret.ok_or_else(|| {
-                    DataFetchError::Connection("Password required for Postgres".to_string())
-                })?;
-                postgres::discover_tables(source, &password).await
-            }
-            Source::Iceberg { .. } => {
-                // Iceberg: REST may optionally use a token, Glue uses IAM (no secret needed)
-                // If the catalog requires authentication, it will fail with a clear error
-                iceberg::discover_tables(source, secret.as_deref()).await
-            }
-            Source::Mysql { .. } => {
-                let password = secret.ok_or_else(|| {
-                    DataFetchError::Connection("Password required for MySQL".to_string())
-                })?;
-                mysql::discover_tables(source, &password).await
-            }
-            Source::Snowflake { .. } => {
-                let password = secret.ok_or_else(|| {
-                    DataFetchError::Connection("Password required for Snowflake".to_string())
-                })?;
-                snowflake::discover_tables(source, &password).await
-            }
+            Source::Postgres { .. } => postgres::discover_tables(source, secrets).await,
+            Source::Iceberg { .. } => iceberg::discover_tables(source, secrets).await,
+            Source::Mysql { .. } => mysql::discover_tables(source, secrets).await,
+            Source::Snowflake { .. } => snowflake::discover_tables(source, secrets).await,
         }
     }
 
@@ -99,35 +53,21 @@ impl DataFetcher for NativeFetcher {
         table: &str,
         writer: &mut StreamingParquetWriter,
     ) -> Result<(), DataFetchError> {
-        let secret = resolve_credential(source, secrets).await?;
-
         match source {
             Source::Duckdb { .. } | Source::Motherduck { .. } => {
-                duckdb::fetch_table(source, secret.as_deref(), catalog, schema, table, writer).await
+                duckdb::fetch_table(source, secrets, catalog, schema, table, writer).await
             }
             Source::Postgres { .. } => {
-                let password = secret.ok_or_else(|| {
-                    DataFetchError::Connection("Password required for Postgres".to_string())
-                })?;
-                postgres::fetch_table(source, &password, catalog, schema, table, writer).await
+                postgres::fetch_table(source, secrets, catalog, schema, table, writer).await
             }
             Source::Iceberg { .. } => {
-                // Iceberg: REST may optionally use a token, Glue uses IAM (no secret needed)
-                // If the catalog requires authentication, it will fail with a clear error
-                iceberg::fetch_table(source, secret.as_deref(), catalog, schema, table, writer)
-                    .await
+                iceberg::fetch_table(source, secrets, catalog, schema, table, writer).await
             }
             Source::Mysql { .. } => {
-                let password = secret.ok_or_else(|| {
-                    DataFetchError::Connection("Password required for MySQL".to_string())
-                })?;
-                mysql::fetch_table(source, &password, catalog, schema, table, writer).await
+                mysql::fetch_table(source, secrets, catalog, schema, table, writer).await
             }
             Source::Snowflake { .. } => {
-                let password = secret.ok_or_else(|| {
-                    DataFetchError::Connection("Password required for Snowflake".to_string())
-                })?;
-                snowflake::fetch_table(source, &password, catalog, schema, table, writer).await
+                snowflake::fetch_table(source, secrets, catalog, schema, table, writer).await
             }
         }
     }

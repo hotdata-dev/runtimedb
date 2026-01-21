@@ -10,6 +10,7 @@ use snowflake_api::{QueryResult, SnowflakeApi};
 use std::sync::Arc;
 
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
+use crate::secrets::SecretManager;
 use crate::source::Source;
 
 use super::StreamingParquetWriter;
@@ -102,12 +103,28 @@ fn build_client(source: &Source, password: &str) -> Result<SnowflakeApi, DataFet
     Ok(client)
 }
 
+/// Resolve the credential (password/key) from the source using the secret manager.
+async fn resolve_password(
+    source: &Source,
+    secrets: &SecretManager,
+) -> Result<String, DataFetchError> {
+    let credential = source
+        .credential()
+        .ok_or_else(|| DataFetchError::Connection("Password required for Snowflake".to_string()))?;
+
+    credential
+        .resolve(secrets)
+        .await
+        .map_err(|e| DataFetchError::Connection(format!("Failed to resolve credential: {}", e)))
+}
+
 /// Discover tables and columns from Snowflake
 pub async fn discover_tables(
     source: &Source,
-    password: &str,
+    secrets: &SecretManager,
 ) -> Result<Vec<TableMetadata>, DataFetchError> {
-    let client = build_client(source, password)?;
+    let password = resolve_password(source, secrets).await?;
+    let client = build_client(source, &password)?;
 
     // Extract database and optional schema filter
     let (database, schema_filter) = match source {
@@ -240,13 +257,14 @@ pub async fn discover_tables(
 /// Fetch table data and write to Parquet
 pub async fn fetch_table(
     source: &Source,
-    password: &str,
+    secrets: &SecretManager,
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
     writer: &mut StreamingParquetWriter,
 ) -> Result<(), DataFetchError> {
-    let client = build_client(source, password)?;
+    let password = resolve_password(source, secrets).await?;
+    let client = build_client(source, &password)?;
 
     // Get database from source
     let database = match source {
