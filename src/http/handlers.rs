@@ -218,14 +218,14 @@ pub async fn create_connection_handler(
     }
 
     // Build config object, handling inline credential-to-secret conversion
-    let (config_with_type, auto_secret_id) = {
+    let (config_with_type, auto_secret) = {
         let mut obj = match request.config {
             serde_json::Value::Object(m) => m,
             _ => return Err(ApiError::bad_request("Configuration must be a JSON object")),
         };
 
-        // Track if we auto-create a secret (stores the generated secret ID)
-        let mut auto_secret_id: Option<String> = None;
+        // Track if we auto-create a secret (stores the name and generated ID for cleanup on error)
+        let mut auto_secret: Option<(String, String)> = None;
 
         // Helper to normalize connection name for use in secret name
         // Replaces spaces with dashes, removes invalid chars, lowercases
@@ -315,7 +315,7 @@ pub async fn create_connection_handler(
                                 );
                             }
 
-                            auto_secret_id = Some(secret_id);
+                            auto_secret = Some((secret_name, secret_id));
                             break; // Only process first matching credential field
                         }
                     }
@@ -333,12 +333,36 @@ pub async fn create_connection_handler(
             "type".to_string(),
             serde_json::Value::String(request.source_type.clone()),
         );
-        (serde_json::Value::Object(obj), auto_secret_id)
+        (serde_json::Value::Object(obj), auto_secret)
     };
 
+    // Helper macro to cleanup auto-created secret on error
+    // This prevents orphaned secrets if subsequent operations fail
+    macro_rules! cleanup_and_return {
+        ($err:expr) => {{
+            if let Some((ref secret_name, _)) = auto_secret {
+                if let Err(e) = engine.secret_manager().delete(secret_name).await {
+                    tracing::warn!(
+                        secret = %secret_name,
+                        error = %e,
+                        "Failed to cleanup auto-created secret after connection creation failure"
+                    );
+                }
+            }
+            return Err($err);
+        }};
+    }
+
     // Deserialize to Source enum
-    let source: Source = serde_json::from_value(config_with_type)
-        .map_err(|e| ApiError::bad_request(format!("Invalid source configuration: {}", e)))?;
+    let source: Source = match serde_json::from_value(config_with_type) {
+        Ok(s) => s,
+        Err(e) => {
+            cleanup_and_return!(ApiError::bad_request(format!(
+                "Invalid source configuration: {}",
+                e
+            )));
+        }
+    };
 
     let source_type = source.source_type().to_string();
 
@@ -346,17 +370,18 @@ pub async fn create_connection_handler(
     // Note: request.secret_name refers to the user-facing secret name, need to resolve to ID
     let effective_secret_id = if let Some(ref secret_name) = request.secret_name {
         // User provided a secret name, resolve it to its ID
-        let metadata = engine
-            .secret_manager()
-            .get_metadata(secret_name)
-            .await
-            .map_err(|e| {
-                ApiError::bad_request(format!("Secret '{}' not found: {}", secret_name, e))
-            })?;
-        Some(metadata.id)
+        match engine.secret_manager().get_metadata(secret_name).await {
+            Ok(metadata) => Some(metadata.id),
+            Err(e) => {
+                cleanup_and_return!(ApiError::bad_request(format!(
+                    "Secret '{}' not found: {}",
+                    secret_name, e
+                )));
+            }
+        }
     } else {
         // Use auto-created secret ID if any
-        auto_secret_id
+        auto_secret.as_ref().map(|(_, id)| id.clone())
     };
 
     // Build Source with credential embedded
@@ -369,13 +394,16 @@ pub async fn create_connection_handler(
 
     // Step 1: Register the connection
     // Source contains the credential internally; engine extracts secret_id for DB queryability
-    let conn_id = engine
-        .register_connection(&request.name, source)
-        .await
-        .map_err(|e| {
+    let conn_id = match engine.register_connection(&request.name, source).await {
+        Ok(id) => id,
+        Err(e) => {
             error!("Failed to register connection: {}", e);
-            ApiError::internal_error(format!("Failed to register connection: {}", e))
-        })?;
+            cleanup_and_return!(ApiError::internal_error(format!(
+                "Failed to register connection: {}",
+                e
+            )));
+        }
+    };
 
     // Step 2: Attempt discovery - catch errors and return partial success
     let (tables_discovered, discovery_status, discovery_error) =
