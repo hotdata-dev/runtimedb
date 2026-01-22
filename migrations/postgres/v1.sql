@@ -21,7 +21,7 @@ CREATE TABLE connections (
     name TEXT UNIQUE NOT NULL,
     source_type TEXT NOT NULL,
     config_json TEXT NOT NULL,
-    secret_id TEXT REFERENCES secrets(id),
+    secret_id TEXT REFERENCES secrets(id) ON DELETE SET NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
