@@ -214,6 +214,15 @@ impl SecretManager {
             .ok_or(SecretError::NotFound(normalized))
     }
 
+    /// Get a secret's metadata by ID (no value).
+    pub async fn get_metadata_by_id(&self, id: &str) -> Result<SecretMetadata, SecretError> {
+        self.catalog
+            .get_secret_metadata_by_id(id)
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?
+            .ok_or_else(|| SecretError::NotFound(id.to_string()))
+    }
+
     /// Create a new secret.
     ///
     /// Uses optimistic locking to handle concurrent creation attempts safely:

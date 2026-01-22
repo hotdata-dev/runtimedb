@@ -412,9 +412,26 @@ pub async fn create_connection_handler(
 
     let source_type = source.source_type().to_string();
 
-    // Determine which secret_id to use: explicit request takes precedence, then auto-created
-    // Note: request.secret_name refers to the user-facing secret name, need to resolve to ID
-    let effective_secret_id = if let Some(ref secret_name) = request.secret_name {
+    // Validate mutual exclusivity of secret_name and secret_id
+    if request.secret_name.is_some() && request.secret_id.is_some() {
+        cleanup_and_return!(ApiError::bad_request(
+            "Cannot specify both secret_name and secret_id; use one or the other"
+        ));
+    }
+
+    // Determine which secret_id to use: explicit secret_id > secret_name > auto-created
+    let effective_secret_id = if let Some(ref secret_id) = request.secret_id {
+        // User provided a secret ID directly, verify it exists
+        match engine.secret_manager().get_metadata_by_id(secret_id).await {
+            Ok(_) => Some(secret_id.clone()),
+            Err(e) => {
+                cleanup_and_return!(ApiError::bad_request(format!(
+                    "Secret with ID '{}' not found: {}",
+                    secret_id, e
+                )));
+            }
+        }
+    } else if let Some(ref secret_name) = request.secret_name {
         // User provided a secret name, resolve it to its ID
         match engine.secret_manager().get_metadata(secret_name).await {
             Ok(metadata) => Some(metadata.id),

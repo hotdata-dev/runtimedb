@@ -79,10 +79,16 @@ pub struct CreateConnectionRequest {
     pub name: String,
     pub source_type: String,
     pub config: serde_json::Value,
-    /// Optional reference to a secret in the secret manager.
+    /// Optional reference to a secret by name.
     /// If provided, this secret will be used for authentication.
+    /// Mutually exclusive with `secret_id`.
     #[serde(default)]
     pub secret_name: Option<String>,
+    /// Optional reference to a secret by ID (e.g., "secr_abc123").
+    /// If provided, this secret will be used for authentication.
+    /// Mutually exclusive with `secret_name`.
+    #[serde(default)]
+    pub secret_id: Option<String>,
 }
 
 /// Discovery status for connection creation
