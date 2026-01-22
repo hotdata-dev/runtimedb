@@ -43,8 +43,37 @@ impl S3Storage {
         })
     }
 
+    /// Create S3Storage for AWS S3 with explicit credentials (no custom endpoint)
+    pub fn new_with_credentials(
+        bucket: &str,
+        access_key: &str,
+        secret_key: &str,
+        region: &str,
+    ) -> Result<Self> {
+        let store = AmazonS3Builder::new()
+            .with_bucket_name(bucket)
+            .with_access_key_id(access_key)
+            .with_secret_access_key(secret_key)
+            .with_region(region)
+            .build()?;
+
+        // Build the standard AWS S3 endpoint for this region
+        let endpoint = format!("https://s3.{}.amazonaws.com", region);
+
+        Ok(Self {
+            bucket: bucket.to_string(),
+            store: Arc::new(store),
+            config: Some(S3Config {
+                endpoint,
+                access_key: access_key.to_string(),
+                secret_key: secret_key.to_string(),
+                region: Some(region.to_string()),
+            }),
+        })
+    }
+
     /// Create S3Storage with custom endpoint for MinIO/S3-compatible storage
-    pub fn new_with_config(
+    pub fn new_with_endpoint(
         bucket: &str,
         endpoint: &str,
         access_key: &str,

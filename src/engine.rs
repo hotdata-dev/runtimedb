@@ -193,34 +193,43 @@ impl RuntimeEngine {
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("S3 storage requires bucket"))?;
 
-                // Check if we have custom endpoint (for MinIO/localstack)
-                if let Some(endpoint) = &config.storage.endpoint {
-                    // Get credentials from config first, then fall back to environment
-                    let access_key = config
-                        .storage
-                        .access_key
-                        .clone()
-                        .or_else(|| std::env::var("AWS_ACCESS_KEY_ID").ok())
-                        .or_else(|| std::env::var("RUNTIMEDB_STORAGE_ACCESS_KEY_ID").ok())
-                        .unwrap_or_else(|| "minioadmin".to_string());
-                    let secret_key = config
-                        .storage
-                        .secret_key
-                        .clone()
-                        .or_else(|| std::env::var("AWS_SECRET_ACCESS_KEY").ok())
-                        .or_else(|| std::env::var("RUNTIMEDB_STORAGE_SECRET_ACCESS_KEY").ok())
-                        .unwrap_or_else(|| "minioadmin".to_string());
+                // Get credentials from config first, then fall back to environment
+                let access_key = config
+                    .storage
+                    .access_key
+                    .clone()
+                    .or_else(|| std::env::var("AWS_ACCESS_KEY_ID").ok())
+                    .or_else(|| std::env::var("RUNTIMEDB_STORAGE_ACCESS_KEY_ID").ok());
+                let secret_key = config
+                    .storage
+                    .secret_key
+                    .clone()
+                    .or_else(|| std::env::var("AWS_SECRET_ACCESS_KEY").ok())
+                    .or_else(|| std::env::var("RUNTIMEDB_STORAGE_SECRET_ACCESS_KEY").ok());
 
-                    // Allow HTTP for local MinIO
+                // Custom endpoint (for MinIO/localstack) - uses path-style URLs
+                if let Some(endpoint) = &config.storage.endpoint {
+                    let access_key = access_key.unwrap_or_else(|| "minioadmin".to_string());
+                    let secret_key = secret_key.unwrap_or_else(|| "minioadmin".to_string());
                     let allow_http = endpoint.starts_with("http://");
 
-                    Ok(Arc::new(crate::storage::S3Storage::new_with_config(
+                    Ok(Arc::new(crate::storage::S3Storage::new_with_endpoint(
                         bucket,
                         endpoint,
                         &access_key,
                         &secret_key,
                         config.storage.region.as_deref(),
                         allow_http,
+                    )?))
+                } else if let (Some(access_key), Some(secret_key), Some(region)) =
+                    (access_key, secret_key, &config.storage.region)
+                {
+                    // AWS S3 with explicit credentials from config
+                    Ok(Arc::new(crate::storage::S3Storage::new_with_credentials(
+                        bucket,
+                        &access_key,
+                        &secret_key,
+                        region,
                     )?))
                 } else {
                     // Use AWS credentials from environment
