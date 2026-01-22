@@ -11,6 +11,7 @@ pub use encryption::{decrypt, encrypt, DecryptError, EncryptError};
 pub use validation::validate_and_normalize_name;
 
 use crate::catalog::CatalogManager;
+use crate::id::generate_secret_id;
 use chrono::Utc;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -54,6 +55,9 @@ impl std::str::FromStr for SecretStatus {
 /// Metadata about a stored secret (no sensitive data).
 #[derive(Debug, Clone)]
 pub struct SecretMetadata {
+    /// Resource ID (e.g., "secr...")
+    pub id: String,
+    /// User-friendly name (unique, normalized)
     pub name: String,
     pub provider: String,
     pub provider_ref: Option<String>,
@@ -141,7 +145,7 @@ impl SecretManager {
     pub async fn get(&self, name: &str) -> Result<Vec<u8>, SecretError> {
         let normalized = validate_and_normalize_name(name)?;
 
-        // Fetch metadata to get provider_ref for the backend
+        // Fetch metadata to get id and provider_ref for the backend
         let metadata = self
             .catalog
             .get_secret_metadata(&normalized)
@@ -150,7 +154,7 @@ impl SecretManager {
             .ok_or_else(|| SecretError::NotFound(normalized.clone()))?;
 
         let record = SecretRecord {
-            name: normalized.clone(),
+            id: metadata.id,
             provider_ref: metadata.provider_ref,
         };
 
@@ -161,6 +165,36 @@ impl SecretManager {
             .ok_or(SecretError::NotFound(normalized))?;
 
         Ok(read.value)
+    }
+
+    /// Get a secret's raw bytes by ID.
+    pub async fn get_by_id(&self, id: &str) -> Result<Vec<u8>, SecretError> {
+        // Fetch metadata to get provider_ref for the backend
+        let metadata = self
+            .catalog
+            .get_secret_metadata_by_id(id)
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?
+            .ok_or_else(|| SecretError::NotFound(id.to_string()))?;
+
+        let record = SecretRecord {
+            id: metadata.id,
+            provider_ref: metadata.provider_ref,
+        };
+
+        let read = self
+            .backend
+            .get(&record)
+            .await?
+            .ok_or_else(|| SecretError::NotFound(id.to_string()))?;
+
+        Ok(read.value)
+    }
+
+    /// Get a secret as a UTF-8 string by ID.
+    pub async fn get_string_by_id(&self, id: &str) -> Result<String, SecretError> {
+        let bytes = self.get_by_id(id).await?;
+        String::from_utf8(bytes).map_err(|_| SecretError::InvalidUtf8)
     }
 
     /// Get a secret as a UTF-8 string.
@@ -180,6 +214,15 @@ impl SecretManager {
             .ok_or(SecretError::NotFound(normalized))
     }
 
+    /// Get a secret's metadata by ID (no value).
+    pub async fn get_metadata_by_id(&self, id: &str) -> Result<SecretMetadata, SecretError> {
+        self.catalog
+            .get_secret_metadata_by_id(id)
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?
+            .ok_or_else(|| SecretError::NotFound(id.to_string()))
+    }
+
     /// Create a new secret.
     ///
     /// Uses optimistic locking to handle concurrent creation attempts safely:
@@ -189,7 +232,9 @@ impl SecretManager {
     ///
     /// If step 2 fails, the Creating record remains (user must delete to retry).
     /// If another request races us at step 1, we detect it and return appropriate error.
-    pub async fn create(&self, name: &str, value: &[u8]) -> Result<(), SecretError> {
+    ///
+    /// Returns the generated secret ID on success.
+    pub async fn create(&self, name: &str, value: &[u8]) -> Result<String, SecretError> {
         use crate::catalog::OptimisticLock;
 
         let normalized = validate_and_normalize_name(name)?;
@@ -206,19 +251,32 @@ impl SecretManager {
                 SecretStatus::Active => return Err(SecretError::AlreadyExists(normalized)),
                 SecretStatus::Creating => return Err(SecretError::CreationInProgress(normalized)),
                 SecretStatus::PendingDelete => {
-                    // Stale record from failed delete - clean it up
+                    // Stale record from incomplete delete - retry the full delete flow.
+                    // This properly handles all backends (encrypted catalog, Vault, KMS, etc.)
+                    // by ensuring the backend value is deleted before removing metadata.
+                    // See SecretManager::delete() for the three-phase delete protocol.
                     tracing::info!(
                         secret = %normalized,
-                        "Cleaning up stale pending_delete metadata before create"
+                        "Retrying delete for stale pending_delete secret before create"
                     );
-                    let _ = self.catalog.delete_secret_metadata(&normalized).await;
+                    if let Err(e) = self.delete(&normalized).await {
+                        tracing::warn!(
+                            secret = %normalized,
+                            error = %e,
+                            "Failed to cleanup pending_delete secret; proceeding with create anyway"
+                        );
+                    }
                 }
             }
         }
 
+        // Generate a new secret ID
+        let secret_id = generate_secret_id();
+
         // Step 1: Insert metadata with status=Creating to claim the name
         let now = Utc::now();
         let creating_metadata = SecretMetadata {
+            id: secret_id.clone(),
             name: normalized.clone(),
             provider: self.provider_type.clone(),
             provider_ref: None,
@@ -246,9 +304,9 @@ impl SecretManager {
             };
         }
 
-        // Step 2: Store value in backend
+        // Step 2: Store value in backend (keyed by ID)
         let record = SecretRecord {
-            name: normalized.clone(),
+            id: secret_id.clone(),
             provider_ref: None,
         };
 
@@ -268,6 +326,7 @@ impl SecretManager {
 
         // Step 3: Update metadata to Active with optimistic lock
         let active_metadata = SecretMetadata {
+            id: secret_id.clone(),
             name: normalized.clone(),
             provider: self.provider_type.clone(),
             provider_ref: write.provider_ref,
@@ -292,7 +351,7 @@ impl SecretManager {
             )));
         }
 
-        Ok(())
+        Ok(secret_id)
     }
 
     /// Update an existing secret's value.
@@ -302,7 +361,7 @@ impl SecretManager {
     pub async fn update(&self, name: &str, value: &[u8]) -> Result<(), SecretError> {
         let normalized = validate_and_normalize_name(name)?;
 
-        // Load existing metadata to get provider_ref
+        // Load existing metadata to get id and provider_ref
         let metadata = self
             .catalog
             .get_secret_metadata(&normalized)
@@ -310,10 +369,10 @@ impl SecretManager {
             .map_err(|e| SecretError::Database(e.to_string()))?
             .ok_or_else(|| SecretError::NotFound(normalized.clone()))?;
 
-        let existing_ref = metadata.provider_ref;
+        let existing_ref = metadata.provider_ref.clone();
 
         let record = SecretRecord {
-            name: normalized.clone(),
+            id: metadata.id.clone(),
             provider_ref: existing_ref.clone(),
         };
 
@@ -326,6 +385,7 @@ impl SecretManager {
         // Update metadata timestamp (no optimistic lock for updates - last write wins)
         let now = Utc::now();
         let updated_metadata = SecretMetadata {
+            id: metadata.id,
             name: normalized.clone(),
             provider: self.provider_type.clone(),
             provider_ref: updated_ref,
@@ -344,24 +404,55 @@ impl SecretManager {
 
     /// Delete a secret using three-phase commit.
     ///
-    /// 1. Mark metadata as 'pending_delete' (secret becomes invisible)
-    /// 2. Delete from backend
-    /// 3. Delete metadata row
+    /// # Three-Phase Delete Protocol
     ///
-    /// If step 2 fails, the secret remains in 'pending_delete' state.
-    /// Subsequent delete calls can retry (we use any_status lookup).
-    /// If step 3 fails, the secret is effectively deleted (value gone).
+    /// Secret deletion is designed to support multiple backends (encrypted catalog,
+    /// Vault, KMS, etc.) where the secret value may be stored externally. The process:
+    ///
+    /// 1. **Mark as pending_delete**: Update metadata status so the secret becomes
+    ///    invisible to API reads. This is atomic and idempotent.
+    ///
+    /// 2. **Delete from backend**: Remove the actual secret value. For encrypted
+    ///    catalog, this deletes from `encrypted_secret_values`. For external backends
+    ///    (Vault, KMS), this calls the external API.
+    ///
+    /// 3. **Delete metadata**: Remove the row from the `secrets` table.
+    ///
+    /// # Failure Handling
+    ///
+    /// - If phase 2 fails, the secret remains in `pending_delete` state. Subsequent
+    ///   `delete()` calls will retry from phase 1 (idempotent).
+    /// - If phase 3 fails, the secret value is already gone. The stale metadata will
+    ///   be cleaned up by `create()` if the same name is reused.
+    ///
+    /// # Why Not Use ON DELETE CASCADE?
+    ///
+    /// Database-level cascades only work for the encrypted catalog backend where
+    /// values are stored in `encrypted_secret_values`. External backends (Vault, KMS)
+    /// require explicit API calls to delete values. This three-phase approach works
+    /// uniformly across all backends.
+    ///
+    /// # Idempotency
+    ///
+    /// This method is idempotent - calling it multiple times on the same secret
+    /// (or a non-existent secret) is safe and will succeed.
     pub async fn delete(&self, name: &str) -> Result<(), SecretError> {
         let normalized = validate_and_normalize_name(name)?;
 
-        // Fetch metadata to get provider_ref for the backend.
+        // Fetch metadata to get id and provider_ref for the backend.
         // Use any_status so we can retry deletion of pending_delete secrets.
-        let metadata = self
+        let metadata = match self
             .catalog
             .get_secret_metadata_any_status(&normalized)
             .await
             .map_err(|e| SecretError::Database(e.to_string()))?
-            .ok_or_else(|| SecretError::NotFound(normalized.clone()))?;
+        {
+            Some(m) => m,
+            None => {
+                // Secret doesn't exist - this is idempotent, return success
+                return Ok(());
+            }
+        };
 
         // Phase 1: Mark as pending_delete (secret becomes invisible to reads)
         // This is idempotent if already pending_delete.
@@ -370,9 +461,9 @@ impl SecretManager {
             .await
             .map_err(|e| SecretError::Database(e.to_string()))?;
 
-        // Phase 2: Delete from backend
+        // Phase 2: Delete from backend (keyed by ID)
         let record = SecretRecord {
-            name: normalized.clone(),
+            id: metadata.id,
             provider_ref: metadata.provider_ref,
         };
 
@@ -510,11 +601,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_not_found() {
+    async fn test_delete_idempotent() {
         let (manager, _dir) = test_manager().await;
-        let result = manager.delete("nonexistent").await;
 
-        assert!(matches!(result, Err(SecretError::NotFound(_))));
+        // Deleting a non-existent secret should succeed (idempotent)
+        let result = manager.delete("nonexistent").await;
+        assert!(
+            result.is_ok(),
+            "Delete of non-existent secret should succeed"
+        );
+
+        // Create and delete a secret
+        manager.create("to-delete-twice", b"value").await.unwrap();
+        manager.delete("to-delete-twice").await.unwrap();
+
+        // Second delete should also succeed (idempotent)
+        let result = manager.delete("to-delete-twice").await;
+        assert!(result.is_ok(), "Second delete should also succeed");
     }
 
     #[tokio::test]
@@ -617,6 +720,7 @@ mod tests {
         // Manually insert a secret in "creating" status (simulating failed backend write)
         let now = chrono::Utc::now();
         let creating_metadata = SecretMetadata {
+            id: generate_secret_id(),
             name: "stuck-secret".to_string(),
             provider: ENCRYPTED_PROVIDER_TYPE.to_string(),
             provider_ref: None,

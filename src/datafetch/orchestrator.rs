@@ -465,6 +465,7 @@ mod tests {
             _name: &str,
             _source_type: &str,
             _config_json: &str,
+            _secret_id: Option<&str>,
         ) -> Result<i32> {
             Ok(1)
         }
@@ -608,8 +609,12 @@ mod tests {
             Ok(())
         }
 
-        async fn delete_encrypted_secret_value(&self, _name: &str) -> Result<bool> {
+        async fn delete_encrypted_secret_value(&self, _secret_id: &str) -> Result<bool> {
             Ok(true)
+        }
+
+        async fn get_secret_metadata_by_id(&self, _id: &str) -> Result<Option<SecretMetadata>> {
+            Ok(None)
         }
 
         async fn store_result(&self, _result: &crate::catalog::QueryResult) -> Result<()> {

@@ -1,11 +1,27 @@
 -- Initial schema for PostgreSQL catalog
 
+CREATE TABLE secrets (
+    id TEXT PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    provider TEXT NOT NULL,
+    provider_ref TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE encrypted_secret_values (
+    secret_id TEXT PRIMARY KEY REFERENCES secrets(id),
+    encrypted_value BYTEA NOT NULL
+);
+
 CREATE TABLE connections (
     id SERIAL PRIMARY KEY,
     external_id TEXT UNIQUE NOT NULL,
     name TEXT UNIQUE NOT NULL,
     source_type TEXT NOT NULL,
     config_json TEXT NOT NULL,
+    secret_id TEXT REFERENCES secrets(id) ON DELETE SET NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -22,20 +38,6 @@ CREATE TABLE tables (
     UNIQUE (connection_id, schema_name, table_name)
 );
 
-CREATE TABLE secrets (
-    name TEXT PRIMARY KEY,
-    provider TEXT NOT NULL,
-    provider_ref TEXT,
-    status TEXT NOT NULL DEFAULT 'active',
-    created_at TIMESTAMPTZ NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL
-);
-
-CREATE TABLE encrypted_secret_values (
-    name TEXT PRIMARY KEY,
-    encrypted_value BYTEA NOT NULL
-);
-
 -- Pending deletions for deferred file cleanup with retry tracking
 CREATE TABLE pending_deletions (
     id SERIAL PRIMARY KEY,
@@ -48,9 +50,9 @@ CREATE INDEX idx_pending_deletions_due ON pending_deletions(delete_after);
 
 -- Query results persistence table
 CREATE TABLE results (
-                         id TEXT PRIMARY KEY,
-                         parquet_path TEXT NOT NULL,
-                         created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    id TEXT PRIMARY KEY,
+    parquet_path TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX idx_results_created_at ON results(created_at);

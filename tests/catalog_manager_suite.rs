@@ -77,7 +77,7 @@ macro_rules! catalog_manager_tests {
                 let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
 
                 catalog
-                    .add_connection("test_db", "postgres", config)
+                    .add_connection("test_db", "postgres", config, None)
                     .await
                     .unwrap();
 
@@ -93,7 +93,7 @@ macro_rules! catalog_manager_tests {
 
                 let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
                 catalog
-                    .add_connection("test_db", "postgres", config)
+                    .add_connection("test_db", "postgres", config, None)
                     .await
                     .unwrap();
 
@@ -112,7 +112,7 @@ macro_rules! catalog_manager_tests {
                 let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
 
                 let conn_id = catalog
-                    .add_connection("test_db", "postgres", config)
+                    .add_connection("test_db", "postgres", config, None)
                     .await
                     .unwrap();
 
@@ -133,7 +133,7 @@ macro_rules! catalog_manager_tests {
                 let catalog = ctx.manager();
                 let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
                 let conn_id = catalog
-                    .add_connection("test_db", "postgres", config)
+                    .add_connection("test_db", "postgres", config, None)
                     .await
                     .unwrap();
                 catalog
@@ -162,7 +162,7 @@ macro_rules! catalog_manager_tests {
                 let catalog = ctx.manager();
                 let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
                 let conn_id = catalog
-                    .add_connection("test_db", "postgres", config)
+                    .add_connection("test_db", "postgres", config, None)
                     .await
                     .unwrap();
                 let table_id = catalog
@@ -191,7 +191,7 @@ macro_rules! catalog_manager_tests {
 
                 let config1 = r#"{"host": "localhost", "port": 5432, "database": "db1"}"#;
                 let conn1 = catalog
-                    .add_connection("neon_east", "postgres", config1)
+                    .add_connection("neon_east", "postgres", config1, None)
                     .await
                     .unwrap();
                 catalog
@@ -209,7 +209,7 @@ macro_rules! catalog_manager_tests {
 
                 let config2 = r#"{"host": "localhost", "port": 5432, "database": "db2"}"#;
                 let conn2 = catalog
-                    .add_connection("connection2", "postgres", config2)
+                    .add_connection("connection2", "postgres", config2, None)
                     .await
                     .unwrap();
                 catalog
@@ -236,7 +236,7 @@ macro_rules! catalog_manager_tests {
 
                 let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
                 let conn_id = catalog
-                    .add_connection("test_db", "postgres", config)
+                    .add_connection("test_db", "postgres", config, None)
                     .await
                     .unwrap();
                 let cached_id = catalog
@@ -279,7 +279,7 @@ macro_rules! catalog_manager_tests {
 
                 let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
                 let conn_id = catalog
-                    .add_connection("test_db", "postgres", config)
+                    .add_connection("test_db", "postgres", config, None)
                     .await
                     .unwrap();
                 let table_id = catalog
@@ -312,7 +312,7 @@ macro_rules! catalog_manager_tests {
 
                 let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
                 let conn_id = catalog
-                    .add_connection("test_db", "postgres", config)
+                    .add_connection("test_db", "postgres", config, None)
                     .await
                     .unwrap();
                 catalog
@@ -362,7 +362,7 @@ macro_rules! catalog_manager_tests {
 
                 let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
                 let conn_id = catalog
-                    .add_connection("test_db", "postgres", config)
+                    .add_connection("test_db", "postgres", config, None)
                     .await
                     .unwrap();
                 let users_id = catalog
@@ -412,7 +412,7 @@ macro_rules! catalog_manager_tests {
 
                 let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
                 let conn_id = catalog
-                    .add_connection("test_db", "postgres", config)
+                    .add_connection("test_db", "postgres", config, None)
                     .await
                     .unwrap();
 
@@ -430,7 +430,7 @@ macro_rules! catalog_manager_tests {
 
                 let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
                 let conn_id = catalog
-                    .add_connection("test_db", "postgres", config)
+                    .add_connection("test_db", "postgres", config, None)
                     .await
                     .unwrap();
                 catalog
@@ -471,6 +471,7 @@ macro_rules! catalog_manager_tests {
                 let now = chrono::Utc::now();
 
                 let metadata = SecretMetadata {
+                    id: "secr_test123456789012345678".to_string(),
                     name: "my-secret".to_string(),
                     provider: "encrypted".to_string(),
                     provider_ref: None,

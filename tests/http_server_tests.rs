@@ -715,7 +715,8 @@ async fn test_delete_nonexistent_secret() -> Result<()> {
         )
         .await?;
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    // Delete is idempotent - returns 204 even for non-existent secrets
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     Ok(())
 }
@@ -1260,6 +1261,203 @@ async fn test_create_connection_with_password_auto_creates_secret() -> Result<()
     assert_eq!(
         secrets[0]["name"], "conn-my_pg-password",
         "Secret should be named 'conn-my_pg-password'"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_connection_with_secret_name() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    // First, create a secret
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_SECRETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "my-pg-password",
+                    "value": "testpassword123"
+                }))?))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Create a connection referencing the secret by name
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_CONNECTIONS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "my_pg",
+                    "source_type": "postgres",
+                    "config": {
+                        "host": "localhost",
+                        "port": 5432,
+                        "user": "testuser",
+                        "database": "testdb",
+                        "auth": "password"
+                    },
+                    "secret_name": "my-pg-password"
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(json["name"], "my_pg");
+    assert_eq!(json["source_type"], "postgres");
+    // Discovery fails because no postgres server, but the error should be a connection error,
+    // not "no credential configured"
+    assert_eq!(json["discovery_status"], "failed");
+    let error = json["discovery_error"].as_str().unwrap();
+    assert!(
+        !error.contains("no credential configured"),
+        "Error should not be 'no credential configured', got: {}",
+        error
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_connection_with_secret_id() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    // First, create a secret and get its ID
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_SECRETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "my-pg-password",
+                    "value": "testpassword123"
+                }))?))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let secret_json: serde_json::Value = serde_json::from_slice(&body)?;
+    let secret_id = secret_json["id"].as_str().unwrap();
+    assert!(
+        secret_id.starts_with("secr"),
+        "Secret ID should start with 'secr', got: {}",
+        secret_id
+    );
+
+    // Create a connection referencing the secret by ID
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_CONNECTIONS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "my_pg",
+                    "source_type": "postgres",
+                    "config": {
+                        "host": "localhost",
+                        "port": 5432,
+                        "user": "testuser",
+                        "database": "testdb",
+                        "auth": "password"
+                    },
+                    "secret_id": secret_id
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(json["name"], "my_pg");
+    assert_eq!(json["source_type"], "postgres");
+    // Discovery fails because no postgres server, but the error should be a connection error,
+    // not "no credential configured"
+    assert_eq!(json["discovery_status"], "failed");
+    let error = json["discovery_error"].as_str().unwrap();
+    assert!(
+        !error.contains("no credential configured"),
+        "Error should not be 'no credential configured', got: {}",
+        error
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_connection_with_both_secret_name_and_id_fails() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    // First, create a secret
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_SECRETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "my-pg-password",
+                    "value": "testpassword123"
+                }))?))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let secret_json: serde_json::Value = serde_json::from_slice(&body)?;
+    let secret_id = secret_json["id"].as_str().unwrap();
+
+    // Try to create a connection with both secret_name and secret_id - should fail
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_CONNECTIONS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "my_pg",
+                    "source_type": "postgres",
+                    "config": {
+                        "host": "localhost",
+                        "port": 5432,
+                        "user": "testuser",
+                        "database": "testdb",
+                        "auth": "password"
+                    },
+                    "secret_name": "my-pg-password",
+                    "secret_id": secret_id
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    let error = json["error"]["message"].as_str().unwrap();
+    assert!(
+        error.contains("secret_name") && error.contains("secret_id"),
+        "Error should mention both secret_name and secret_id, got: {}",
+        error
     );
 
     Ok(())

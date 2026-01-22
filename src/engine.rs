@@ -280,14 +280,19 @@ impl RuntimeEngine {
     /// This persists the connection config to the catalog and registers it with DataFusion,
     /// but does not attempt to connect to the remote database or discover tables.
     /// Use `refresh_schema()` to discover tables after registration.
+    ///
+    /// The Source should already contain a Credential with the secret ID if authentication
+    /// is required. The secret_id is extracted from the Source for DB queryability.
     pub async fn register_connection(&self, name: &str, source: Source) -> Result<i32> {
         let source_type = source.source_type();
+        // Extract secret_id from the Source's credential for DB storage (denormalized for queries)
+        let secret_id = source.secret_id().map(|s| s.to_string());
 
         // Store config as JSON (includes "type" from serde tag)
         let config_json = serde_json::to_string(&source)?;
         let conn_id = self
             .catalog
-            .add_connection(name, source_type, &config_json)
+            .add_connection(name, source_type, &config_json, secret_id.as_deref())
             .await?;
 
         // Register with DataFusion (empty catalog - no tables yet)

@@ -378,6 +378,7 @@ async fn test_iceberg_rest_catalog_discovery() {
     // Create Iceberg source pointing to our test catalog
     // URI is the catalog base URL (Lakekeeper serves at /catalog)
     // The REST client will add /v1/config?warehouse=... etc
+    // Lakekeeper doesn't require auth for our test setup (Credential::None)
     let source = Source::Iceberg {
         catalog_type: IcebergCatalogType::Rest {
             uri: format!("{}/catalog", infra.catalog_uri),
@@ -439,6 +440,7 @@ async fn test_iceberg_rest_catalog_fetch_empty_table() {
 
     // Create Iceberg source
     // URI is the catalog base URL (Lakekeeper serves at /catalog)
+    // Lakekeeper doesn't require auth for our test setup (Credential::None)
     let source = Source::Iceberg {
         catalog_type: IcebergCatalogType::Rest {
             uri: format!("{}/catalog", infra.catalog_uri),
@@ -509,6 +511,7 @@ async fn test_iceberg_rest_catalog_with_namespace_filter() {
 
     // Create Iceberg source with namespace filter
     // URI is the catalog base URL (Lakekeeper serves at /catalog)
+    // Lakekeeper doesn't require auth for our test setup (Credential::None)
     let source = Source::Iceberg {
         catalog_type: IcebergCatalogType::Rest {
             uri: format!("{}/catalog", infra.catalog_uri),

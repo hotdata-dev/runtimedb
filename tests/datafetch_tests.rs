@@ -117,23 +117,25 @@ mod mysql_container_tests {
 
     const TEST_PASSWORD: &str = "root";
 
+    /// Creates a test secret manager with a password secret.
+    /// Returns both the manager and the generated secret ID.
     async fn create_test_secret_manager_with_password(
         dir: &TempDir,
         secret_name: &str,
         password: &str,
-    ) -> SecretManager {
+    ) -> (SecretManager, String) {
         let secrets = test_secret_manager(dir).await;
-        secrets
+        let secret_id = secrets
             .create(secret_name, password.as_bytes())
             .await
             .unwrap();
-        secrets
+        (secrets, secret_id)
     }
 
     #[tokio::test]
     async fn test_mysql_discovery() {
         let temp_dir = TempDir::new().unwrap();
-        let secrets =
+        let (secrets, secret_id) =
             create_test_secret_manager_with_password(&temp_dir, "mysql-pass", TEST_PASSWORD).await;
 
         // Start MySQL container with explicit root password
@@ -159,16 +161,14 @@ mod mysql_container_tests {
             .unwrap();
         pool.close().await;
 
-        // Test discovery
+        // Test discovery - build source with embedded credential
         let fetcher = NativeFetcher::new();
         let source = Source::Mysql {
             host: "localhost".to_string(),
             port,
             user: "root".to_string(),
             database: "testdb".to_string(),
-            credential: runtimedb::source::Credential::SecretRef {
-                name: "mysql-pass".to_string(),
-            },
+            credential: runtimedb::source::Credential::secret_ref(&secret_id),
         };
 
         let result = fetcher.discover_tables(&source, &secrets).await;
@@ -198,7 +198,7 @@ mod mysql_container_tests {
         use std::fs::File;
 
         let temp_dir = TempDir::new().unwrap();
-        let secrets =
+        let (secrets, secret_id) =
             create_test_secret_manager_with_password(&temp_dir, "mysql-pass", TEST_PASSWORD).await;
 
         // Start MySQL container with explicit root password
@@ -240,16 +240,14 @@ mod mysql_container_tests {
         .unwrap();
         pool.close().await;
 
-        // Fetch to parquet
+        // Fetch to parquet - build source with embedded credential
         let fetcher = NativeFetcher::new();
         let source = Source::Mysql {
             host: "localhost".to_string(),
             port,
             user: "root".to_string(),
             database: "testdb".to_string(),
-            credential: runtimedb::source::Credential::SecretRef {
-                name: "mysql-pass".to_string(),
-            },
+            credential: runtimedb::source::Credential::secret_ref(&secret_id),
         };
 
         let output_path = temp_dir.path().join("mysql_output.parquet");
@@ -298,7 +296,7 @@ mod mysql_container_tests {
         use std::fs::File;
 
         let temp_dir = TempDir::new().unwrap();
-        let secrets =
+        let (secrets, secret_id) =
             create_test_secret_manager_with_password(&temp_dir, "mysql-pass", TEST_PASSWORD).await;
 
         // Start MySQL container
@@ -346,16 +344,14 @@ mod mysql_container_tests {
         .unwrap();
         pool.close().await;
 
-        // Fetch to parquet
+        // Fetch to parquet - build source with embedded credential
         let fetcher = NativeFetcher::new();
         let source = Source::Mysql {
             host: "localhost".to_string(),
             port,
             user: "root".to_string(),
             database: "testdb".to_string(),
-            credential: runtimedb::source::Credential::SecretRef {
-                name: "mysql-pass".to_string(),
-            },
+            credential: runtimedb::source::Credential::secret_ref(&secret_id),
         };
 
         let output_path = temp_dir.path().join("customer_output.parquet");
@@ -426,17 +422,19 @@ mod postgres_container_tests {
 
     const TEST_PASSWORD: &str = "postgres";
 
+    /// Creates a test secret manager with a password secret.
+    /// Returns both the manager and the generated secret ID.
     async fn create_test_secret_manager_with_password(
         dir: &TempDir,
         secret_name: &str,
         password: &str,
-    ) -> SecretManager {
+    ) -> (SecretManager, String) {
         let secrets = test_secret_manager(dir).await;
-        secrets
+        let secret_id = secrets
             .create(secret_name, password.as_bytes())
             .await
             .unwrap();
-        secrets
+        (secrets, secret_id)
     }
 
     /// Test that nullable flags from the database are correctly preserved in Parquet schema.
@@ -449,7 +447,7 @@ mod postgres_container_tests {
         use std::fs::File;
 
         let temp_dir = TempDir::new().unwrap();
-        let secrets =
+        let (secrets, secret_id) =
             create_test_secret_manager_with_password(&temp_dir, "pg-pass", TEST_PASSWORD).await;
 
         // Start PostgreSQL container
@@ -500,16 +498,14 @@ mod postgres_container_tests {
         .unwrap();
         pool.close().await;
 
-        // Fetch to parquet
+        // Fetch to parquet - build source with embedded credential
         let fetcher = NativeFetcher::new();
         let source = Source::Postgres {
             host: "localhost".to_string(),
             port,
             user: "postgres".to_string(),
             database: "postgres".to_string(),
-            credential: runtimedb::source::Credential::SecretRef {
-                name: "pg-pass".to_string(),
-            },
+            credential: runtimedb::source::Credential::secret_ref(&secret_id),
         };
 
         let output_path = temp_dir.path().join("customer_output.parquet");
@@ -585,7 +581,7 @@ mod postgres_container_tests {
         use std::fs::File;
 
         let temp_dir = TempDir::new().unwrap();
-        let secrets =
+        let (secrets, secret_id) =
             create_test_secret_manager_with_password(&temp_dir, "pg-pass", TEST_PASSWORD).await;
 
         // Start PostgreSQL container
@@ -642,9 +638,7 @@ mod postgres_container_tests {
             port,
             user: "postgres".to_string(),
             database: "postgres".to_string(),
-            credential: runtimedb::source::Credential::SecretRef {
-                name: "pg-pass".to_string(),
-            },
+            credential: runtimedb::source::Credential::secret_ref(&secret_id),
         };
 
         let output_path = temp_dir.path().join("partsupp_output.parquet");
@@ -698,7 +692,7 @@ mod postgres_container_tests {
         use std::fs::File;
 
         let temp_dir = TempDir::new().unwrap();
-        let secrets =
+        let (secrets, secret_id) =
             create_test_secret_manager_with_password(&temp_dir, "pg-pass", TEST_PASSWORD).await;
 
         // Start PostgreSQL container
@@ -752,9 +746,7 @@ mod postgres_container_tests {
             port,
             user: "postgres".to_string(),
             database: "postgres".to_string(),
-            credential: runtimedb::source::Credential::SecretRef {
-                name: "pg-pass".to_string(),
-            },
+            credential: runtimedb::source::Credential::secret_ref(&secret_id),
         };
 
         let output_path = temp_dir.path().join("prices_output.parquet");
@@ -852,7 +844,7 @@ async fn test_duckdb_fetch_table() {
         .unwrap();
     }
 
-    // Fetch to parquet using StreamingParquetWriter
+    // Fetch to parquet using StreamingParquetWriter (DuckDB doesn't need credentials)
     let fetcher = NativeFetcher::new();
     let source = Source::Duckdb {
         path: db_path.to_str().unwrap().to_string(),

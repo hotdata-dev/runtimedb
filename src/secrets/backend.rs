@@ -22,7 +22,7 @@ pub enum BackendError {
 /// Backends can use this information (e.g. provider_ref) to locate the raw value.
 #[derive(Debug, Clone)]
 pub struct SecretRecord {
-    pub name: String,
+    pub id: String,
     pub provider_ref: Option<String>,
     // Extend with additional fields (version, tags, etc.) as needed.
 }

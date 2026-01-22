@@ -80,6 +80,7 @@ where
     TableInfo: for<'r> FromRow<'r, DB::Row>,
     for<'q> &'q str: Encode<'q, DB> + Type<DB>,
     for<'q> String: Encode<'q, DB> + Type<DB>,
+    for<'q> Option<&'q str>: Encode<'q, DB> + Type<DB>,
     for<'q> i32: Encode<'q, DB> + Type<DB>,
     for<'r> i32: Decode<'r, DB>,
     for<'q> <DB as Database>::Arguments<'q>: IntoArguments<'q, DB> + Send,
@@ -88,7 +89,7 @@ where
 {
     pub async fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
         query_as::<DB, ConnectionInfo>(
-            "SELECT id, external_id, name, source_type, config_json FROM connections ORDER BY name",
+            "SELECT id, external_id, name, source_type, config_json, secret_id FROM connections ORDER BY name",
         )
         .fetch_all(&self.pool)
         .await
@@ -100,6 +101,7 @@ where
         name: &str,
         source_type: &str,
         config_json: &str,
+        secret_id: Option<&str>,
     ) -> Result<i32> {
         // Retry logic handles the astronomically rare case of nanoid collision.
         // With 26-char nanoid (alphabet of 64 chars), collision probability is < 1 in 10^40.
@@ -108,11 +110,12 @@ where
         for attempt in 0..MAX_RETRIES {
             let external_id = crate::id::generate_connection_id();
             let insert_sql = format!(
-                "INSERT INTO connections (external_id, name, source_type, config_json) VALUES ({}, {}, {}, {})",
+                "INSERT INTO connections (external_id, name, source_type, config_json, secret_id) VALUES ({}, {}, {}, {}, {})",
                 DB::bind_param(1),
                 DB::bind_param(2),
                 DB::bind_param(3),
-                DB::bind_param(4)
+                DB::bind_param(4),
+                DB::bind_param(5)
             );
 
             let result = query(&insert_sql)
@@ -120,6 +123,7 @@ where
                 .bind(name)
                 .bind(source_type)
                 .bind(config_json)
+                .bind(secret_id)
                 .execute(&self.pool)
                 .await;
 
@@ -176,7 +180,7 @@ where
 
     pub async fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>> {
         let sql = format!(
-            "SELECT id, external_id, name, source_type, config_json FROM connections WHERE name = {}",
+            "SELECT id, external_id, name, source_type, config_json, secret_id FROM connections WHERE name = {}",
             DB::bind_param(1)
         );
 
@@ -192,7 +196,7 @@ where
         external_id: &str,
     ) -> Result<Option<ConnectionInfo>> {
         let sql = format!(
-            "SELECT id, external_id, name, source_type, config_json FROM connections WHERE external_id = {}",
+            "SELECT id, external_id, name, source_type, config_json, secret_id FROM connections WHERE external_id = {}",
             DB::bind_param(1)
         );
 
@@ -375,7 +379,7 @@ where
 
     pub async fn get_connection_by_id(&self, id: i32) -> Result<Option<ConnectionInfo>> {
         let sql = format!(
-            "SELECT id, external_id, name, source_type, config_json FROM connections WHERE id = {}",
+            "SELECT id, external_id, name, source_type, config_json, secret_id FROM connections WHERE id = {}",
             DB::bind_param(1)
         );
         query_as::<DB, ConnectionInfo>(&sql)
