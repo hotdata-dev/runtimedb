@@ -111,17 +111,18 @@ macro_rules! catalog_manager_tests {
                 let catalog = ctx.manager();
                 let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
 
-                let conn_id = catalog
+                catalog
                     .add_connection("test_db", "postgres", config, None)
                     .await
                     .unwrap();
+                let conn = catalog.get_connection("test_db").await.unwrap().unwrap();
 
                 let first_id = catalog
-                    .add_table(conn_id, "public", "users", "")
+                    .add_table(conn.id, "public", "users", "")
                     .await
                     .unwrap();
                 let second_id = catalog
-                    .add_table(conn_id, "public", "users", "")
+                    .add_table(conn.id, "public", "users", "")
                     .await
                     .unwrap();
                 assert_eq!(first_id, second_id);
@@ -132,17 +133,18 @@ macro_rules! catalog_manager_tests {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();
                 let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
-                let conn_id = catalog
+                catalog
                     .add_connection("test_db", "postgres", config, None)
                     .await
                     .unwrap();
+                let conn = catalog.get_connection("test_db").await.unwrap().unwrap();
                 catalog
-                    .add_table(conn_id, "public", "users", "")
+                    .add_table(conn.id, "public", "users", "")
                     .await
                     .unwrap();
 
                 let table = catalog
-                    .get_table(conn_id, "public", "users")
+                    .get_table(conn.id, "public", "users")
                     .await
                     .unwrap()
                     .unwrap();
@@ -150,7 +152,7 @@ macro_rules! catalog_manager_tests {
                 assert_eq!(table.table_name, "users");
 
                 let missing = catalog
-                    .get_table(conn_id, "public", "missing")
+                    .get_table(conn.id, "public", "missing")
                     .await
                     .unwrap();
                 assert!(missing.is_none());
@@ -161,12 +163,13 @@ macro_rules! catalog_manager_tests {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();
                 let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
-                let conn_id = catalog
+                catalog
                     .add_connection("test_db", "postgres", config, None)
                     .await
                     .unwrap();
+                let conn = catalog.get_connection("test_db").await.unwrap().unwrap();
                 let table_id = catalog
-                    .add_table(conn_id, "public", "users", "")
+                    .add_table(conn.id, "public", "users", "")
                     .await
                     .unwrap();
 
@@ -176,7 +179,7 @@ macro_rules! catalog_manager_tests {
                     .unwrap();
 
                 let table = catalog
-                    .get_table(conn_id, "public", "users")
+                    .get_table(conn.id, "public", "users")
                     .await
                     .unwrap()
                     .unwrap();
@@ -190,43 +193,49 @@ macro_rules! catalog_manager_tests {
                 let catalog = ctx.manager();
 
                 let config1 = r#"{"host": "localhost", "port": 5432, "database": "db1"}"#;
-                let conn1 = catalog
+                catalog
                     .add_connection("neon_east", "postgres", config1, None)
                     .await
                     .unwrap();
+                let conn1 = catalog.get_connection("neon_east").await.unwrap().unwrap();
                 catalog
-                    .add_table(conn1, "public", "cities", "")
+                    .add_table(conn1.id, "public", "cities", "")
                     .await
                     .unwrap();
                 catalog
-                    .add_table(conn1, "public", "locations", "")
+                    .add_table(conn1.id, "public", "locations", "")
                     .await
                     .unwrap();
                 catalog
-                    .add_table(conn1, "public", "table_1", "")
+                    .add_table(conn1.id, "public", "table_1", "")
                     .await
                     .unwrap();
 
                 let config2 = r#"{"host": "localhost", "port": 5432, "database": "db2"}"#;
-                let conn2 = catalog
+                catalog
                     .add_connection("connection2", "postgres", config2, None)
                     .await
                     .unwrap();
+                let conn2 = catalog
+                    .get_connection("connection2")
+                    .await
+                    .unwrap()
+                    .unwrap();
                 catalog
-                    .add_table(conn2, "public", "table_1", "")
+                    .add_table(conn2.id, "public", "table_1", "")
                     .await
                     .unwrap();
 
                 let all_tables = catalog.list_tables(None).await.unwrap();
                 assert_eq!(all_tables.len(), 4);
 
-                let conn1_tables = catalog.list_tables(Some(conn1)).await.unwrap();
+                let conn1_tables = catalog.list_tables(Some(conn1.id)).await.unwrap();
                 assert_eq!(conn1_tables.len(), 3);
-                assert!(conn1_tables.iter().all(|t| t.connection_id == conn1));
+                assert!(conn1_tables.iter().all(|t| t.connection_id == conn1.id));
 
-                let conn2_tables = catalog.list_tables(Some(conn2)).await.unwrap();
+                let conn2_tables = catalog.list_tables(Some(conn2.id)).await.unwrap();
                 assert_eq!(conn2_tables.len(), 1);
-                assert!(conn2_tables.iter().all(|t| t.connection_id == conn2));
+                assert!(conn2_tables.iter().all(|t| t.connection_id == conn2.id));
             }
 
             #[tokio::test]
@@ -235,16 +244,17 @@ macro_rules! catalog_manager_tests {
                 let catalog = ctx.manager();
 
                 let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
-                let conn_id = catalog
+                catalog
                     .add_connection("test_db", "postgres", config, None)
                     .await
                     .unwrap();
+                let conn = catalog.get_connection("test_db").await.unwrap().unwrap();
                 let cached_id = catalog
-                    .add_table(conn_id, "public", "cached_table", "")
+                    .add_table(conn.id, "public", "cached_table", "")
                     .await
                     .unwrap();
                 catalog
-                    .add_table(conn_id, "public", "not_cached_table", "")
+                    .add_table(conn.id, "public", "not_cached_table", "")
                     .await
                     .unwrap();
 
@@ -253,7 +263,7 @@ macro_rules! catalog_manager_tests {
                     .await
                     .unwrap();
 
-                let tables = catalog.list_tables(Some(conn_id)).await.unwrap();
+                let tables = catalog.list_tables(Some(conn.id)).await.unwrap();
                 assert_eq!(tables.len(), 2);
 
                 let cached = tables
@@ -278,12 +288,13 @@ macro_rules! catalog_manager_tests {
                 let catalog = ctx.manager();
 
                 let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
-                let conn_id = catalog
+                catalog
                     .add_connection("test_db", "postgres", config, None)
                     .await
                     .unwrap();
+                let conn = catalog.get_connection("test_db").await.unwrap().unwrap();
                 let table_id = catalog
-                    .add_table(conn_id, "public", "users", "")
+                    .add_table(conn.id, "public", "users", "")
                     .await
                     .unwrap();
 
@@ -297,7 +308,7 @@ macro_rules! catalog_manager_tests {
                     .await
                     .unwrap();
                 let table = catalog
-                    .get_table(conn_id, "public", "users")
+                    .get_table(conn.id, "public", "users")
                     .await
                     .unwrap()
                     .unwrap();
@@ -311,18 +322,19 @@ macro_rules! catalog_manager_tests {
                 let catalog = ctx.manager();
 
                 let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
-                let conn_id = catalog
+                catalog
                     .add_connection("test_db", "postgres", config, None)
                     .await
                     .unwrap();
+                let conn = catalog.get_connection("test_db").await.unwrap().unwrap();
                 catalog
-                    .add_table(conn_id, "public", "users", "")
+                    .add_table(conn.id, "public", "users", "")
                     .await
                     .unwrap();
 
                 assert!(catalog.get_connection("test_db").await.unwrap().is_some());
                 assert!(catalog
-                    .get_table(conn_id, "public", "users")
+                    .get_table(conn.id, "public", "users")
                     .await
                     .unwrap()
                     .is_some());
@@ -331,7 +343,7 @@ macro_rules! catalog_manager_tests {
 
                 assert!(catalog.get_connection("test_db").await.unwrap().is_none());
                 assert!(catalog
-                    .get_table(conn_id, "public", "users")
+                    .get_table(conn.id, "public", "users")
                     .await
                     .unwrap()
                     .is_none());
@@ -361,16 +373,17 @@ macro_rules! catalog_manager_tests {
                 let catalog = ctx.manager();
 
                 let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
-                let conn_id = catalog
+                catalog
                     .add_connection("test_db", "postgres", config, None)
                     .await
                     .unwrap();
+                let conn = catalog.get_connection("test_db").await.unwrap().unwrap();
                 let users_id = catalog
-                    .add_table(conn_id, "public", "users", "")
+                    .add_table(conn.id, "public", "users", "")
                     .await
                     .unwrap();
                 let orders_id = catalog
-                    .add_table(conn_id, "public", "orders", "")
+                    .add_table(conn.id, "public", "orders", "")
                     .await
                     .unwrap();
 
@@ -384,13 +397,13 @@ macro_rules! catalog_manager_tests {
                     .unwrap();
 
                 let table_info = catalog
-                    .clear_table_cache_metadata(conn_id, "public", "users")
+                    .clear_table_cache_metadata(conn.id, "public", "users")
                     .await
                     .unwrap();
                 assert!(table_info.parquet_path.is_some());
 
                 let users_after = catalog
-                    .get_table(conn_id, "public", "users")
+                    .get_table(conn.id, "public", "users")
                     .await
                     .unwrap()
                     .unwrap();
@@ -398,7 +411,7 @@ macro_rules! catalog_manager_tests {
                 assert!(users_after.last_sync.is_none());
 
                 let orders_after = catalog
-                    .get_table(conn_id, "public", "orders")
+                    .get_table(conn.id, "public", "orders")
                     .await
                     .unwrap()
                     .unwrap();
@@ -411,13 +424,14 @@ macro_rules! catalog_manager_tests {
                 let catalog = ctx.manager();
 
                 let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
-                let conn_id = catalog
+                catalog
                     .add_connection("test_db", "postgres", config, None)
                     .await
                     .unwrap();
+                let conn = catalog.get_connection("test_db").await.unwrap().unwrap();
 
                 let err = catalog
-                    .clear_table_cache_metadata(conn_id, "public", "missing")
+                    .clear_table_cache_metadata(conn.id, "public", "missing")
                     .await;
                 assert!(err.is_err());
                 assert!(err.unwrap_err().to_string().contains("not found"));
@@ -429,23 +443,24 @@ macro_rules! catalog_manager_tests {
                 let catalog = ctx.manager();
 
                 let config = r#"{"host": "localhost", "port": 5432, "database": "test"}"#;
-                let conn_id = catalog
+                catalog
                     .add_connection("test_db", "postgres", config, None)
                     .await
                     .unwrap();
+                let conn = catalog.get_connection("test_db").await.unwrap().unwrap();
                 catalog
-                    .add_table(conn_id, "public", "users", "")
+                    .add_table(conn.id, "public", "users", "")
                     .await
                     .unwrap();
 
                 let table_info = catalog
-                    .clear_table_cache_metadata(conn_id, "public", "users")
+                    .clear_table_cache_metadata(conn.id, "public", "users")
                     .await
                     .unwrap();
                 assert!(table_info.parquet_path.is_none());
 
                 let table_after = catalog
-                    .get_table(conn_id, "public", "users")
+                    .get_table(conn.id, "public", "users")
                     .await
                     .unwrap()
                     .unwrap();

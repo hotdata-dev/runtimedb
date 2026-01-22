@@ -131,7 +131,6 @@ impl QueryResult {
 struct ConnectionResult {
     count: usize,
     names: Vec<String>,
-    ids: Vec<String>,
 }
 
 impl ConnectionResult {
@@ -139,7 +138,6 @@ impl ConnectionResult {
         Self {
             count: connections.len(),
             names: connections.iter().map(|c| c.name.clone()).collect(),
-            ids: connections.iter().map(|c| c.external_id.clone()).collect(),
         }
     }
 
@@ -151,13 +149,6 @@ impl ConnectionResult {
                 .map(|a| {
                     a.iter()
                         .filter_map(|c| c["name"].as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            ids: arr
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|c| c["id"].as_str().map(String::from))
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -175,13 +166,6 @@ impl ConnectionResult {
 
     fn assert_count(&self, expected: usize) {
         assert_eq!(self.count, expected, "Expected {} connections", expected);
-    }
-
-    fn get_id_by_name(&self, name: &str) -> Option<String> {
-        self.names
-            .iter()
-            .position(|n| n == name)
-            .and_then(|idx| self.ids.get(idx).cloned())
     }
 }
 
@@ -331,13 +315,13 @@ impl ConnectionDetails {
 /// Trait for test execution - allows same test logic for engine vs API.
 #[async_trait::async_trait]
 trait TestExecutor: Send + Sync {
-    /// Connect and return an identifier (name for engine, connection_id for API)
+    /// Connect and return external_id
     async fn connect(&self, name: &str, source: &Source, secret_name: Option<&str>) -> String;
     async fn list_connections(&self) -> ConnectionResult;
-    async fn list_tables(&self, connection_name: &str) -> TablesResult;
+    async fn list_tables(&self, connection_id: &str) -> TablesResult;
     async fn query(&self, sql: &str) -> QueryResult;
 
-    // CRUD operations - identifier is name for engine, connection_id for API
+    // CRUD operations - identifier is external_id
     async fn get_connection(&self, identifier: &str) -> Option<ConnectionDetails>;
     async fn delete_connection(&self, identifier: &str) -> bool;
     async fn purge_connection_cache(&self, identifier: &str) -> bool;
@@ -376,21 +360,24 @@ impl TestExecutor for EngineExecutor {
             .connect(name, source_with_cred)
             .await
             .expect("Engine connect failed");
-        name.to_string() // Engine uses name as identifier
+
+        // Return external_id to match API behavior
+        let conn = self
+            .engine
+            .catalog()
+            .get_connection(name)
+            .await
+            .expect("Failed to get connection")
+            .expect("Connection not found after creation");
+        conn.external_id
     }
 
     async fn list_connections(&self) -> ConnectionResult {
         ConnectionResult::from_engine(&self.engine.list_connections().await.unwrap())
     }
 
-    async fn list_tables(&self, connection_name: &str) -> TablesResult {
-        TablesResult::from_engine(
-            &self
-                .engine
-                .list_tables(Some(connection_name))
-                .await
-                .unwrap(),
-        )
+    async fn list_tables(&self, connection_id: &str) -> TablesResult {
+        TablesResult::from_engine(&self.engine.list_tables(Some(connection_id)).await.unwrap())
     }
 
     async fn query(&self, sql: &str) -> QueryResult {
@@ -398,11 +385,11 @@ impl TestExecutor for EngineExecutor {
     }
 
     async fn get_connection(&self, identifier: &str) -> Option<ConnectionDetails> {
-        // For engine, identifier is the name
+        // identifier is external_id
         let conn = self
             .engine
             .catalog()
-            .get_connection(identifier)
+            .get_connection_by_external_id(identifier)
             .await
             .ok()??;
         let tables = self.engine.list_tables(Some(identifier)).await.ok()?;
@@ -410,17 +397,17 @@ impl TestExecutor for EngineExecutor {
     }
 
     async fn delete_connection(&self, identifier: &str) -> bool {
-        // For engine, identifier is the name
+        // identifier is external_id
         self.engine.remove_connection(identifier).await.is_ok()
     }
 
     async fn purge_connection_cache(&self, identifier: &str) -> bool {
-        // For engine, identifier is the name
+        // identifier is external_id
         self.engine.purge_connection(identifier).await.is_ok()
     }
 
     async fn purge_table_cache(&self, identifier: &str, schema: &str, table: &str) -> bool {
-        // For engine, identifier is the name
+        // identifier is external_id
         self.engine
             .purge_table(identifier, schema, table)
             .await
@@ -528,13 +515,7 @@ impl TestExecutor for ApiExecutor {
         ConnectionResult::from_api(&serde_json::from_slice(&body).unwrap())
     }
 
-    async fn list_tables(&self, connection_name: &str) -> TablesResult {
-        // First get connection_id from connection name
-        let connections = self.list_connections().await;
-        let connection_id = connections
-            .get_id_by_name(connection_name)
-            .expect("Connection not found for list_tables");
-
+    async fn list_tables(&self, connection_id: &str) -> TablesResult {
         let uri = format!(
             "{}?connection_id={}",
             PATH_INFORMATION_SCHEMA, connection_id
@@ -767,6 +748,12 @@ impl TestHarness {
             .await
             .expect("Failed to store test secret");
     }
+
+    /// Check if a secret exists by name.
+    async fn secret_exists(&self, name: &str) -> bool {
+        let secret_manager = self.engine_executor.engine.secret_manager();
+        secret_manager.get_metadata(name).await.is_ok()
+    }
 }
 
 // ============================================================================
@@ -813,15 +800,15 @@ async fn run_golden_path_test(
     secret_name: Option<&str>,
 ) {
     // Connect and get identifier
-    let _conn_id = executor.connect(conn_name, source, secret_name).await;
+    let conn_id = executor.connect(conn_name, source, secret_name).await;
 
     // Verify connection exists
     let connections = executor.list_connections().await;
     connections.assert_count(1);
     connections.assert_has_connection(conn_name);
 
-    // Verify tables discovered (uses connection name for filter)
-    let tables = executor.list_tables(conn_name).await;
+    // Verify tables discovered
+    let tables = executor.list_tables(&conn_id).await;
     tables.assert_not_empty();
     tables.assert_has_table("sales", "orders");
 
@@ -842,9 +829,9 @@ async fn run_multi_schema_test(
     conn_name: &str,
     secret_name: Option<&str>,
 ) {
-    let _conn_id = executor.connect(conn_name, source, secret_name).await;
+    let conn_id = executor.connect(conn_name, source, secret_name).await;
 
-    let tables = executor.list_tables(conn_name).await;
+    let tables = executor.list_tables(&conn_id).await;
     tables.assert_has_table("sales", "orders");
     tables.assert_has_table("inventory", "products");
 
@@ -899,8 +886,8 @@ async fn run_purge_connection_cache_test(
     // Query to trigger sync (uses connection name in SQL)
     let _ = executor.query(&queries::select_orders(conn_name)).await;
 
-    // Verify tables are synced (uses connection name for filter)
-    let tables = executor.list_tables(conn_name).await;
+    // Verify tables are synced
+    let tables = executor.list_tables(&conn_id).await;
     assert!(
         tables.synced_count() > 0,
         "Should have synced tables after query"
@@ -911,7 +898,7 @@ async fn run_purge_connection_cache_test(
     assert!(purged, "Purge should succeed");
 
     // Verify tables still exist but not synced
-    let tables = executor.list_tables(conn_name).await;
+    let tables = executor.list_tables(&conn_id).await;
     tables.assert_not_empty();
     tables.assert_none_synced();
 
@@ -936,8 +923,8 @@ async fn run_purge_table_cache_test(
     // Query to trigger sync of orders table (uses connection name in SQL)
     let _ = executor.query(&queries::select_orders(conn_name)).await;
 
-    // Verify orders table is synced (uses connection name for filter)
-    let tables = executor.list_tables(conn_name).await;
+    // Verify orders table is synced
+    let tables = executor.list_tables(&conn_id).await;
     assert!(
         tables.is_table_synced("sales", "orders"),
         "orders should be synced"
@@ -950,7 +937,7 @@ async fn run_purge_table_cache_test(
     assert!(purged, "Purge table should succeed");
 
     // Verify orders is no longer synced
-    let tables = executor.list_tables(conn_name).await;
+    let tables = executor.list_tables(&conn_id).await;
     assert!(
         !tables.is_table_synced("sales", "orders"),
         "orders should not be synced after purge"
@@ -1734,6 +1721,192 @@ mod postgres_tests {
             Some(PG_SECRET_NAME),
         )
         .await;
+    }
+
+    /// Test that deleting a connection also deletes its secret when no other connections use it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_delete_connection_deletes_orphan_secret() {
+        let harness = TestHarness::new().await;
+
+        // Store a secret
+        let secret_name = "pg-orphan-secret";
+        harness
+            .store_secret(secret_name, postgres_fixtures::TEST_PASSWORD)
+            .await;
+
+        // Verify secret exists
+        assert!(
+            harness.secret_exists(secret_name).await,
+            "Secret should exist after creation"
+        );
+
+        // Create fixture and connection using the secret
+        let fixture = postgres_fixtures::standard().await;
+        let conn_id = harness
+            .engine()
+            .connect("pg_conn", &fixture.source, Some(secret_name))
+            .await;
+
+        // Delete the connection
+        let deleted = harness.engine().delete_connection(&conn_id).await;
+        assert!(deleted, "Delete should succeed");
+
+        // Verify secret is also deleted (orphaned)
+        assert!(
+            !harness.secret_exists(secret_name).await,
+            "Secret should be deleted when last connection using it is removed"
+        );
+    }
+
+    /// Test that deleting a connection does NOT delete a secret shared by other connections.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_delete_connection_preserves_shared_secret() {
+        let harness = TestHarness::new().await;
+
+        // Store a secret that will be shared
+        let secret_name = "pg-shared-secret";
+        harness
+            .store_secret(secret_name, postgres_fixtures::TEST_PASSWORD)
+            .await;
+
+        // Verify secret exists
+        assert!(
+            harness.secret_exists(secret_name).await,
+            "Secret should exist after creation"
+        );
+
+        // Create two fixtures and connections using the same secret
+        let fixture1 = postgres_fixtures::standard().await;
+        let fixture2 = postgres_fixtures::standard().await;
+
+        let conn_id1 = harness
+            .engine()
+            .connect("pg_conn1", &fixture1.source, Some(secret_name))
+            .await;
+        let conn_id2 = harness
+            .engine()
+            .connect("pg_conn2", &fixture2.source, Some(secret_name))
+            .await;
+
+        // Delete the first connection
+        let deleted = harness.engine().delete_connection(&conn_id1).await;
+        assert!(deleted, "Delete of first connection should succeed");
+
+        // Verify secret still exists (still used by second connection)
+        assert!(
+            harness.secret_exists(secret_name).await,
+            "Secret should NOT be deleted when other connections still use it"
+        );
+
+        // Verify second connection still exists
+        let conn2 = harness.engine().get_connection(&conn_id2).await;
+        assert!(
+            conn2.is_some(),
+            "Second connection should still exist after first is deleted"
+        );
+
+        // Now delete the second connection
+        let deleted2 = harness.engine().delete_connection(&conn_id2).await;
+        assert!(deleted2, "Delete of second connection should succeed");
+
+        // Now the secret should be deleted (no more references)
+        assert!(
+            !harness.secret_exists(secret_name).await,
+            "Secret should be deleted when last connection using it is removed"
+        );
+    }
+
+    /// Test that deleting a connection via API also deletes its secret when no other connections use it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_api_delete_connection_deletes_orphan_secret() {
+        let harness = TestHarness::new().await;
+
+        // Store a secret
+        let secret_name = "pg-api-orphan-secret";
+        harness
+            .store_secret(secret_name, postgres_fixtures::TEST_PASSWORD)
+            .await;
+
+        // Verify secret exists
+        assert!(
+            harness.secret_exists(secret_name).await,
+            "Secret should exist after creation"
+        );
+
+        // Create fixture and connection using the secret via API
+        let fixture = postgres_fixtures::standard().await;
+        let conn_id = harness
+            .api()
+            .connect("pg_conn", &fixture.source, Some(secret_name))
+            .await;
+
+        // Delete the connection via API
+        let deleted = harness.api().delete_connection(&conn_id).await;
+        assert!(deleted, "Delete should succeed");
+
+        // Verify secret is also deleted (orphaned)
+        assert!(
+            !harness.secret_exists(secret_name).await,
+            "Secret should be deleted when last connection using it is removed via API"
+        );
+    }
+
+    /// Test that deleting a connection via API does NOT delete a secret shared by other connections.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_api_delete_connection_preserves_shared_secret() {
+        let harness = TestHarness::new().await;
+
+        // Store a secret that will be shared
+        let secret_name = "pg-api-shared-secret";
+        harness
+            .store_secret(secret_name, postgres_fixtures::TEST_PASSWORD)
+            .await;
+
+        // Verify secret exists
+        assert!(
+            harness.secret_exists(secret_name).await,
+            "Secret should exist after creation"
+        );
+
+        // Create two fixtures and connections using the same secret via API
+        let fixture1 = postgres_fixtures::standard().await;
+        let fixture2 = postgres_fixtures::standard().await;
+
+        let conn_id1 = harness
+            .api()
+            .connect("pg_conn1", &fixture1.source, Some(secret_name))
+            .await;
+        let conn_id2 = harness
+            .api()
+            .connect("pg_conn2", &fixture2.source, Some(secret_name))
+            .await;
+
+        // Delete the first connection via API
+        let deleted = harness.api().delete_connection(&conn_id1).await;
+        assert!(deleted, "Delete of first connection should succeed");
+
+        // Verify secret still exists (still used by second connection)
+        assert!(
+            harness.secret_exists(secret_name).await,
+            "Secret should NOT be deleted when other connections still use it"
+        );
+
+        // Verify second connection still exists
+        let conn2 = harness.api().get_connection(&conn_id2).await;
+        assert!(
+            conn2.is_some(),
+            "Second connection should still exist after first is deleted"
+        );
+
+        // Now delete the second connection via API
+        let deleted2 = harness.api().delete_connection(&conn_id2).await;
+        assert!(deleted2, "Delete of second connection should succeed");
+
+        // Now the secret should be deleted (no more references)
+        assert!(
+            !harness.secret_exists(secret_name).await,
+            "Secret should be deleted when last connection using it is removed via API"
+        );
     }
 }
 

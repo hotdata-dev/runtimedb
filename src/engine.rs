@@ -283,21 +283,28 @@ impl RuntimeEngine {
     ///
     /// The Source should already contain a Credential with the secret ID if authentication
     /// is required. The secret_id is extracted from the Source for DB queryability.
-    pub async fn register_connection(&self, name: &str, source: Source) -> Result<i32> {
+    pub async fn register_connection(&self, name: &str, source: Source) -> Result<String> {
         let source_type = source.source_type();
         // Extract secret_id from the Source's credential for DB storage (denormalized for queries)
         let secret_id = source.secret_id().map(|s| s.to_string());
 
         // Store config as JSON (includes "type" from serde tag)
         let config_json = serde_json::to_string(&source)?;
-        let conn_id = self
+        let external_id = self
             .catalog
             .add_connection(name, source_type, &config_json, secret_id.as_deref())
             .await?;
 
+        // Get the connection to retrieve internal id for RuntimeCatalogProvider
+        let conn = self
+            .catalog
+            .get_connection_by_external_id(&external_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Connection not found after creation"))?;
+
         // Register with DataFusion (empty catalog - no tables yet)
         let catalog_provider = Arc::new(RuntimeCatalogProvider::new(
-            conn_id,
+            conn.id,
             name.to_string(),
             Arc::new(source),
             self.catalog.clone(),
@@ -308,17 +315,17 @@ impl RuntimeEngine {
 
         info!("Connection '{}' registered (discovery pending)", name);
 
-        Ok(conn_id)
+        Ok(external_id)
     }
 
     /// Connect to a new external data source and register it as a catalog.
     ///
     /// This is a convenience method that combines `register_connection()` and
     /// `refresh_schema()`. For more control, use those methods separately.
-    pub async fn connect(&self, name: &str, source: Source) -> Result<()> {
-        let conn_id = self.register_connection(name, source).await?;
-        self.refresh_schema(conn_id).await?;
-        Ok(())
+    pub async fn connect(&self, name: &str, source: Source) -> Result<String> {
+        let connection_id = self.register_connection(name, source).await?;
+        self.refresh_schema(&connection_id).await?;
+        Ok(connection_id)
     }
 
     /// Get a cloned catalog manager that shares the same underlying connection.
@@ -331,18 +338,18 @@ impl RuntimeEngine {
         self.catalog.list_connections().await
     }
 
-    /// List all tables, optionally filtered by connection name.
-    pub async fn list_tables(&self, connection_name: Option<&str>) -> Result<Vec<TableInfo>> {
-        let connection_id = if let Some(name) = connection_name {
-            match self.catalog.get_connection(name).await? {
+    /// List all tables, optionally filtered by connection external ID.
+    pub async fn list_tables(&self, connection_id: Option<&str>) -> Result<Vec<TableInfo>> {
+        let internal_id = if let Some(ext_id) = connection_id {
+            match self.catalog.get_connection_by_external_id(ext_id).await? {
                 Some(conn) => Some(conn.id),
-                None => anyhow::bail!("Connection '{}' not found", name),
+                None => anyhow::bail!("Connection '{}' not found", ext_id),
             }
         } else {
             None
         };
 
-        self.catalog.list_tables(connection_id).await
+        self.catalog.list_tables(internal_id).await
     }
 
     /// Execute a SQL query and return the results.
@@ -475,16 +482,18 @@ impl RuntimeEngine {
     }
 
     /// Purge all cached data for a connection (clears parquet files and resets sync state).
-    pub async fn purge_connection(&self, name: &str) -> Result<()> {
+    pub async fn purge_connection(&self, connection_id: &str) -> Result<()> {
         // Get connection info (validates it exists and gives us the ID)
         let conn = self
             .catalog
-            .get_connection(name)
+            .get_connection_by_external_id(connection_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", name))?;
+            .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", connection_id))?;
 
         // Step 1: Clear metadata first (metadata-first ordering)
-        self.catalog.clear_connection_cache_metadata(name).await?;
+        self.catalog
+            .clear_connection_cache_metadata(&conn.name)
+            .await?;
 
         // Step 2: Re-register the connection with fresh state
         // This causes DataFusion to drop any open file handles to the cached files
@@ -499,7 +508,7 @@ impl RuntimeEngine {
         )) as Arc<dyn CatalogProvider>;
 
         // register_catalog replaces existing catalog with same name
-        self.df_ctx.register_catalog(name, catalog_provider);
+        self.df_ctx.register_catalog(&conn.name, catalog_provider);
 
         // Step 3: Delete the physical files (now that DataFusion has released file handles)
         self.delete_connection_files(conn.id).await?;
@@ -510,16 +519,16 @@ impl RuntimeEngine {
     /// Purge cached data for a single table (clears parquet file and resets sync state).
     pub async fn purge_table(
         &self,
-        connection_name: &str,
+        connection_id: &str,
         schema_name: &str,
         table_name: &str,
     ) -> Result<()> {
         // Validate connection exists
         let conn = self
             .catalog
-            .get_connection(connection_name)
+            .get_connection_by_external_id(connection_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", connection_name))?;
+            .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", connection_id))?;
 
         // Step 1: Clear metadata (set paths to NULL in DB)
         // This returns the table info with the old paths before clearing
@@ -541,8 +550,7 @@ impl RuntimeEngine {
         )) as Arc<dyn CatalogProvider>;
 
         // register_catalog replaces existing catalog with same name
-        self.df_ctx
-            .register_catalog(connection_name, catalog_provider);
+        self.df_ctx.register_catalog(&conn.name, catalog_provider);
 
         // Step 3: Delete the physical files (now that DataFusion has released file handles)
         self.delete_table_files(&table_info).await?;
@@ -551,19 +559,47 @@ impl RuntimeEngine {
     }
 
     /// Remove a connection entirely (removes from catalog and deletes all data).
-    pub async fn remove_connection(&self, name: &str) -> Result<()> {
+    ///
+    /// If the connection has an associated secret that is not used by any other
+    /// connections, the secret will also be deleted.
+    pub async fn remove_connection(&self, external_id: &str) -> Result<()> {
         // Get connection info (validates it exists and gives us the ID)
         let conn = self
             .catalog
-            .get_connection(name)
+            .get_connection_by_external_id(external_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", name))?;
+            .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", external_id))?;
+
+        // Capture secret_id before deleting the connection
+        let secret_id = conn.secret_id.clone();
 
         // Step 1: Delete metadata first
-        self.catalog.delete_connection(name).await?;
+        self.catalog.delete_connection(&conn.name).await?;
 
         // Step 2: Delete the physical files
         self.delete_connection_files(conn.id).await?;
+
+        // Step 3: Clean up orphaned secret if applicable
+        if let Some(ref secret_id) = secret_id {
+            let remaining = self
+                .catalog
+                .count_connections_by_secret_id(secret_id)
+                .await?;
+            if remaining == 0 {
+                // Get secret metadata to find the name for deletion
+                if let Ok(metadata) = self.secret_manager.get_metadata_by_id(secret_id).await {
+                    if let Err(e) = self.secret_manager.delete(&metadata.name).await {
+                        // Log but don't fail - the connection is already deleted
+                        tracing::warn!(
+                            secret_id = %secret_id,
+                            secret_name = %metadata.name,
+                            error = %e,
+                            "Failed to delete orphaned secret"
+                        );
+                    }
+                }
+            }
+        }
 
         // Note: DataFusion doesn't support deregistering catalogs in v50.3.0
         // The catalog will remain registered but will return no schemas/tables
@@ -573,13 +609,15 @@ impl RuntimeEngine {
     }
 
     /// Set the default catalog for queries (allows queries without fully-qualified table names).
-    pub async fn set_default_catalog(&self, name: &str) -> Result<()> {
-        // Validate connection exists
-        if self.catalog.get_connection(name).await?.is_none() {
-            anyhow::bail!("Connection '{}' not found", name);
-        }
+    pub async fn set_default_catalog(&self, connection_id: &str) -> Result<()> {
+        // Validate connection exists and get its name for DataFusion
+        let conn = self
+            .catalog
+            .get_connection_by_external_id(connection_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", connection_id))?;
 
-        let set_sql = format!("SET datafusion.catalog.default_catalog = '{}'", name);
+        let set_sql = format!("SET datafusion.catalog.default_catalog = '{}'", conn.name);
         self.df_ctx.sql(&set_sql).await?;
 
         Ok(())
@@ -588,7 +626,7 @@ impl RuntimeEngine {
     /// Sync all tables for a connection using DLT.
     /// This forces a sync of all tables, even if they're already cached.
     /// Tables are synced in parallel with a concurrency limit of 10.
-    pub async fn sync_connection(&self, _name: &str) -> Result<()> {
+    pub async fn sync_connection(&self, _connection_id: &str) -> Result<()> {
         todo!("Implement connections sync")
     }
 
@@ -624,14 +662,14 @@ impl RuntimeEngine {
     /// (they are not automatically deleted).
     ///
     /// Returns counts of (added, modified).
-    pub async fn refresh_schema(&self, connection_id: i32) -> Result<(usize, usize)> {
+    pub async fn refresh_schema(&self, connection_id: &str) -> Result<(usize, usize)> {
         let conn = self
             .catalog
-            .get_connection_by_id(connection_id)
+            .get_connection_by_external_id(connection_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Connection not found"))?;
+            .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", connection_id))?;
 
-        let existing_tables = self.catalog.list_tables(Some(connection_id)).await?;
+        let existing_tables = self.catalog.list_tables(Some(conn.id)).await?;
         let existing_set: HashSet<(String, String)> = existing_tables
             .iter()
             .map(|t| (t.schema_name.clone(), t.table_name.clone()))
@@ -661,12 +699,7 @@ impl RuntimeEngine {
             }
 
             self.catalog
-                .add_table(
-                    connection_id,
-                    &table.schema_name,
-                    &table.table_name,
-                    &schema_json,
-                )
+                .add_table(conn.id, &table.schema_name, &table.table_name, &schema_json)
                 .await?;
         }
 
@@ -687,7 +720,7 @@ impl RuntimeEngine {
         };
 
         for conn in connections {
-            match self.refresh_schema(conn.id).await {
+            match self.refresh_schema(&conn.external_id).await {
                 Ok((added, modified)) => {
                     result.connections_refreshed += 1;
                     result.tables_added += added;
@@ -695,8 +728,7 @@ impl RuntimeEngine {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        connection_id = conn.id,
-                        external_id = %conn.external_id,
+                        connection_id = %conn.external_id,
                         error = %e,
                         "Failed to refresh schema for connection"
                     );
@@ -716,8 +748,7 @@ impl RuntimeEngine {
     /// Refresh data for a single table using atomic swap.
     pub async fn refresh_table_data(
         &self,
-        connection_id: i32,
-        external_id: &str,
+        connection_id: &str,
         schema_name: &str,
         table_name: &str,
     ) -> Result<TableRefreshResult> {
@@ -726,14 +757,14 @@ impl RuntimeEngine {
 
         let conn = self
             .catalog
-            .get_connection_by_id(connection_id)
+            .get_connection_by_external_id(connection_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Connection not found"))?;
+            .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", connection_id))?;
         let source: Source = serde_json::from_str(&conn.config_json)?;
 
         let (_, old_path, rows_synced) = self
             .orchestrator
-            .refresh_table(&source, connection_id, schema_name, table_name)
+            .refresh_table(&source, conn.id, schema_name, table_name)
             .await?;
 
         if let Some(path) = old_path {
@@ -754,7 +785,7 @@ impl RuntimeEngine {
         }
 
         Ok(TableRefreshResult {
-            connection_id: external_id.to_string(),
+            connection_id: connection_id.to_string(),
             schema_name: schema_name.to_string(),
             table_name: table_name.to_string(),
             rows_synced,
@@ -769,12 +800,19 @@ impl RuntimeEngine {
     /// Set `include_uncached` to true to also sync tables that haven't been cached yet.
     pub async fn refresh_connection_data(
         &self,
-        connection_id: i32,
-        external_id: &str,
+        connection_id: &str,
         include_uncached: bool,
     ) -> Result<ConnectionRefreshResult> {
         let start = std::time::Instant::now();
-        let all_tables = self.catalog.list_tables(Some(connection_id)).await?;
+
+        let conn = self
+            .catalog
+            .get_connection_by_external_id(connection_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", connection_id))?;
+        let internal_id = conn.id;
+
+        let all_tables = self.catalog.list_tables(Some(internal_id)).await?;
 
         // By default, only refresh tables that already have cached data
         let tables: Vec<_> = if include_uncached {
@@ -786,15 +824,10 @@ impl RuntimeEngine {
                 .collect()
         };
 
-        let conn = self
-            .catalog
-            .get_connection_by_id(connection_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Connection not found"))?;
         let source: Source = serde_json::from_str(&conn.config_json)?;
 
         let mut result = ConnectionRefreshResult {
-            connection_id: external_id.to_string(),
+            connection_id: connection_id.to_string(),
             tables_refreshed: 0,
             tables_failed: 0,
             total_rows: 0,
@@ -815,7 +848,7 @@ impl RuntimeEngine {
 
             let handle = tokio::spawn(async move {
                 let result = orchestrator
-                    .refresh_table(&source, connection_id, &schema_name, &table_name)
+                    .refresh_table(&source, internal_id, &schema_name, &table_name)
                     .await;
                 drop(permit);
                 (schema_name, table_name, result)

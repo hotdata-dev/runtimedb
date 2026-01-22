@@ -115,7 +115,7 @@ impl CatalogManager for SqliteCatalogManager {
         source_type: &str,
         config_json: &str,
         secret_id: Option<&str>,
-    ) -> Result<i32> {
+    ) -> Result<String> {
         self.backend
             .add_connection(name, source_type, config_json, secret_id)
             .await
@@ -430,6 +430,10 @@ impl CatalogManager for SqliteCatalogManager {
         };
 
         Ok((results, has_more))
+    }
+
+    async fn count_connections_by_secret_id(&self, secret_id: &str) -> Result<i64> {
+        self.backend.count_connections_by_secret_id(secret_id).await
     }
 }
 

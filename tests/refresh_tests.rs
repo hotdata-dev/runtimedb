@@ -230,7 +230,7 @@ async fn test_refresh_schema_preserves_cached_data() -> Result<()> {
     assert!(!result.results.is_empty());
 
     // Verify table is synced
-    let tables = harness.engine.list_tables(Some("test_conn")).await?;
+    let tables = harness.engine.list_tables(Some(&connection_id)).await?;
     let orders_table = tables
         .iter()
         .find(|t| t.table_name == "orders")
@@ -262,7 +262,7 @@ async fn test_refresh_schema_preserves_cached_data() -> Result<()> {
     assert_eq!(response.status(), StatusCode::OK);
 
     // Verify orders table still has its cached data
-    let tables = harness.engine.list_tables(Some("test_conn")).await?;
+    let tables = harness.engine.list_tables(Some(&connection_id)).await?;
     let orders_table = tables
         .iter()
         .find(|t| t.table_name == "orders")
@@ -438,7 +438,7 @@ async fn test_refresh_data_skips_uncached_tables_by_default() -> Result<()> {
         .await?;
 
     // Verify only orders is cached
-    let tables = harness.engine.list_tables(Some("test_conn")).await?;
+    let tables = harness.engine.list_tables(Some(&connection_id)).await?;
     let orders_cached = tables
         .iter()
         .find(|t| t.table_name == "orders")
@@ -481,7 +481,7 @@ async fn test_refresh_data_skips_uncached_tables_by_default() -> Result<()> {
     assert_eq!(json["tables_failed"], 0);
 
     // Verify products is still not cached
-    let tables = harness.engine.list_tables(Some("test_conn")).await?;
+    let tables = harness.engine.list_tables(Some(&connection_id)).await?;
     let products_still_uncached = tables
         .iter()
         .find(|t| t.table_name == "products")
@@ -512,7 +512,7 @@ async fn test_refresh_data_includes_uncached_tables_when_requested() -> Result<(
         .await?;
 
     // Verify only orders is cached initially
-    let tables = harness.engine.list_tables(Some("test_conn")).await?;
+    let tables = harness.engine.list_tables(Some(&connection_id)).await?;
     let products_cached = tables
         .iter()
         .find(|t| t.table_name == "products")
@@ -550,7 +550,7 @@ async fn test_refresh_data_includes_uncached_tables_when_requested() -> Result<(
     assert_eq!(json["tables_failed"], 0);
 
     // Verify products is NOW cached
-    let tables = harness.engine.list_tables(Some("test_conn")).await?;
+    let tables = harness.engine.list_tables(Some(&connection_id)).await?;
     let products_now_cached = tables
         .iter()
         .find(|t| t.table_name == "products")
@@ -975,7 +975,7 @@ async fn test_data_refresh_schedules_pending_deletion() -> Result<()> {
         .await?;
 
     // Get the initial cache directory path
-    let tables = harness.engine.list_tables(Some("test_conn")).await?;
+    let tables = harness.engine.list_tables(Some(&connection_id)).await?;
     let initial_cache_path = tables
         .iter()
         .find(|t| t.table_name == "orders")
@@ -1016,7 +1016,7 @@ async fn test_data_refresh_schedules_pending_deletion() -> Result<()> {
     assert_eq!(response.status(), StatusCode::OK);
 
     // Get the new cache path after refresh - it should be a versioned directory
-    let tables = harness.engine.list_tables(Some("test_conn")).await?;
+    let tables = harness.engine.list_tables(Some(&connection_id)).await?;
     let new_cache_path = tables
         .iter()
         .find(|t| t.table_name == "orders")
@@ -1360,17 +1360,9 @@ async fn test_concurrent_refresh_same_table() -> Result<()> {
     let engine2 = harness.engine.clone();
     let conn_id = connection_id.clone();
 
-    // Get internal connection ID
-    let internal_conn = harness
-        .engine
-        .catalog()
-        .get_connection_by_external_id(&connection_id)
-        .await?
-        .expect("connection should exist");
-
     let (result1, result2) = tokio::join!(
-        engine1.refresh_table_data(internal_conn.id, &conn_id, "sales", "orders"),
-        engine2.refresh_table_data(internal_conn.id, &conn_id, "sales", "orders")
+        engine1.refresh_table_data(&conn_id, "sales", "orders"),
+        engine2.refresh_table_data(&conn_id, "sales", "orders")
     );
 
     // Both should complete (one might succeed, both might succeed)
@@ -1432,24 +1424,15 @@ async fn test_concurrent_refresh_different_tables() -> Result<()> {
         .execute_query("SELECT * FROM test_conn.sales.products")
         .await?;
 
-    // Get internal connection ID
-    let internal_conn = harness
-        .engine
-        .catalog()
-        .get_connection_by_external_id(&connection_id)
-        .await?
-        .expect("connection should exist");
-
     let engine1 = harness.engine.clone();
     let engine2 = harness.engine.clone();
     let conn_id1 = connection_id.clone();
     let conn_id2 = connection_id.clone();
-    let internal_id = internal_conn.id;
 
     // Run refreshes for different tables concurrently
     let (result1, result2) = tokio::join!(
-        engine1.refresh_table_data(internal_id, &conn_id1, "sales", "orders"),
-        engine2.refresh_table_data(internal_id, &conn_id2, "sales", "products")
+        engine1.refresh_table_data(&conn_id1, "sales", "orders"),
+        engine2.refresh_table_data(&conn_id2, "sales", "products")
     );
 
     // Both should succeed since they're different tables
@@ -1502,23 +1485,15 @@ async fn test_concurrent_schema_and_data_refresh() -> Result<()> {
         .execute_query("SELECT * FROM test_conn.sales.orders")
         .await?;
 
-    // Get internal connection ID
-    let internal_conn = harness
-        .engine
-        .catalog()
-        .get_connection_by_external_id(&connection_id)
-        .await?
-        .expect("connection should exist");
-
     let engine1 = harness.engine.clone();
     let engine2 = harness.engine.clone();
     let conn_id = connection_id.clone();
-    let internal_id = internal_conn.id;
+    let conn_id2 = connection_id.clone();
 
     // Run schema refresh and data refresh concurrently
     let (schema_result, data_result) = tokio::join!(
-        engine1.refresh_schema(internal_id),
-        engine2.refresh_table_data(internal_id, &conn_id, "sales", "orders")
+        engine1.refresh_schema(&conn_id),
+        engine2.refresh_table_data(&conn_id2, "sales", "orders")
     );
 
     // Both should succeed
@@ -1534,7 +1509,7 @@ async fn test_concurrent_schema_and_data_refresh() -> Result<()> {
     );
 
     // Verify final state is consistent
-    let tables = harness.engine.list_tables(Some("test_conn")).await?;
+    let tables = harness.engine.list_tables(Some(&connection_id)).await?;
     assert!(
         !tables.is_empty(),
         "Should have at least one table after concurrent refresh"
@@ -1573,25 +1548,16 @@ async fn test_concurrent_connection_wide_refresh() -> Result<()> {
         .execute_query("SELECT * FROM test_conn.sales.products")
         .await?;
 
-    // Get internal connection ID
-    let internal_conn = harness
-        .engine
-        .catalog()
-        .get_connection_by_external_id(&connection_id)
-        .await?
-        .expect("connection should exist");
-
     let engine1 = harness.engine.clone();
     let engine2 = harness.engine.clone();
     let conn_id1 = connection_id.clone();
     let conn_id2 = connection_id.clone();
-    let internal_id = internal_conn.id;
 
     // Run two connection-wide data refreshes concurrently
     // Use include_uncached=false (default) - only refresh already-cached tables
     let (result1, result2) = tokio::join!(
-        engine1.refresh_connection_data(internal_id, &conn_id1, false),
-        engine2.refresh_connection_data(internal_id, &conn_id2, false)
+        engine1.refresh_connection_data(&conn_id1, false),
+        engine2.refresh_connection_data(&conn_id2, false)
     );
 
     // Both should complete without panicking
@@ -1642,20 +1608,6 @@ async fn test_concurrent_refresh_multiple_connections() -> Result<()> {
         .execute_query("SELECT * FROM conn2.sales.orders")
         .await?;
 
-    // Get internal IDs
-    let internal_conn1 = harness
-        .engine
-        .catalog()
-        .get_connection_by_external_id(&conn_id1)
-        .await?
-        .expect("conn1 should exist");
-    let internal_conn2 = harness
-        .engine
-        .catalog()
-        .get_connection_by_external_id(&conn_id2)
-        .await?
-        .expect("conn2 should exist");
-
     let engine1 = harness.engine.clone();
     let engine2 = harness.engine.clone();
     let ext_id1 = conn_id1.clone();
@@ -1663,8 +1615,8 @@ async fn test_concurrent_refresh_multiple_connections() -> Result<()> {
 
     // Refresh different connections concurrently
     let (result1, result2) = tokio::join!(
-        engine1.refresh_table_data(internal_conn1.id, &ext_id1, "sales", "orders"),
-        engine2.refresh_table_data(internal_conn2.id, &ext_id2, "sales", "orders")
+        engine1.refresh_table_data(&ext_id1, "sales", "orders"),
+        engine2.refresh_table_data(&ext_id2, "sales", "orders")
     );
 
     // Both should succeed - no interference between connections
@@ -1711,19 +1663,11 @@ async fn test_rapid_sequential_refresh_same_table() -> Result<()> {
         .execute_query("SELECT * FROM test_conn.sales.orders")
         .await?;
 
-    // Get internal connection ID
-    let internal_conn = harness
-        .engine
-        .catalog()
-        .get_connection_by_external_id(&connection_id)
-        .await?
-        .expect("connection should exist");
-
     // Perform rapid sequential refreshes (simulates rapid button clicks)
     for i in 0..5 {
         let result = harness
             .engine
-            .refresh_table_data(internal_conn.id, &connection_id, "sales", "orders")
+            .refresh_table_data(&connection_id, "sales", "orders")
             .await;
 
         assert!(result.is_ok(), "Refresh {} should succeed: {:?}", i, result);
