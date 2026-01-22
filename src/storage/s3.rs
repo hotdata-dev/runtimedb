@@ -20,6 +20,7 @@ struct S3Config {
     endpoint: String,
     access_key: String,
     secret_key: String,
+    region: Option<String>,
 }
 
 #[derive(Debug)]
@@ -48,6 +49,7 @@ impl S3Storage {
         endpoint: &str,
         access_key: &str,
         secret_key: &str,
+        region: Option<&str>,
         allow_http: bool,
     ) -> Result<Self> {
         let mut builder = AmazonS3Builder::new()
@@ -56,6 +58,10 @@ impl S3Storage {
             .with_access_key_id(access_key)
             .with_secret_access_key(secret_key)
             .with_allow_http(allow_http);
+
+        if let Some(region) = region {
+            builder = builder.with_region(region);
+        }
 
         // For MinIO, we need to use path-style URLs
         builder = builder.with_virtual_hosted_style_request(false);
@@ -69,6 +75,7 @@ impl S3Storage {
                 endpoint: endpoint.to_string(),
                 access_key: access_key.to_string(),
                 secret_key: secret_key.to_string(),
+                region: region.map(|s| s.to_string()),
             }),
         })
     }

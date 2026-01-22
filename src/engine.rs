@@ -195,13 +195,21 @@ impl RuntimeEngine {
 
                 // Check if we have custom endpoint (for MinIO/localstack)
                 if let Some(endpoint) = &config.storage.endpoint {
-                    // For custom endpoint, we need credentials from environment
-                    let access_key = std::env::var("AWS_ACCESS_KEY_ID")
-                        .or_else(|_| std::env::var("RUNTIMEDB_STORAGE_ACCESS_KEY_ID"))
-                        .unwrap_or_else(|_| "minioadmin".to_string());
-                    let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")
-                        .or_else(|_| std::env::var("RUNTIMEDB_STORAGE_SECRET_ACCESS_KEY"))
-                        .unwrap_or_else(|_| "minioadmin".to_string());
+                    // Get credentials from config first, then fall back to environment
+                    let access_key = config
+                        .storage
+                        .access_key
+                        .clone()
+                        .or_else(|| std::env::var("AWS_ACCESS_KEY_ID").ok())
+                        .or_else(|| std::env::var("RUNTIMEDB_STORAGE_ACCESS_KEY_ID").ok())
+                        .unwrap_or_else(|| "minioadmin".to_string());
+                    let secret_key = config
+                        .storage
+                        .secret_key
+                        .clone()
+                        .or_else(|| std::env::var("AWS_SECRET_ACCESS_KEY").ok())
+                        .or_else(|| std::env::var("RUNTIMEDB_STORAGE_SECRET_ACCESS_KEY").ok())
+                        .unwrap_or_else(|| "minioadmin".to_string());
 
                     // Allow HTTP for local MinIO
                     let allow_http = endpoint.starts_with("http://");
@@ -211,6 +219,7 @@ impl RuntimeEngine {
                         endpoint,
                         &access_key,
                         &secret_key,
+                        config.storage.region.as_deref(),
                         allow_http,
                     )?))
                 } else {
@@ -1321,6 +1330,7 @@ impl RuntimeEngineBuilder {
 
             // Register object stores from storage config
             if let Some((url, options)) = storage.get_object_store_config() {
+                info!("URL: {}, options: {:?}", url, options);
                 liquid_cache_builder = liquid_cache_builder.with_object_store(url, Some(options));
             }
 

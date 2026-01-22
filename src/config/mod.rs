@@ -48,6 +48,8 @@ pub struct StorageConfig {
     pub bucket: Option<String>,
     pub region: Option<String>,
     pub endpoint: Option<String>,
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
