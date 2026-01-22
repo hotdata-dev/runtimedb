@@ -581,7 +581,7 @@ mod postgres_container_tests {
         use std::fs::File;
 
         let temp_dir = TempDir::new().unwrap();
-        let secrets =
+        let (secrets, secret_id) =
             create_test_secret_manager_with_password(&temp_dir, "pg-pass", TEST_PASSWORD).await;
 
         // Start PostgreSQL container
@@ -638,9 +638,7 @@ mod postgres_container_tests {
             port,
             user: "postgres".to_string(),
             database: "postgres".to_string(),
-            credential: runtimedb::source::Credential::SecretRef {
-                name: "pg-pass".to_string(),
-            },
+            credential: runtimedb::source::Credential::secret_ref(&secret_id),
         };
 
         let output_path = temp_dir.path().join("partsupp_output.parquet");
@@ -694,7 +692,7 @@ mod postgres_container_tests {
         use std::fs::File;
 
         let temp_dir = TempDir::new().unwrap();
-        let secrets =
+        let (secrets, secret_id) =
             create_test_secret_manager_with_password(&temp_dir, "pg-pass", TEST_PASSWORD).await;
 
         // Start PostgreSQL container
@@ -748,9 +746,7 @@ mod postgres_container_tests {
             port,
             user: "postgres".to_string(),
             database: "postgres".to_string(),
-            credential: runtimedb::source::Credential::SecretRef {
-                name: "pg-pass".to_string(),
-            },
+            credential: runtimedb::source::Credential::secret_ref(&secret_id),
         };
 
         let output_path = temp_dir.path().join("prices_output.parquet");
