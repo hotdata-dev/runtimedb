@@ -280,7 +280,12 @@ pub async fn create_connection_handler(
                             }
 
                             // Generate normalized secret name from connection name
-                            let normalized_conn = normalize_for_secret(&request.name);
+                            // Format: conn-{normalized_conn}-{field_name}
+                            // Max secret name length is 128 chars
+                            // "conn-" = 5 chars, "-" = 1 char, field_name max = 12 chars (bearer_token)
+                            // So normalized_conn can be at most 128 - 5 - 1 - 12 = 110 chars
+                            let mut normalized_conn = normalize_for_secret(&request.name);
+                            normalized_conn.truncate(110);
                             let secret_name = format!("conn-{}-{}", normalized_conn, field_name);
 
                             // Create the secret and get the generated ID
@@ -289,10 +294,25 @@ pub async fn create_connection_handler(
                                 .create(&secret_name, secret_value.as_bytes())
                                 .await
                                 .map_err(|e| {
-                                    ApiError::internal_error(format!(
-                                        "Failed to store {}: {}",
-                                        field_name, e
-                                    ))
+                                    use crate::secrets::SecretError;
+                                    match e {
+                                        SecretError::AlreadyExists(_) => ApiError::conflict(format!(
+                                            "Auto-generated secret '{}' already exists. Use a different connection name or provide an explicit secret_name.",
+                                            secret_name
+                                        )),
+                                        SecretError::InvalidName(_) => ApiError::bad_request(format!(
+                                            "Connection name '{}' produces invalid secret name",
+                                            request.name
+                                        )),
+                                        SecretError::CreationInProgress(_) => ApiError::conflict(format!(
+                                            "Secret '{}' is being created by another request",
+                                            secret_name
+                                        )),
+                                        _ => ApiError::internal_error(format!(
+                                            "Failed to store {}: {}",
+                                            field_name, e
+                                        )),
+                                    }
                                 })?;
 
                             // Set auth type for the source config
