@@ -21,10 +21,6 @@ pub struct RuntimeCatalogProvider {
 }
 
 impl RuntimeCatalogProvider {
-    /// Create a new catalog provider for a connection.
-    ///
-    /// The Source contains the credential reference internally.
-    /// Credential resolution happens when tables are accessed via the orchestrator.
     pub fn new(
         connection_id: i32,
         connection_name: String,

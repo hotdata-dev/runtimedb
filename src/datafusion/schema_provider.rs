@@ -24,10 +24,6 @@ pub struct RuntimeSchemaProvider {
 }
 
 impl RuntimeSchemaProvider {
-    /// Create a new schema provider for a connection's schema.
-    ///
-    /// The Source contains the credential reference internally.
-    /// Credential resolution happens when tables are accessed via the orchestrator.
     pub fn new(
         connection_id: i32,
         connection_name: String,

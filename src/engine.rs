@@ -638,7 +638,6 @@ impl RuntimeEngine {
             .collect();
 
         let source: Source = serde_json::from_str(&conn.config_json)?;
-        // Credential is resolved internally by the orchestrator using source.credential()
         let discovered = self.orchestrator.discover_tables(&source).await?;
 
         let current_set: HashSet<(String, String)> = discovered
@@ -732,7 +731,6 @@ impl RuntimeEngine {
             .ok_or_else(|| anyhow::anyhow!("Connection not found"))?;
         let source: Source = serde_json::from_str(&conn.config_json)?;
 
-        // Credential is resolved internally by the orchestrator using source.credential()
         let (_, old_path, rows_synced) = self
             .orchestrator
             .refresh_table(&source, connection_id, schema_name, table_name)
@@ -816,7 +814,6 @@ impl RuntimeEngine {
             let table_name = table.table_name.clone();
 
             let handle = tokio::spawn(async move {
-                // Credential is resolved internally by the orchestrator using source.credential()
                 let result = orchestrator
                     .refresh_table(&source, connection_id, &schema_name, &table_name)
                     .await;
