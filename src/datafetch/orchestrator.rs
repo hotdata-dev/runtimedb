@@ -466,8 +466,8 @@ mod tests {
             _source_type: &str,
             _config_json: &str,
             _secret_id: Option<&str>,
-        ) -> Result<i32> {
-            Ok(1)
+        ) -> Result<String> {
+            Ok("conn_mock123".to_string())
         }
 
         async fn get_connection(&self, _name: &str) -> Result<Option<ConnectionInfo>> {
@@ -631,6 +631,10 @@ mod tests {
             _offset: usize,
         ) -> Result<(Vec<crate::catalog::QueryResult>, bool)> {
             Ok((vec![], false))
+        }
+
+        async fn count_connections_by_secret_id(&self, _secret_id: &str) -> Result<i64> {
+            Ok(0)
         }
     }
 

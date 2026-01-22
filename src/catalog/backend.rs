@@ -83,6 +83,8 @@ where
     for<'q> Option<&'q str>: Encode<'q, DB> + Type<DB>,
     for<'q> i32: Encode<'q, DB> + Type<DB>,
     for<'r> i32: Decode<'r, DB>,
+    for<'q> i64: Encode<'q, DB> + Type<DB>,
+    for<'r> i64: Decode<'r, DB>,
     for<'q> <DB as Database>::Arguments<'q>: IntoArguments<'q, DB> + Send,
     for<'c> &'c Pool<DB>: Executor<'c, Database = DB>,
     usize: ColumnIndex<DB::Row>,
@@ -102,7 +104,7 @@ where
         source_type: &str,
         config_json: &str,
         secret_id: Option<&str>,
-    ) -> Result<i32> {
+    ) -> Result<String> {
         // Retry logic handles the astronomically rare case of nanoid collision.
         // With 26-char nanoid (alphabet of 64 chars), collision probability is < 1 in 10^40.
         const MAX_RETRIES: usize = 3;
@@ -129,17 +131,8 @@ where
 
             match result {
                 Ok(_) => {
-                    // Success - fetch and return the ID
-                    let select_sql = format!(
-                        "SELECT id FROM connections WHERE name = {}",
-                        DB::bind_param(1)
-                    );
-
-                    return query_scalar::<DB, i32>(&select_sql)
-                        .bind(name)
-                        .fetch_one(&self.pool)
-                        .await
-                        .map_err(Into::into);
+                    // Success - return the external_id we just inserted
+                    return Ok(external_id);
                 }
                 Err(sqlx::Error::Database(db_err)) => {
                     // Check for unique constraint violation using structured error inspection
@@ -396,5 +389,18 @@ where
         );
         query(&sql).bind(id).execute(&self.pool).await?;
         Ok(())
+    }
+
+    /// Count how many connections reference a given secret_id.
+    pub async fn count_connections_by_secret_id(&self, secret_id: &str) -> Result<i64> {
+        let sql = format!(
+            "SELECT COUNT(*) FROM connections WHERE secret_id = {}",
+            DB::bind_param(1)
+        );
+        let count: i64 = query_scalar(&sql)
+            .bind(secret_id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count)
     }
 }

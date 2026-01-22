@@ -109,20 +109,19 @@ pub async fn information_schema_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     QueryParams(params): QueryParams<HashMap<String, String>>,
 ) -> Result<Json<InformationSchemaResponse>, ApiError> {
-    // Get optional connection_id filter and resolve to name
-    let connection_filter = if let Some(conn_id) = params.get("connection_id") {
-        let conn = engine
-            .catalog()
-            .get_connection_by_external_id(conn_id)
-            .await?
-            .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", conn_id)))?;
-        Some(conn.name)
-    } else {
-        None
-    };
+    // Get optional connection_id filter
+    let connection_id = params.get("connection_id").map(|s| s.as_str());
 
-    // Get tables from engine (uses connection name internally)
-    let tables = engine.list_tables(connection_filter.as_deref()).await?;
+    // Get tables from engine
+    let tables = engine.list_tables(connection_id).await.map_err(|e| {
+        // Check if the error is a "connection not found" error
+        let msg = e.to_string();
+        if msg.contains("not found") {
+            ApiError::not_found(msg)
+        } else {
+            ApiError::from(e)
+        }
+    })?;
 
     // Get all connections to map connection_id to connection name
     let connections = engine.list_connections().await?;
@@ -470,7 +469,7 @@ pub async fn create_connection_handler(
 
     // Step 2: Attempt discovery - catch errors and return partial success
     let (tables_discovered, discovery_status, discovery_error) =
-        match engine.refresh_schema(conn_id).await {
+        match engine.refresh_schema(&conn_id).await {
             Ok((added, _)) => (added, DiscoveryStatus::Success, None),
             Err(e) => {
                 let root_cause = e.root_cause().to_string();
@@ -487,17 +486,10 @@ pub async fn create_connection_handler(
             }
         };
 
-    // Fetch the created connection to get external_id
-    let conn = engine
-        .catalog()
-        .get_connection(&request.name)
-        .await?
-        .ok_or_else(|| ApiError::internal_error("Failed to retrieve created connection"))?;
-
     Ok((
         StatusCode::CREATED,
         Json(CreateConnectionResponse {
-            id: conn.external_id,
+            id: conn_id,
             name: request.name,
             source_type,
             tables_discovered,
@@ -539,8 +531,8 @@ pub async fn get_connection_handler(
         .await?
         .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", connection_id)))?;
 
-    // Get table counts using connection name
-    let tables = engine.list_tables(Some(&conn.name)).await?;
+    // Get table counts using connection external_id
+    let tables = engine.list_tables(Some(&connection_id)).await?;
     let table_count = tables.len();
     let synced_table_count = tables.iter().filter(|t| t.parquet_path.is_some()).count();
 
@@ -558,21 +550,17 @@ pub async fn delete_connection_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(connection_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    // Look up connection by external_id to get name for deletion
-    let conn = engine
-        .catalog()
-        .get_connection_by_external_id(&connection_id)
-        .await?
-        .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", connection_id)))?;
-
-    engine.remove_connection(&conn.name).await.map_err(|e| {
-        let msg = e.to_string();
-        if msg.contains("not found") {
-            ApiError::not_found(msg)
-        } else {
-            ApiError::internal_error(msg)
-        }
-    })?;
+    engine
+        .remove_connection(&connection_id)
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                ApiError::not_found(msg)
+            } else {
+                ApiError::internal_error(msg)
+            }
+        })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -582,14 +570,7 @@ pub async fn purge_connection_cache_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(connection_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    // Look up connection by external_id
-    let conn = engine
-        .catalog()
-        .get_connection_by_external_id(&connection_id)
-        .await?
-        .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", connection_id)))?;
-
-    engine.purge_connection(&conn.name).await.map_err(|e| {
+    engine.purge_connection(&connection_id).await.map_err(|e| {
         let msg = e.to_string();
         if msg.contains("not found") {
             ApiError::not_found(msg)
@@ -614,17 +595,8 @@ pub async fn purge_table_cache_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(params): Path<TableCachePath>,
 ) -> Result<StatusCode, ApiError> {
-    // Look up connection by external_id
-    let conn = engine
-        .catalog()
-        .get_connection_by_external_id(&params.connection_id)
-        .await?
-        .ok_or_else(|| {
-            ApiError::not_found(format!("Connection '{}' not found", params.connection_id))
-        })?;
-
     engine
-        .purge_table(&conn.name, &params.schema, &params.table)
+        .purge_table(&params.connection_id, &params.schema, &params.table)
         .await
         .map_err(|e| {
             let msg = e.to_string();
@@ -743,22 +715,21 @@ pub async fn refresh_handler(
         return Err(ApiError::bad_request("data refresh requires connection_id"));
     }
 
-    // Resolve connection_id from external ID to internal ID if provided
-    let conn_info = if let Some(ref external_id) = request.connection_id {
-        let conn = engine
+    // Validate connection_id exists if provided
+    let connection_id = if let Some(ref ext_id) = request.connection_id {
+        // Verify connection exists
+        engine
             .catalog()
-            .get_connection_by_external_id(external_id)
+            .get_connection_by_external_id(ext_id)
             .await?
-            .ok_or_else(|| {
-                ApiError::not_found(format!("Connection '{}' not found", external_id))
-            })?;
-        Some((conn.id, external_id.clone()))
+            .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", ext_id)))?;
+        Some(ext_id.clone())
     } else {
         None
     };
 
     let response = match (
-        conn_info,
+        connection_id,
         request.schema_name,
         request.table_name,
         request.data,
@@ -770,9 +741,9 @@ pub async fn refresh_handler(
         }
 
         // Schema refresh: single connection
-        (Some((conn_id, _)), None, None, false) => {
-            let (added, modified) = engine.refresh_schema(conn_id).await?;
-            let tables = engine.catalog().list_tables(Some(conn_id)).await?;
+        (Some(conn_id), None, None, false) => {
+            let (added, modified) = engine.refresh_schema(&conn_id).await?;
+            let tables = engine.list_tables(Some(&conn_id)).await?;
             RefreshResponse::Schema(SchemaRefreshResult {
                 connections_refreshed: 1,
                 connections_failed: 0,
@@ -784,17 +755,15 @@ pub async fn refresh_handler(
         }
 
         // Data refresh: single table
-        (Some((conn_id, external_id)), Some(schema), Some(table), true) => {
-            let result = engine
-                .refresh_table_data(conn_id, &external_id, &schema, &table)
-                .await?;
+        (Some(conn_id), Some(schema), Some(table), true) => {
+            let result = engine.refresh_table_data(&conn_id, &schema, &table).await?;
             RefreshResponse::Table(result)
         }
 
         // Data refresh: all tables in connection (or only cached tables by default)
-        (Some((conn_id, external_id)), None, None, true) => {
+        (Some(conn_id), None, None, true) => {
             let result = engine
-                .refresh_connection_data(conn_id, &external_id, request.include_uncached)
+                .refresh_connection_data(&conn_id, request.include_uncached)
                 .await?;
             RefreshResponse::Connection(result)
         }

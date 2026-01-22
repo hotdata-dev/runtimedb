@@ -78,7 +78,7 @@ pub trait CatalogManager: Debug + Send + Sync {
         source_type: &str,
         config_json: &str,
         secret_id: Option<&str>,
-    ) -> Result<i32>;
+    ) -> Result<String>;
     async fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>>;
     async fn get_connection_by_external_id(
         &self,
@@ -181,6 +181,9 @@ pub trait CatalogManager: Debug + Send + Sync {
 
     /// Get secret metadata by ID.
     async fn get_secret_metadata_by_id(&self, id: &str) -> Result<Option<SecretMetadata>>;
+
+    /// Count how many connections reference a given secret_id.
+    async fn count_connections_by_secret_id(&self, secret_id: &str) -> Result<i64>;
 
     // Query result persistence methods
 
