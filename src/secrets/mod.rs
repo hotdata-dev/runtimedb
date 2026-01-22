@@ -242,12 +242,21 @@ impl SecretManager {
                 SecretStatus::Active => return Err(SecretError::AlreadyExists(normalized)),
                 SecretStatus::Creating => return Err(SecretError::CreationInProgress(normalized)),
                 SecretStatus::PendingDelete => {
-                    // Stale record from failed delete - clean it up
+                    // Stale record from incomplete delete - retry the full delete flow.
+                    // This properly handles all backends (encrypted catalog, Vault, KMS, etc.)
+                    // by ensuring the backend value is deleted before removing metadata.
+                    // See SecretManager::delete() for the three-phase delete protocol.
                     tracing::info!(
                         secret = %normalized,
-                        "Cleaning up stale pending_delete metadata before create"
+                        "Retrying delete for stale pending_delete secret before create"
                     );
-                    let _ = self.catalog.delete_secret_metadata(&normalized).await;
+                    if let Err(e) = self.delete(&normalized).await {
+                        tracing::warn!(
+                            secret = %normalized,
+                            error = %e,
+                            "Failed to cleanup pending_delete secret; proceeding with create anyway"
+                        );
+                    }
                 }
             }
         }
@@ -386,13 +395,38 @@ impl SecretManager {
 
     /// Delete a secret using three-phase commit.
     ///
-    /// 1. Mark metadata as 'pending_delete' (secret becomes invisible)
-    /// 2. Delete from backend
-    /// 3. Delete metadata row
+    /// # Three-Phase Delete Protocol
     ///
-    /// If step 2 fails, the secret remains in 'pending_delete' state.
-    /// Subsequent delete calls can retry (we use any_status lookup).
-    /// If step 3 fails, the secret is effectively deleted (value gone).
+    /// Secret deletion is designed to support multiple backends (encrypted catalog,
+    /// Vault, KMS, etc.) where the secret value may be stored externally. The process:
+    ///
+    /// 1. **Mark as pending_delete**: Update metadata status so the secret becomes
+    ///    invisible to API reads. This is atomic and idempotent.
+    ///
+    /// 2. **Delete from backend**: Remove the actual secret value. For encrypted
+    ///    catalog, this deletes from `encrypted_secret_values`. For external backends
+    ///    (Vault, KMS), this calls the external API.
+    ///
+    /// 3. **Delete metadata**: Remove the row from the `secrets` table.
+    ///
+    /// # Failure Handling
+    ///
+    /// - If phase 2 fails, the secret remains in `pending_delete` state. Subsequent
+    ///   `delete()` calls will retry from phase 1 (idempotent).
+    /// - If phase 3 fails, the secret value is already gone. The stale metadata will
+    ///   be cleaned up by `create()` if the same name is reused.
+    ///
+    /// # Why Not Use ON DELETE CASCADE?
+    ///
+    /// Database-level cascades only work for the encrypted catalog backend where
+    /// values are stored in `encrypted_secret_values`. External backends (Vault, KMS)
+    /// require explicit API calls to delete values. This three-phase approach works
+    /// uniformly across all backends.
+    ///
+    /// # Idempotency
+    ///
+    /// This method is idempotent - calling it multiple times on the same secret
+    /// (or a non-existent secret) is safe and will succeed.
     pub async fn delete(&self, name: &str) -> Result<(), SecretError> {
         let normalized = validate_and_normalize_name(name)?;
 

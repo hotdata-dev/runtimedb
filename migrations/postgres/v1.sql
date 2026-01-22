@@ -11,7 +11,7 @@ CREATE TABLE secrets (
 );
 
 CREATE TABLE encrypted_secret_values (
-    secret_id TEXT PRIMARY KEY REFERENCES secrets(id) ON DELETE CASCADE,
+    secret_id TEXT PRIMARY KEY REFERENCES secrets(id),
     encrypted_value BYTEA NOT NULL
 );
 
