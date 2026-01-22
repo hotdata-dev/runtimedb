@@ -180,6 +180,9 @@ impl StorageManager for S3Storage {
             );
             options.insert("aws_endpoint".to_string(), c.endpoint.clone());
             options.insert("aws_allow_http".to_string(), "true".to_string());
+            if let Some(region) = &c.region {
+                options.insert("aws_region".to_string(), region.clone());
+            }
             Some((url, options))
         })
     }
