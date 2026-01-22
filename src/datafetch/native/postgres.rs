@@ -10,13 +10,13 @@ use futures::StreamExt;
 use sqlx::postgres::{PgConnection, PgRow};
 use sqlx::{Connection, Row};
 use std::sync::Arc;
+use tracing::warn;
 use urlencoding::encode;
 
+use crate::datafetch::batch_writer::BatchWriter;
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::secrets::SecretManager;
 use crate::source::Source;
-
-use super::StreamingParquetWriter;
 
 /// Build a PostgreSQL connection string from source configuration and resolved password.
 fn build_connection_string(
@@ -36,19 +36,19 @@ fn build_connection_string(
     )
 }
 
-/// Build connection string for a Postgres source with a pre-resolved password.
-pub fn resolve_connection_string(
+/// Resolve credentials and build connection string for a Postgres source.
+pub async fn resolve_connection_string(
     source: &Source,
-    password: &str,
+    secrets: &SecretManager,
 ) -> Result<String, DataFetchError> {
-    let (host, port, user, database) = match source {
+    let (host, port, user, database, credential) = match source {
         Source::Postgres {
             host,
             port,
             user,
             database,
-            ..
-        } => (host, *port, user, database),
+            credential,
+        } => (host, *port, user, database, credential),
         _ => {
             return Err(DataFetchError::Connection(
                 "Expected Postgres source".to_string(),
@@ -56,8 +56,13 @@ pub fn resolve_connection_string(
         }
     };
 
+    let password = credential
+        .resolve(secrets)
+        .await
+        .map_err(|e| DataFetchError::Connection(e.to_string()))?;
+
     Ok(build_connection_string(
-        host, port, user, database, password,
+        host, port, user, database, &password,
     ))
 }
 
@@ -86,28 +91,12 @@ async fn connect_with_ssl_retry(connection_string: &str) -> Result<PgConnection,
     }
 }
 
-/// Resolve the credential (password) from the source using the secret manager.
-async fn resolve_password(
-    source: &Source,
-    secrets: &SecretManager,
-) -> Result<String, DataFetchError> {
-    let credential = source
-        .credential()
-        .ok_or_else(|| DataFetchError::Connection("Password required for Postgres".to_string()))?;
-
-    credential
-        .resolve(secrets)
-        .await
-        .map_err(|e| DataFetchError::Connection(format!("Failed to resolve credential: {}", e)))
-}
-
 /// Discover tables and columns from PostgreSQL
 pub async fn discover_tables(
     source: &Source,
     secrets: &SecretManager,
 ) -> Result<Vec<TableMetadata>, DataFetchError> {
-    let password = resolve_password(source, secrets).await?;
-    let connection_string = resolve_connection_string(source, &password)?;
+    let connection_string = resolve_connection_string(source, secrets).await?;
     let mut conn = connect_with_ssl_retry(&connection_string).await?;
 
     let rows = sqlx::query(
@@ -179,18 +168,10 @@ pub async fn fetch_table(
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
-    writer: &mut StreamingParquetWriter,
+    writer: &mut dyn BatchWriter,
 ) -> Result<(), DataFetchError> {
-    let password = resolve_password(source, secrets).await?;
-    let connection_string = resolve_connection_string(source, &password)?;
+    let connection_string = resolve_connection_string(source, secrets).await?;
     let mut conn = connect_with_ssl_retry(&connection_string).await?;
-
-    // Build query - properly escape identifiers
-    let query = format!(
-        "SELECT * FROM \"{}\".\"{}\"",
-        schema.replace('"', "\"\""),
-        table.replace('"', "\"\"")
-    );
 
     const BATCH_SIZE: usize = 10_000;
 
@@ -217,21 +198,46 @@ pub async fn fetch_table(
         )));
     }
 
-    let fields: Vec<Field> = schema_rows
-        .iter()
-        .map(|row| {
-            let col_name: String = row.get(0);
-            let data_type: String = row.get(1);
-            let is_nullable: String = row.get(2);
-            Field::new(
-                col_name,
-                pg_type_to_arrow(&data_type),
-                is_nullable.to_uppercase() == "YES",
-            )
-        })
-        .collect();
+    // Build column list and Arrow schema from metadata.
+    // NUMERIC/DECIMAL columns must be cast to TEXT because sqlx cannot decode
+    // PostgreSQL NUMERIC directly to Rust String without the bigdecimal feature.
+    // Without this cast, try_get::<String> fails and .ok() converts it to null,
+    // causing "Column is declared as non-nullable but contains null values" errors.
+    let mut fields: Vec<Field> = Vec::with_capacity(schema_rows.len());
+    let mut column_exprs: Vec<String> = Vec::with_capacity(schema_rows.len());
+
+    for row in &schema_rows {
+        let col_name: String = row.get(0);
+        let data_type: String = row.get(1);
+        let is_nullable: String = row.get(2);
+
+        fields.push(Field::new(
+            &col_name,
+            pg_type_to_arrow(&data_type),
+            is_nullable.to_uppercase() == "YES",
+        ));
+
+        // Escape column name for SQL
+        let escaped_col = format!("\"{}\"", col_name.replace('"', "\"\""));
+
+        // Cast NUMERIC/DECIMAL to TEXT so sqlx can decode them as String
+        let type_lower = data_type.to_lowercase();
+        if type_lower == "numeric" || type_lower == "decimal" {
+            column_exprs.push(format!("{}::text AS {}", escaped_col, escaped_col));
+        } else {
+            column_exprs.push(escaped_col);
+        }
+    }
 
     let arrow_schema = Schema::new(fields);
+
+    // Build query with explicit column list and casts
+    let query = format!(
+        "SELECT {} FROM \"{}\".\"{}\"",
+        column_exprs.join(", "),
+        schema.replace('"', "\"\""),
+        table.replace('"', "\"\"")
+    );
 
     // Stream rows instead of loading all into memory
     let mut stream = sqlx::query(&query).fetch(&mut conn);
@@ -352,6 +358,28 @@ fn make_builder(data_type: &DataType, capacity: usize) -> Box<dyn ArrayBuilder> 
     }
 }
 
+/// Helper to try getting a value and log a warning if conversion fails (but value exists).
+/// This helps with debugging type mismatches without silently dropping data.
+fn try_get_with_warning<'r, T>(row: &'r PgRow, idx: usize, type_name: &str) -> Option<T>
+where
+    T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+{
+    match row.try_get::<T, _>(idx) {
+        Ok(val) => Some(val),
+        Err(sqlx::Error::ColumnDecode { source, .. }) => {
+            // Only warn if it's a decode error (type mismatch), not a null value
+            warn!(
+                column_index = idx,
+                target_type = type_name,
+                error = %source,
+                "PostgreSQL column value could not be converted to target type, storing as NULL"
+            );
+            None
+        }
+        Err(_) => None, // Null or other error, silently return None
+    }
+}
+
 fn append_value(
     builder: &mut Box<dyn ArrayBuilder>,
     row: &sqlx::postgres::PgRow,
@@ -364,47 +392,47 @@ fn append_value(
                 .as_any_mut()
                 .downcast_mut::<BooleanBuilder>()
                 .unwrap();
-            b.append_option(row.try_get::<bool, _>(idx).ok());
+            b.append_option(try_get_with_warning::<bool>(row, idx, "bool"));
         }
         DataType::Int16 => {
             let b = builder.as_any_mut().downcast_mut::<Int16Builder>().unwrap();
-            b.append_option(row.try_get::<i16, _>(idx).ok());
+            b.append_option(try_get_with_warning::<i16>(row, idx, "i16"));
         }
         DataType::Int32 => {
             let b = builder.as_any_mut().downcast_mut::<Int32Builder>().unwrap();
-            b.append_option(row.try_get::<i32, _>(idx).ok());
+            b.append_option(try_get_with_warning::<i32>(row, idx, "i32"));
         }
         DataType::Int64 => {
             let b = builder.as_any_mut().downcast_mut::<Int64Builder>().unwrap();
-            b.append_option(row.try_get::<i64, _>(idx).ok());
+            b.append_option(try_get_with_warning::<i64>(row, idx, "i64"));
         }
         DataType::Float32 => {
             let b = builder
                 .as_any_mut()
                 .downcast_mut::<Float32Builder>()
                 .unwrap();
-            b.append_option(row.try_get::<f32, _>(idx).ok());
+            b.append_option(try_get_with_warning::<f32>(row, idx, "f32"));
         }
         DataType::Float64 => {
             let b = builder
                 .as_any_mut()
                 .downcast_mut::<Float64Builder>()
                 .unwrap();
-            b.append_option(row.try_get::<f64, _>(idx).ok());
+            b.append_option(try_get_with_warning::<f64>(row, idx, "f64"));
         }
         DataType::Utf8 => {
             let b = builder
                 .as_any_mut()
                 .downcast_mut::<StringBuilder>()
                 .unwrap();
-            b.append_option(row.try_get::<String, _>(idx).ok());
+            b.append_option(try_get_with_warning::<String>(row, idx, "String"));
         }
         DataType::Binary => {
             let b = builder
                 .as_any_mut()
                 .downcast_mut::<BinaryBuilder>()
                 .unwrap();
-            b.append_option(row.try_get::<Vec<u8>, _>(idx).ok());
+            b.append_option(try_get_with_warning::<Vec<u8>>(row, idx, "Vec<u8>"));
         }
         DataType::Date32 => {
             let b = builder
@@ -412,7 +440,7 @@ fn append_value(
                 .downcast_mut::<Date32Builder>()
                 .unwrap();
             // chrono::NaiveDate -> days since epoch
-            if let Ok(date) = row.try_get::<chrono::NaiveDate, _>(idx) {
+            if let Some(date) = try_get_with_warning::<chrono::NaiveDate>(row, idx, "NaiveDate") {
                 let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
                 let days = (date - epoch).num_days() as i32;
                 b.append_value(days);
@@ -426,7 +454,9 @@ fn append_value(
                 .downcast_mut::<TimestampMicrosecondBuilder>()
                 .unwrap();
             // chrono::NaiveDateTime -> microseconds since epoch
-            if let Ok(ts) = row.try_get::<chrono::NaiveDateTime, _>(idx) {
+            if let Some(ts) =
+                try_get_with_warning::<chrono::NaiveDateTime>(row, idx, "NaiveDateTime")
+            {
                 let micros = ts.and_utc().timestamp_micros();
                 b.append_value(micros);
             } else {
@@ -439,7 +469,7 @@ fn append_value(
                 .as_any_mut()
                 .downcast_mut::<StringBuilder>()
                 .unwrap();
-            b.append_option(row.try_get::<String, _>(idx).ok());
+            b.append_option(try_get_with_warning::<String>(row, idx, "String"));
         }
     }
     Ok(())

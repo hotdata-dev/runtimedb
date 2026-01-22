@@ -11,11 +11,10 @@ use iceberg_catalog_rest::RestCatalogBuilder;
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::datafetch::batch_writer::BatchWriter;
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::secrets::SecretManager;
-use crate::source::{IcebergCatalogType, Source};
-
-use super::StreamingParquetWriter;
+use crate::source::{AwsCredentials, Credential, IcebergCatalogType, Source};
 
 // Re-exports of arrow 55 for iceberg compatibility
 use arrow_array_55 as arrow55_array;
@@ -29,40 +28,14 @@ const REST_TOKEN: &str = "token";
 // Property constants for Glue catalog
 const GLUE_WAREHOUSE: &str = "warehouse";
 const AWS_REGION: &str = "region_name";
-
-/// Resolve the credential (token) from the source using the secret manager.
-/// Returns None for Glue (uses IAM) or REST catalogs with Credential::None.
-async fn resolve_token(
-    source: &Source,
-    secrets: &SecretManager,
-) -> Result<Option<String>, DataFetchError> {
-    match source.credential() {
-        None => Ok(None),
-        Some(credential) => {
-            // For Credential::None, resolve() returns an error - treat as no token
-            match credential.resolve(secrets).await {
-                Ok(value) => Ok(Some(value)),
-                Err(e) => {
-                    if e.to_string().contains("no credential configured") {
-                        Ok(None)
-                    } else {
-                        Err(DataFetchError::Connection(format!(
-                            "Failed to resolve credential: {}",
-                            e
-                        )))
-                    }
-                }
-            }
-        }
-    }
-}
+const AWS_ACCESS_KEY_ID: &str = "aws_access_key_id";
+const AWS_SECRET_ACCESS_KEY: &str = "aws_secret_access_key";
+const AWS_SESSION_TOKEN: &str = "aws_session_token";
 
 /// Build an Iceberg catalog from source configuration.
-/// For REST catalogs, the token parameter should be the bearer token.
-/// For Glue catalogs, authentication is handled via IAM/environment credentials.
 async fn build_catalog(
     source: &Source,
-    token: Option<&str>,
+    secrets: &SecretManager,
 ) -> Result<Arc<dyn Catalog>, DataFetchError> {
     let (catalog_type, warehouse) = match source {
         Source::Iceberg {
@@ -74,14 +47,18 @@ async fn build_catalog(
     };
 
     match catalog_type {
-        IcebergCatalogType::Rest { uri, .. } => {
+        IcebergCatalogType::Rest { uri, credential } => {
             let mut props = HashMap::new();
             props.insert(REST_URI.to_string(), uri.clone());
             props.insert(REST_WAREHOUSE.to_string(), warehouse.clone());
 
-            // Add auth token if provided
-            if let Some(t) = token {
-                props.insert(REST_TOKEN.to_string(), t.to_string());
+            // Add auth token if credential provided
+            if let Credential::SecretRef { .. } = credential {
+                let token = credential
+                    .resolve(secrets)
+                    .await
+                    .map_err(|e| DataFetchError::Connection(e.to_string()))?;
+                props.insert(REST_TOKEN.to_string(), token);
             }
 
             let catalog = RestCatalogBuilder::default()
@@ -92,11 +69,29 @@ async fn build_catalog(
             Ok(Arc::new(catalog))
         }
 
-        IcebergCatalogType::Glue { region } => {
-            // Glue uses IAM/environment credentials - no explicit token needed
+        IcebergCatalogType::Glue { region, credential } => {
             let mut props = HashMap::new();
             props.insert(GLUE_WAREHOUSE.to_string(), warehouse.clone());
             props.insert(AWS_REGION.to_string(), region.clone());
+
+            // If credential provided, use explicit keys; otherwise use IAM role
+            if let Credential::SecretRef { .. } = credential {
+                let creds_json = credential
+                    .resolve(secrets)
+                    .await
+                    .map_err(|e| DataFetchError::Connection(e.to_string()))?;
+                let aws_creds: AwsCredentials = serde_json::from_str(&creds_json).map_err(|e| {
+                    DataFetchError::Connection(format!("Invalid AWS credentials JSON: {}", e))
+                })?;
+                props.insert(AWS_ACCESS_KEY_ID.to_string(), aws_creds.access_key_id);
+                props.insert(
+                    AWS_SECRET_ACCESS_KEY.to_string(),
+                    aws_creds.secret_access_key,
+                );
+                if let Some(session_token) = aws_creds.session_token {
+                    props.insert(AWS_SESSION_TOKEN.to_string(), session_token);
+                }
+            }
 
             let catalog = GlueCatalogBuilder::default()
                 .load("glue", props)
@@ -110,13 +105,11 @@ async fn build_catalog(
 
 /// Discover tables and columns from an Iceberg catalog.
 /// Recursively discovers nested namespaces.
-/// For REST catalogs, credentials are resolved via SecretManager. For Glue, uses IAM/env.
 pub async fn discover_tables(
     source: &Source,
     secrets: &SecretManager,
 ) -> Result<Vec<TableMetadata>, DataFetchError> {
-    let token = resolve_token(source, secrets).await?;
-    let catalog = build_catalog(source, token.as_deref()).await?;
+    let catalog = build_catalog(source, secrets).await?;
 
     // Get namespace filter or discover all recursively
     let namespaces = match source {
@@ -210,19 +203,17 @@ fn discover_all_namespaces<'a>(
 ///
 /// Note: Due to arrow version mismatch between iceberg (arrow 55) and datafusion (arrow 56),
 /// we use IPC serialization to bridge the versions.
-/// For REST catalogs, credentials are resolved via SecretManager. For Glue, uses IAM/env.
 pub async fn fetch_table(
     source: &Source,
     secrets: &SecretManager,
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
-    writer: &mut StreamingParquetWriter,
+    writer: &mut dyn BatchWriter,
 ) -> Result<(), DataFetchError> {
     use futures::StreamExt;
 
-    let token = resolve_token(source, secrets).await?;
-    let catalog = build_catalog(source, token.as_deref()).await?;
+    let catalog = build_catalog(source, secrets).await?;
 
     let parts: Vec<&str> = schema.split('.').collect();
     let namespace =

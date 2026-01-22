@@ -1,6 +1,31 @@
 use crate::secrets::SecretManager;
 use serde::{Deserialize, Serialize};
 
+/// AWS credentials for services like Glue, S3, etc.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AwsCredentials {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_token: Option<String>,
+}
+
+/// Iceberg catalog type configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum IcebergCatalogType {
+    Rest {
+        uri: String,
+        #[serde(default)]
+        credential: Credential,
+    },
+    Glue {
+        region: String,
+        #[serde(default)]
+        credential: Credential,
+    },
+}
+
 /// Credential storage - either no credential or a reference to a stored secret.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -40,27 +65,11 @@ impl Credential {
     }
 }
 
-/// Iceberg catalog type configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum IcebergCatalogType {
-    Rest {
-        uri: String,
-        #[serde(default)]
-        credential: Credential,
-    },
-    Glue {
-        region: String,
-        // No credential field - uses IAM/environment credentials
-    },
-}
-
 /// Represents a data source connection with typed configuration.
 /// The `type` field is used as the JSON discriminator via serde's tag attribute.
 ///
 /// Credentials are stored as secrets and referenced via the `credential` field.
 /// Use `credential().resolve(secrets)` to obtain the plaintext value.
-/// The connection's `secret_id` column mirrors the credential ID for DB queryability.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Source {
@@ -91,7 +100,6 @@ pub enum Source {
     },
     Duckdb {
         path: String,
-        // No credential - local file access doesn't require authentication
     },
     Iceberg {
         catalog_type: IcebergCatalogType,
@@ -133,30 +141,28 @@ impl Source {
         }
     }
 
-    /// Returns the credential for this source, if any.
-    /// Returns None for sources that don't support credentials (DuckDB, Iceberg Glue).
-    pub fn credential(&self) -> Option<&Credential> {
+    /// Access the credential field.
+    pub fn credential(&self) -> &Credential {
         match self {
-            Source::Postgres { credential, .. } => Some(credential),
-            Source::Snowflake { credential, .. } => Some(credential),
-            Source::Motherduck { credential, .. } => Some(credential),
-            Source::Duckdb { .. } => None,
+            Source::Postgres { credential, .. } => credential,
+            Source::Snowflake { credential, .. } => credential,
+            Source::Motherduck { credential, .. } => credential,
+            Source::Duckdb { .. } => &Credential::None,
             Source::Iceberg { catalog_type, .. } => match catalog_type {
-                IcebergCatalogType::Rest { credential, .. } => Some(credential),
-                IcebergCatalogType::Glue { .. } => None,
+                IcebergCatalogType::Rest { credential, .. } => credential,
+                IcebergCatalogType::Glue { credential, .. } => credential,
             },
-            Source::Mysql { credential, .. } => Some(credential),
+            Source::Mysql { credential, .. } => credential,
         }
     }
 
     /// Get the secret ID from this source's credential, if any.
     /// This is used to store the secret_id in the connections table for queryability.
     pub fn secret_id(&self) -> Option<&str> {
-        self.credential().and_then(|c| c.secret_id())
+        self.credential().secret_id()
     }
 
     /// Return a new Source with the given credential set.
-    /// For sources that don't support credentials (DuckDB, Iceberg Glue), returns self unchanged.
     pub fn with_credential(self, credential: Credential) -> Self {
         match self {
             Source::Postgres {
@@ -193,7 +199,7 @@ impl Source {
                 database,
                 credential,
             },
-            Source::Duckdb { path } => Source::Duckdb { path }, // No credential support
+            Source::Duckdb { path } => Source::Duckdb { path },
             Source::Iceberg {
                 catalog_type,
                 warehouse,
@@ -203,7 +209,9 @@ impl Source {
                     IcebergCatalogType::Rest { uri, .. } => {
                         IcebergCatalogType::Rest { uri, credential }
                     }
-                    glue @ IcebergCatalogType::Glue { .. } => glue, // No credential support - uses IAM
+                    IcebergCatalogType::Glue { region, .. } => {
+                        IcebergCatalogType::Glue { region, credential }
+                    }
                 };
                 Source::Iceberg {
                     catalog_type,
@@ -336,7 +344,6 @@ mod tests {
         let json = serde_json::to_string(&source).unwrap();
         assert!(json.contains(r#""type":"duckdb""#));
         assert!(json.contains(r#""path":"/path/to/db.duckdb""#));
-        assert!(!json.contains(r#""credential""#));
 
         let parsed: Source = serde_json::from_str(&json).unwrap();
         assert_eq!(source, parsed);
@@ -407,7 +414,7 @@ mod tests {
 
     #[test]
     fn test_credential_accessor() {
-        let postgres = Source::Postgres {
+        let with_secret = Source::Postgres {
             host: "h".to_string(),
             port: 5432,
             user: "u".to_string(),
@@ -416,18 +423,16 @@ mod tests {
                 id: "secr_test".to_string(),
             },
         };
-        assert_eq!(
-            postgres.credential(),
-            Some(&Credential::SecretRef {
-                id: "secr_test".to_string()
-            })
-        );
-        assert_eq!(postgres.secret_id(), Some("secr_test"));
+        assert!(matches!(
+            with_secret.credential(),
+            Credential::SecretRef { id } if id == "secr_test"
+        ));
+        assert_eq!(with_secret.secret_id(), Some("secr_test"));
 
         let duckdb = Source::Duckdb {
             path: "/p".to_string(),
         };
-        assert_eq!(duckdb.credential(), None);
+        assert!(matches!(duckdb.credential(), Credential::None));
         assert_eq!(duckdb.secret_id(), None);
     }
 
@@ -460,6 +465,9 @@ mod tests {
         let source = Source::Iceberg {
             catalog_type: IcebergCatalogType::Glue {
                 region: "us-east-1".to_string(),
+                credential: Credential::SecretRef {
+                    id: "secr_aws".to_string(),
+                },
             },
             warehouse: "s3://data-lake/iceberg".to_string(),
             namespace: Some("analytics.events".to_string()),
@@ -471,7 +479,6 @@ mod tests {
         assert!(json.contains(r#""region":"us-east-1""#));
         assert!(json.contains(r#""warehouse":"s3://data-lake/iceberg""#));
         assert!(json.contains(r#""namespace":"analytics.events""#));
-        assert!(!json.contains(r#""credential""#)); // Glue has no credential field
 
         let parsed: Source = serde_json::from_str(&json).unwrap();
         assert_eq!(source, parsed);
@@ -513,6 +520,7 @@ mod tests {
         let iceberg = Source::Iceberg {
             catalog_type: IcebergCatalogType::Glue {
                 region: "us-west-2".to_string(),
+                credential: Credential::None,
             },
             warehouse: "s3://bucket/path".to_string(),
             namespace: Some("my_ns".to_string()),
@@ -523,8 +531,8 @@ mod tests {
 
     #[test]
     fn test_iceberg_credential_accessor() {
-        // REST catalog has credential
-        let rest = Source::Iceberg {
+        // REST catalog with credential
+        let rest_with_cred = Source::Iceberg {
             catalog_type: IcebergCatalogType::Rest {
                 uri: "http://localhost".to_string(),
                 credential: Credential::SecretRef {
@@ -534,18 +542,70 @@ mod tests {
             warehouse: "s3://b/p".to_string(),
             namespace: None,
         };
-        assert_eq!(rest.secret_id(), Some("secr_rest"));
+        assert!(matches!(
+            rest_with_cred.credential(),
+            Credential::SecretRef { id } if id == "secr_rest"
+        ));
+        assert_eq!(rest_with_cred.secret_id(), Some("secr_rest"));
 
-        // Glue catalog has no credential (uses IAM)
-        let glue = Source::Iceberg {
+        // Glue catalog with credential
+        let glue_with_cred = Source::Iceberg {
             catalog_type: IcebergCatalogType::Glue {
                 region: "us-east-1".to_string(),
+                credential: Credential::SecretRef {
+                    id: "secr_aws".to_string(),
+                },
             },
             warehouse: "s3://b/p".to_string(),
             namespace: None,
         };
-        assert_eq!(glue.credential(), None);
-        assert_eq!(glue.secret_id(), None);
+        assert!(matches!(
+            glue_with_cred.credential(),
+            Credential::SecretRef { id } if id == "secr_aws"
+        ));
+
+        // REST catalog without credential
+        let rest_no_cred = Source::Iceberg {
+            catalog_type: IcebergCatalogType::Rest {
+                uri: "http://localhost".to_string(),
+                credential: Credential::None,
+            },
+            warehouse: "s3://b/p".to_string(),
+            namespace: None,
+        };
+        assert!(matches!(rest_no_cred.credential(), Credential::None));
+    }
+
+    #[test]
+    fn test_aws_credentials_serialization() {
+        let creds = AwsCredentials {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            session_token: Some("FwoGZXIvYXdzEB...".to_string()),
+        };
+
+        let json = serde_json::to_string(&creds).unwrap();
+        assert!(json.contains(r#""access_key_id":"AKIAIOSFODNN7EXAMPLE""#));
+        assert!(json.contains(r#""secret_access_key""#));
+        assert!(json.contains(r#""session_token""#));
+
+        let parsed: AwsCredentials = serde_json::from_str(&json).unwrap();
+        assert_eq!(creds, parsed);
+    }
+
+    #[test]
+    fn test_aws_credentials_without_session_token() {
+        let creds = AwsCredentials {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            session_token: None,
+        };
+
+        let json = serde_json::to_string(&creds).unwrap();
+        assert!(!json.contains(r#""session_token""#));
+
+        let parsed: AwsCredentials = serde_json::from_str(&json).unwrap();
+        assert_eq!(creds, parsed);
     }
 
     #[test]
@@ -585,7 +645,7 @@ mod tests {
 
     #[test]
     fn test_mysql_credential_accessor() {
-        let mysql = Source::Mysql {
+        let with_secret = Source::Mysql {
             host: "h".to_string(),
             port: 3306,
             user: "u".to_string(),
@@ -594,7 +654,20 @@ mod tests {
                 id: "secr_mysql".to_string(),
             },
         };
-        assert_eq!(mysql.secret_id(), Some("secr_mysql"));
+        assert!(matches!(
+            with_secret.credential(),
+            Credential::SecretRef { id } if id == "secr_mysql"
+        ));
+        assert_eq!(with_secret.secret_id(), Some("secr_mysql"));
+
+        let without_cred = Source::Mysql {
+            host: "h".to_string(),
+            port: 3306,
+            user: "u".to_string(),
+            database: "d".to_string(),
+            credential: Credential::None,
+        };
+        assert!(matches!(without_cred.credential(), Credential::None));
     }
 
     #[test]

@@ -4,46 +4,17 @@ use duckdb::Connection;
 use std::collections::HashMap;
 use urlencoding::encode;
 
+use crate::datafetch::batch_writer::BatchWriter;
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::secrets::SecretManager;
 use crate::source::Source;
-
-use super::StreamingParquetWriter;
-
-/// Resolve the credential (token) from the source using the secret manager.
-/// Returns None for DuckDB (no auth needed), or the token for Motherduck.
-async fn resolve_token(
-    source: &Source,
-    secrets: &SecretManager,
-) -> Result<Option<String>, DataFetchError> {
-    match source.credential() {
-        None => Ok(None),
-        Some(credential) => {
-            // For Credential::None, resolve() returns an error - treat as no token
-            match credential.resolve(secrets).await {
-                Ok(value) => Ok(Some(value)),
-                Err(e) => {
-                    if e.to_string().contains("no credential configured") {
-                        Ok(None)
-                    } else {
-                        Err(DataFetchError::Connection(format!(
-                            "Failed to resolve credential: {}",
-                            e
-                        )))
-                    }
-                }
-            }
-        }
-    }
-}
 
 /// Discover tables and columns from DuckDB/MotherDuck
 pub async fn discover_tables(
     source: &Source,
     secrets: &SecretManager,
 ) -> Result<Vec<TableMetadata>, DataFetchError> {
-    let token = resolve_token(source, secrets).await?;
-    let connection_string = resolve_connection_string(source, token.as_deref())?;
+    let connection_string = resolve_connection_string(source, secrets).await?;
     let catalog = source.catalog().map(|s| s.to_string());
 
     tokio::task::spawn_blocking(move || {
@@ -53,22 +24,25 @@ pub async fn discover_tables(
     .map_err(|e| DataFetchError::Connection(e.to_string()))?
 }
 
-/// Build connection string for DuckDB or Motherduck source.
-/// For Motherduck, the token parameter must be provided.
-pub fn resolve_connection_string(
+/// Resolve credentials and build connection string for DuckDB or Motherduck source.
+pub async fn resolve_connection_string(
     source: &Source,
-    token: Option<&str>,
+    secrets: &SecretManager,
 ) -> Result<String, DataFetchError> {
     match source {
         Source::Duckdb { path } => Ok(path.clone()),
-        Source::Motherduck { database, .. } => {
-            let token = token.ok_or_else(|| {
-                DataFetchError::Connection("Token required for Motherduck".to_string())
-            })?;
+        Source::Motherduck {
+            database,
+            credential,
+        } => {
+            let token = credential
+                .resolve(secrets)
+                .await
+                .map_err(|e| DataFetchError::Connection(e.to_string()))?;
             Ok(format!(
                 "md:{}?motherduck_token={}",
                 encode(database),
-                encode(token)
+                encode(&token)
             ))
         }
         _ => Err(DataFetchError::Connection(
@@ -168,13 +142,12 @@ pub async fn fetch_table(
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
-    writer: &mut StreamingParquetWriter,
+    writer: &mut dyn BatchWriter,
 ) -> Result<(), DataFetchError> {
     use datafusion::arrow::record_batch::RecordBatch;
     use std::sync::Arc;
 
-    let token = resolve_token(source, secrets).await?;
-    let connection_string = resolve_connection_string(source, token.as_deref())?;
+    let connection_string = resolve_connection_string(source, secrets).await?;
     let schema = schema.to_string();
     let table = table.to_string();
 

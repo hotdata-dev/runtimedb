@@ -13,11 +13,10 @@ use sqlx::{ConnectOptions, Row};
 use std::sync::Arc;
 use tracing::warn;
 
+use crate::datafetch::batch_writer::BatchWriter;
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::secrets::SecretManager;
 use crate::source::Source;
-
-use super::StreamingParquetWriter;
 
 /// Build MySQL connection options from source configuration and resolved password.
 /// Uses MySqlConnectOptions to avoid embedding credentials in a URL string.
@@ -36,19 +35,19 @@ fn build_connect_options(
         .database(database)
 }
 
-/// Build connection options for a MySQL source with a pre-resolved password.
-pub fn resolve_connect_options(
+/// Resolve credentials and build connection options for a MySQL source.
+pub async fn resolve_connect_options(
     source: &Source,
-    password: &str,
+    secrets: &SecretManager,
 ) -> Result<MySqlConnectOptions, DataFetchError> {
-    let (host, port, user, database) = match source {
+    let (host, port, user, database, credential) = match source {
         Source::Mysql {
             host,
             port,
             user,
             database,
-            ..
-        } => (host, *port, user, database),
+            credential,
+        } => (host, *port, user, database, credential),
         _ => {
             return Err(DataFetchError::Connection(
                 "Expected MySQL source".to_string(),
@@ -56,7 +55,12 @@ pub fn resolve_connect_options(
         }
     };
 
-    Ok(build_connect_options(host, port, user, database, password))
+    let password = credential
+        .resolve(secrets)
+        .await
+        .map_err(|e| DataFetchError::Connection(e.to_string()))?;
+
+    Ok(build_connect_options(host, port, user, database, &password))
 }
 
 /// Connect to MySQL with automatic SSL retry.
@@ -80,28 +84,12 @@ async fn connect_with_ssl_retry(
     }
 }
 
-/// Resolve the credential (password) from the source using the secret manager.
-async fn resolve_password(
-    source: &Source,
-    secrets: &SecretManager,
-) -> Result<String, DataFetchError> {
-    let credential = source
-        .credential()
-        .ok_or_else(|| DataFetchError::Connection("Password required for MySQL".to_string()))?;
-
-    credential
-        .resolve(secrets)
-        .await
-        .map_err(|e| DataFetchError::Connection(format!("Failed to resolve credential: {}", e)))
-}
-
 /// Discover tables and columns from MySQL
 pub async fn discover_tables(
     source: &Source,
     secrets: &SecretManager,
 ) -> Result<Vec<TableMetadata>, DataFetchError> {
-    let password = resolve_password(source, secrets).await?;
-    let options = resolve_connect_options(source, &password)?;
+    let options = resolve_connect_options(source, secrets).await?;
     let mut conn = connect_with_ssl_retry(options).await?;
 
     // Get the database name for filtering
@@ -184,10 +172,9 @@ pub async fn fetch_table(
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
-    writer: &mut StreamingParquetWriter,
+    writer: &mut dyn BatchWriter,
 ) -> Result<(), DataFetchError> {
-    let password = resolve_password(source, secrets).await?;
-    let options = resolve_connect_options(source, &password)?;
+    let options = resolve_connect_options(source, secrets).await?;
     let mut conn = connect_with_ssl_retry(options).await?;
 
     // Build query - use backticks for MySQL identifier escaping

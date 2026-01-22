@@ -9,14 +9,12 @@ pub use parquet_writer::StreamingParquetWriter;
 
 use async_trait::async_trait;
 
+use crate::datafetch::batch_writer::BatchWriter;
 use crate::datafetch::{DataFetchError, DataFetcher, TableMetadata};
 use crate::secrets::SecretManager;
 use crate::source::Source;
 
-/// Native Rust driver-based data fetcher.
-///
-/// This is a thin dispatcher that delegates to source-specific driver modules.
-/// Each driver module is responsible for resolving credentials via the SecretManager.
+/// Native Rust driver-based data fetcher
 #[derive(Debug, Default)]
 pub struct NativeFetcher;
 
@@ -51,7 +49,7 @@ impl DataFetcher for NativeFetcher {
         catalog: Option<&str>,
         schema: &str,
         table: &str,
-        writer: &mut StreamingParquetWriter,
+        writer: &mut dyn BatchWriter,
     ) -> Result<(), DataFetchError> {
         match source {
             Source::Duckdb { .. } | Source::Motherduck { .. } => {

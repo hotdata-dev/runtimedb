@@ -194,7 +194,7 @@ mod mysql_container_tests {
     #[tokio::test]
     async fn test_mysql_fetch_table() {
         use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-        use runtimedb::datafetch::StreamingParquetWriter;
+        use runtimedb::datafetch::{BatchWriter, StreamingParquetWriter};
         use std::fs::File;
 
         let temp_dir = TempDir::new().unwrap();
@@ -258,7 +258,7 @@ mod mysql_container_tests {
             .await;
         assert!(result.is_ok(), "Fetch should succeed: {:?}", result.err());
 
-        writer.close().unwrap();
+        Box::new(writer).close().unwrap();
 
         // Verify parquet file
         let file = File::open(&output_path).unwrap();
@@ -292,7 +292,7 @@ mod mysql_container_tests {
     #[tokio::test]
     async fn test_mysql_fetch_preserves_nullable_flags() {
         use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-        use runtimedb::datafetch::StreamingParquetWriter;
+        use runtimedb::datafetch::{BatchWriter, StreamingParquetWriter};
         use std::fs::File;
 
         let temp_dir = TempDir::new().unwrap();
@@ -362,7 +362,7 @@ mod mysql_container_tests {
             .await;
         assert!(result.is_ok(), "Fetch should succeed: {:?}", result.err());
 
-        writer.close().unwrap();
+        Box::new(writer).close().unwrap();
 
         // Verify parquet file schema has correct nullable flags
         let file = File::open(&output_path).unwrap();
@@ -443,7 +443,7 @@ mod postgres_container_tests {
     #[tokio::test]
     async fn test_postgres_fetch_preserves_nullable_flags() {
         use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-        use runtimedb::datafetch::StreamingParquetWriter;
+        use runtimedb::datafetch::{BatchWriter, StreamingParquetWriter};
         use std::fs::File;
 
         let temp_dir = TempDir::new().unwrap();
@@ -516,7 +516,7 @@ mod postgres_container_tests {
             .await;
         assert!(result.is_ok(), "Fetch should succeed: {:?}", result.err());
 
-        writer.close().unwrap();
+        Box::new(writer).close().unwrap();
 
         // Verify parquet file schema has correct nullable flags
         let file = File::open(&output_path).unwrap();
@@ -566,12 +566,255 @@ mod postgres_container_tests {
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 3, "Should have 3 rows");
     }
+
+    /// Test that NUMERIC/DECIMAL columns are correctly fetched from PostgreSQL.
+    /// This is a regression test for issue #63: NUMERIC columns declared as NOT NULL
+    /// were incorrectly producing null values during fetch, causing Arrow to throw
+    /// "Column is declared as non-nullable but contains null values" error.
+    ///
+    /// The root cause was that sqlx cannot decode PostgreSQL NUMERIC directly to
+    /// Rust String, and the .ok() pattern silently converted decode errors to None.
+    #[tokio::test]
+    async fn test_postgres_fetch_numeric_not_null_columns() {
+        use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use runtimedb::datafetch::{BatchWriter, StreamingParquetWriter};
+        use std::fs::File;
+
+        let temp_dir = TempDir::new().unwrap();
+        let secrets =
+            create_test_secret_manager_with_password(&temp_dir, "pg-pass", TEST_PASSWORD).await;
+
+        // Start PostgreSQL container
+        let container = Postgres::default()
+            .with_tag("15")
+            .with_env_var("POSTGRES_PASSWORD", TEST_PASSWORD)
+            .start()
+            .await
+            .expect("Failed to start postgres");
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+
+        let conn_str = format!(
+            "postgres://postgres:{}@localhost:{}/postgres",
+            TEST_PASSWORD, port
+        );
+        let pool = sqlx::PgPool::connect(&conn_str).await.unwrap();
+
+        sqlx::query("CREATE SCHEMA testdb")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Create table with NUMERIC/DECIMAL columns that are NOT NULL
+        // This mimics TPC-H partsupp.ps_supplycost and customer.c_acctbal
+        sqlx::query(
+            "CREATE TABLE testdb.partsupp (
+                ps_partkey INTEGER NOT NULL,
+                ps_suppkey INTEGER NOT NULL,
+                ps_supplycost NUMERIC(15,2) NOT NULL,
+                ps_comment VARCHAR(199)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Insert data - all ps_supplycost values are non-null as required by schema
+        sqlx::query(
+            "INSERT INTO testdb.partsupp VALUES
+                (1, 1, 100.50, 'part one'),
+                (2, 1, 200.75, 'part two'),
+                (3, 2, 350.00, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        // Fetch to parquet - this should succeed without
+        // "Column is declared as non-nullable but contains null values" error
+        let fetcher = NativeFetcher::new();
+        let source = Source::Postgres {
+            host: "localhost".to_string(),
+            port,
+            user: "postgres".to_string(),
+            database: "postgres".to_string(),
+            credential: runtimedb::source::Credential::SecretRef {
+                name: "pg-pass".to_string(),
+            },
+        };
+
+        let output_path = temp_dir.path().join("partsupp_output.parquet");
+        let mut writer = StreamingParquetWriter::new(output_path.clone());
+
+        let result = fetcher
+            .fetch_table(&source, &secrets, None, "testdb", "partsupp", &mut writer)
+            .await;
+        assert!(
+            result.is_ok(),
+            "Fetch should succeed for NUMERIC NOT NULL columns: {:?}",
+            result.err()
+        );
+
+        Box::new(writer).close().unwrap();
+
+        // Verify parquet file has correct data
+        let file = File::open(&output_path).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let mut batches = Vec::new();
+        for batch_result in reader {
+            batches.push(batch_result.unwrap());
+        }
+
+        // Verify schema
+        let schema = batches[0].schema();
+        let ps_supplycost = schema.field_with_name("ps_supplycost").unwrap();
+        assert!(
+            !ps_supplycost.is_nullable(),
+            "ps_supplycost should be NOT NULL"
+        );
+
+        // Verify we have all 3 rows
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 3, "Should have 3 rows");
+    }
+
+    /// Test that nullable NUMERIC columns correctly handle NULL values.
+    /// This complements test_postgres_fetch_numeric_not_null_columns by verifying
+    /// that the TEXT cast fix doesn't break tables where NUMERIC columns can
+    /// legitimately contain NULL values.
+    #[tokio::test]
+    async fn test_postgres_fetch_numeric_nullable_columns() {
+        use datafusion::arrow::array::{Array, StringArray};
+        use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use runtimedb::datafetch::{BatchWriter, StreamingParquetWriter};
+        use std::fs::File;
+
+        let temp_dir = TempDir::new().unwrap();
+        let secrets =
+            create_test_secret_manager_with_password(&temp_dir, "pg-pass", TEST_PASSWORD).await;
+
+        // Start PostgreSQL container
+        let container = Postgres::default()
+            .with_tag("15")
+            .with_env_var("POSTGRES_PASSWORD", TEST_PASSWORD)
+            .start()
+            .await
+            .expect("Failed to start postgres");
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+
+        let conn_str = format!(
+            "postgres://postgres:{}@localhost:{}/postgres",
+            TEST_PASSWORD, port
+        );
+        let pool = sqlx::PgPool::connect(&conn_str).await.unwrap();
+
+        sqlx::query("CREATE SCHEMA testdb")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Create table with nullable NUMERIC column
+        sqlx::query(
+            "CREATE TABLE testdb.prices (
+                id INTEGER NOT NULL,
+                price NUMERIC(10,2),
+                discount NUMERIC(5,2)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Insert data with actual NULL values in NUMERIC columns
+        sqlx::query(
+            "INSERT INTO testdb.prices VALUES
+                (1, 99.99, 10.00),
+                (2, NULL, 5.50),
+                (3, 149.99, NULL),
+                (4, NULL, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let fetcher = NativeFetcher::new();
+        let source = Source::Postgres {
+            host: "localhost".to_string(),
+            port,
+            user: "postgres".to_string(),
+            database: "postgres".to_string(),
+            credential: runtimedb::source::Credential::SecretRef {
+                name: "pg-pass".to_string(),
+            },
+        };
+
+        let output_path = temp_dir.path().join("prices_output.parquet");
+        let mut writer = StreamingParquetWriter::new(output_path.clone());
+
+        let result = fetcher
+            .fetch_table(&source, &secrets, None, "testdb", "prices", &mut writer)
+            .await;
+        assert!(
+            result.is_ok(),
+            "Fetch should succeed for nullable NUMERIC columns: {:?}",
+            result.err()
+        );
+
+        Box::new(writer).close().unwrap();
+
+        // Verify parquet file has correct data
+        let file = File::open(&output_path).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let mut batches = Vec::new();
+        for batch_result in reader {
+            batches.push(batch_result.unwrap());
+        }
+
+        // Verify schema - NUMERIC columns should be nullable
+        let schema = batches[0].schema();
+        let price = schema.field_with_name("price").unwrap();
+        assert!(price.is_nullable(), "price should be nullable");
+        let discount = schema.field_with_name("discount").unwrap();
+        assert!(discount.is_nullable(), "discount should be nullable");
+
+        // Verify we have all 4 rows
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 4, "Should have 4 rows");
+
+        // Verify NULL values are correctly preserved
+        let batch = &batches[0];
+        let price_col = batch
+            .column_by_name("price")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        // Row 0: 99.99, Row 1: NULL, Row 2: 149.99, Row 3: NULL
+        assert!(!price_col.is_null(0), "Row 0 price should not be null");
+        assert!(price_col.is_null(1), "Row 1 price should be null");
+        assert!(!price_col.is_null(2), "Row 2 price should not be null");
+        assert!(price_col.is_null(3), "Row 3 price should be null");
+
+        // Verify actual values
+        assert_eq!(price_col.value(0), "99.99");
+        assert_eq!(price_col.value(2), "149.99");
+    }
 }
 
 #[tokio::test]
 async fn test_duckdb_fetch_table() {
     use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    use runtimedb::datafetch::StreamingParquetWriter;
+    use runtimedb::datafetch::{BatchWriter, StreamingParquetWriter};
     use std::fs::File;
 
     let temp_dir = TempDir::new().unwrap();
@@ -626,7 +869,7 @@ async fn test_duckdb_fetch_table() {
         .await;
     assert!(result.is_ok(), "Fetch should succeed: {:?}", result.err());
 
-    writer.close().unwrap();
+    Box::new(writer).close().unwrap();
 
     // Read back the parquet and verify data
     let file = File::open(&output_path).unwrap();
