@@ -280,40 +280,66 @@ pub async fn create_connection_handler(
                             }
 
                             // Generate normalized secret name from connection name
-                            // Format: conn-{normalized_conn}-{field_name}
+                            // Format: conn-{normalized_conn}-{field_name} or conn-{normalized_conn}-{field_name}-{n}
                             // Max secret name length is 128 chars
-                            // "conn-" = 5 chars, "-" = 1 char, field_name max = 12 chars (bearer_token)
-                            // So normalized_conn can be at most 128 - 5 - 1 - 12 = 110 chars
+                            // Reserve space for suffix "-999" (4 chars) for collision handling
+                            // "conn-" = 5 chars, "-" = 1 char, field_name max = 12 chars (bearer_token), "-999" = 4 chars
+                            // So normalized_conn can be at most 128 - 5 - 1 - 12 - 4 = 106 chars
                             let mut normalized_conn = normalize_for_secret(&request.name);
-                            normalized_conn.truncate(110);
-                            let secret_name = format!("conn-{}-{}", normalized_conn, field_name);
+                            normalized_conn.truncate(106);
+                            let base_secret_name =
+                                format!("conn-{}-{}", normalized_conn, field_name);
 
-                            // Create the secret and get the generated ID
-                            let secret_id = engine
-                                .secret_manager()
-                                .create(&secret_name, secret_value.as_bytes())
-                                .await
-                                .map_err(|e| {
-                                    use crate::secrets::SecretError;
-                                    match e {
-                                        SecretError::AlreadyExists(_) => ApiError::conflict(format!(
-                                            "Auto-generated secret '{}' already exists. Use a different connection name or provide an explicit secret_name.",
-                                            secret_name
-                                        )),
-                                        SecretError::InvalidName(_) => ApiError::bad_request(format!(
-                                            "Connection name '{}' produces invalid secret name",
-                                            request.name
-                                        )),
-                                        SecretError::CreationInProgress(_) => ApiError::conflict(format!(
-                                            "Secret '{}' is being created by another request",
-                                            secret_name
-                                        )),
-                                        _ => ApiError::internal_error(format!(
+                            // Try to create the secret, retrying with numeric suffix on collision
+                            let (secret_name, secret_id) = {
+                                use crate::secrets::SecretError;
+
+                                // First try without suffix
+                                match engine
+                                    .secret_manager()
+                                    .create(&base_secret_name, secret_value.as_bytes())
+                                    .await
+                                {
+                                    Ok(id) => (base_secret_name.clone(), id),
+                                    Err(SecretError::AlreadyExists(_)) => {
+                                        // Retry with numeric suffixes
+                                        let mut created = None;
+                                        for i in 1..=999 {
+                                            let suffixed_name =
+                                                format!("{}-{}", base_secret_name, i);
+                                            match engine
+                                                .secret_manager()
+                                                .create(&suffixed_name, secret_value.as_bytes())
+                                                .await
+                                            {
+                                                Ok(id) => {
+                                                    created = Some((suffixed_name, id));
+                                                    break;
+                                                }
+                                                Err(SecretError::AlreadyExists(_)) => continue,
+                                                Err(e) => {
+                                                    return Err(ApiError::internal_error(format!(
+                                                        "Failed to store {}: {}",
+                                                        field_name, e
+                                                    )));
+                                                }
+                                            }
+                                        }
+                                        created.ok_or_else(|| {
+                                            ApiError::internal_error(format!(
+                                                "Failed to generate unique secret name after 1000 attempts for connection '{}'",
+                                                request.name
+                                            ))
+                                        })?
+                                    }
+                                    Err(e) => {
+                                        return Err(ApiError::internal_error(format!(
                                             "Failed to store {}: {}",
                                             field_name, e
-                                        )),
+                                        )));
                                     }
-                                })?;
+                                }
+                            };
 
                             // Set auth type for the source config
                             // For Iceberg REST, auth goes inside catalog_type, not at the top level
