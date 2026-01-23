@@ -1,9 +1,10 @@
 use crate::http::handlers::{
-    create_connection_handler, create_secret_handler, delete_connection_handler,
-    delete_secret_handler, get_connection_handler, get_result_handler, get_secret_handler,
-    health_handler, information_schema_handler, list_connections_handler, list_results_handler,
-    list_secrets_handler, list_uploads, purge_connection_cache_handler, purge_table_cache_handler,
-    query_handler, refresh_handler, update_secret_handler, upload_file,
+    create_connection_handler, create_dataset, create_secret_handler, delete_connection_handler,
+    delete_dataset, delete_secret_handler, get_connection_handler, get_dataset, get_result_handler,
+    get_secret_handler, health_handler, information_schema_handler, list_connections_handler,
+    list_datasets, list_results_handler, list_secrets_handler, list_uploads,
+    purge_connection_cache_handler, purge_table_cache_handler, query_handler, refresh_handler,
+    update_dataset, update_secret_handler, upload_file,
 };
 use crate::RuntimeEngine;
 use axum::routing::{delete, get, post};
@@ -28,6 +29,8 @@ pub const PATH_SECRET: &str = "/secrets/{name}";
 pub const PATH_RESULTS: &str = "/results";
 pub const PATH_RESULT: &str = "/results/{id}";
 pub const PATH_FILES: &str = "/v1/files";
+pub const PATH_DATASETS: &str = "/v1/datasets";
+pub const PATH_DATASET: &str = "/v1/datasets/{id}";
 
 impl AppServer {
     pub fn new(engine: RuntimeEngine) -> Self {
@@ -64,6 +67,11 @@ impl AppServer {
                 .route(PATH_RESULTS, get(list_results_handler))
                 .route(PATH_RESULT, get(get_result_handler))
                 .route(PATH_FILES, post(upload_file).get(list_uploads))
+                .route(PATH_DATASETS, post(create_dataset).get(list_datasets))
+                .route(
+                    PATH_DATASET,
+                    get(get_dataset).put(update_dataset).delete(delete_dataset),
+                )
                 .with_state(engine.clone()),
             engine,
         }

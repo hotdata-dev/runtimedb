@@ -2,11 +2,13 @@ use crate::datafetch::deserialize_arrow_schema;
 use crate::http::error::ApiError;
 use crate::http::models::{
     ColumnInfo, ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse,
-    CreateSecretRequest, CreateSecretResponse, DiscoveryStatus, GetConnectionResponse,
-    GetSecretResponse, InformationSchemaResponse, ListConnectionsResponse, ListResultsResponse,
-    ListSecretsResponse, ListUploadsResponse, QueryRequest, QueryResponse, RefreshRequest,
-    RefreshResponse, ResultInfo, SchemaRefreshResult, SecretMetadataResponse, TableInfo,
-    UpdateSecretRequest, UpdateSecretResponse, UploadInfo, UploadResponse,
+    CreateDatasetRequest, CreateDatasetResponse, CreateSecretRequest, CreateSecretResponse,
+    DatasetSource, DatasetSummary, DiscoveryStatus, GetConnectionResponse, GetDatasetResponse,
+    GetSecretResponse, InformationSchemaResponse, ListConnectionsResponse, ListDatasetsResponse,
+    ListResultsResponse, ListSecretsResponse, ListUploadsResponse, QueryRequest, QueryResponse,
+    RefreshRequest, RefreshResponse, ResultInfo, SchemaRefreshResult, SecretMetadataResponse,
+    TableInfo, UpdateDatasetRequest, UpdateDatasetResponse, UpdateSecretRequest,
+    UpdateSecretResponse, UploadInfo, UploadResponse,
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
 use crate::source::{Credential, Source};
@@ -952,4 +954,197 @@ pub async fn list_uploads(
             })
             .collect(),
     }))
+}
+
+// ==================== Dataset Handlers ====================
+
+/// Maximum inline data size: 1MB
+const MAX_INLINE_DATA_SIZE: usize = 1_048_576;
+
+/// Handler for POST /v1/datasets - Create a dataset
+pub async fn create_dataset(
+    State(engine): State<Arc<RuntimeEngine>>,
+    Json(request): Json<CreateDatasetRequest>,
+) -> Result<(StatusCode, Json<CreateDatasetResponse>), ApiError> {
+    // Validate label is not empty
+    if request.label.trim().is_empty() {
+        return Err(ApiError::bad_request("Dataset label cannot be empty"));
+    }
+
+    // Validate inline data size if present
+    if let DatasetSource::Inline { ref inline } = request.source {
+        if inline.content.len() > MAX_INLINE_DATA_SIZE {
+            return Err(ApiError::bad_request(format!(
+                "Inline data exceeds maximum size of 1MB ({} bytes)",
+                MAX_INLINE_DATA_SIZE
+            )));
+        }
+    }
+
+    // Create the dataset through the engine
+    let dataset = engine
+        .create_dataset(
+            &request.label,
+            request.table_name.as_deref(),
+            request.source,
+        )
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            // Map validation errors to Bad Request
+            if msg.contains("reserved word")
+                || msg.contains("cannot be used as a table name")
+                || msg.contains("Invalid")
+                || msg.contains("already been consumed")
+                || msg.contains("not found")
+                || msg.contains("already in use")
+            {
+                ApiError::bad_request(msg)
+            } else {
+                ApiError::internal_error(msg)
+            }
+        })?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateDatasetResponse {
+            id: dataset.id,
+            label: dataset.label,
+            table_name: dataset.table_name,
+            status: "ready".to_string(),
+            created_at: dataset.created_at,
+        }),
+    ))
+}
+
+/// Handler for GET /v1/datasets - List all datasets
+pub async fn list_datasets(
+    State(engine): State<Arc<RuntimeEngine>>,
+) -> Result<Json<ListDatasetsResponse>, ApiError> {
+    let datasets = engine
+        .catalog()
+        .list_datasets()
+        .await
+        .map_err(|e| ApiError::internal_error(format!("Failed to list datasets: {}", e)))?;
+
+    Ok(Json(ListDatasetsResponse {
+        datasets: datasets
+            .into_iter()
+            .map(|d| DatasetSummary {
+                id: d.id,
+                label: d.label,
+                table_name: d.table_name,
+                created_at: d.created_at,
+                updated_at: d.updated_at,
+            })
+            .collect(),
+    }))
+}
+
+/// Handler for GET /v1/datasets/{id} - Get a specific dataset
+pub async fn get_dataset(
+    State(engine): State<Arc<RuntimeEngine>>,
+    Path(id): Path<String>,
+) -> Result<Json<GetDatasetResponse>, ApiError> {
+    let dataset = engine
+        .catalog()
+        .get_dataset(&id)
+        .await
+        .map_err(|e| ApiError::internal_error(format!("Failed to get dataset: {}", e)))?
+        .ok_or_else(|| ApiError::not_found(format!("Dataset '{}' not found", id)))?;
+
+    // Parse the arrow schema to extract column information
+    let columns = deserialize_arrow_schema(&dataset.arrow_schema_json)
+        .map(|schema| {
+            schema
+                .fields()
+                .iter()
+                .map(|field| ColumnInfo {
+                    name: field.name().clone(),
+                    data_type: format!("{}", field.data_type()),
+                    nullable: field.is_nullable(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(Json(GetDatasetResponse {
+        id: dataset.id,
+        label: dataset.label,
+        schema_name: dataset.schema_name,
+        table_name: dataset.table_name,
+        source_type: dataset.source_type,
+        created_at: dataset.created_at,
+        updated_at: dataset.updated_at,
+        columns,
+    }))
+}
+
+/// Handler for PUT /v1/datasets/{id} - Update a dataset
+pub async fn update_dataset(
+    State(engine): State<Arc<RuntimeEngine>>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateDatasetRequest>,
+) -> Result<Json<UpdateDatasetResponse>, ApiError> {
+    // Get existing dataset
+    let existing = engine
+        .catalog()
+        .get_dataset(&id)
+        .await
+        .map_err(|e| ApiError::internal_error(format!("Failed to get dataset: {}", e)))?
+        .ok_or_else(|| ApiError::not_found(format!("Dataset '{}' not found", id)))?;
+
+    // Use existing values if not provided in request
+    let new_label = request.label.unwrap_or(existing.label);
+    let new_table_name = request.table_name.unwrap_or(existing.table_name);
+
+    // Validate new table_name
+    crate::datasets::validate_table_name(&new_table_name)
+        .map_err(|e| ApiError::bad_request(format!("Invalid table name: {}", e)))?;
+
+    // Update in catalog
+    let updated = engine
+        .catalog()
+        .update_dataset(&id, &new_label, &new_table_name)
+        .await
+        .map_err(|e| ApiError::internal_error(format!("Failed to update dataset: {}", e)))?;
+
+    if !updated {
+        return Err(ApiError::not_found(format!("Dataset '{}' not found", id)));
+    }
+
+    // Fetch updated dataset to get updated_at
+    let dataset = engine
+        .catalog()
+        .get_dataset(&id)
+        .await
+        .map_err(|e| ApiError::internal_error(format!("Failed to get dataset: {}", e)))?
+        .ok_or_else(|| ApiError::internal_error("Dataset disappeared after update"))?;
+
+    Ok(Json(UpdateDatasetResponse {
+        id: dataset.id,
+        label: dataset.label,
+        table_name: dataset.table_name,
+        updated_at: dataset.updated_at,
+    }))
+}
+
+/// Handler for DELETE /v1/datasets/{id} - Delete a dataset
+pub async fn delete_dataset(
+    State(engine): State<Arc<RuntimeEngine>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let deleted = engine
+        .catalog()
+        .delete_dataset(&id)
+        .await
+        .map_err(|e| ApiError::internal_error(format!("Failed to delete dataset: {}", e)))?;
+
+    if deleted.is_none() {
+        return Err(ApiError::not_found(format!("Dataset '{}' not found", id)));
+    }
+
+    // TODO: Schedule parquet file deletion
+
+    Ok(StatusCode::NO_CONTENT)
 }

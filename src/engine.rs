@@ -928,6 +928,181 @@ impl RuntimeEngine {
         Ok(upload)
     }
 
+    /// Create a dataset from an upload or inline data.
+    pub async fn create_dataset(
+        &self,
+        label: &str,
+        table_name: Option<&str>,
+        source: crate::http::models::DatasetSource,
+    ) -> Result<crate::catalog::DatasetInfo> {
+        use crate::datafetch::native::StreamingParquetWriter;
+        use crate::http::models::DatasetSource;
+        use datafusion::arrow::csv::{reader::Format, ReaderBuilder};
+        use std::io::{Seek, SeekFrom};
+
+        // Generate or validate table_name
+        let table_name = match table_name {
+            Some(name) => {
+                crate::datasets::validate_table_name(name).map_err(|e| anyhow::anyhow!("{}", e))?;
+                name.to_string()
+            }
+            None => crate::datasets::table_name_from_label(label),
+        };
+
+        // Check if table_name is already used
+        if self
+            .catalog
+            .get_dataset_by_table_name("default", &table_name)
+            .await?
+            .is_some()
+        {
+            anyhow::bail!("Table name '{}' is already in use", table_name);
+        }
+
+        // Get data and format based on source
+        let (data, format, source_config) = match &source {
+            DatasetSource::Upload { upload_id, format } => {
+                // Get upload info
+                let upload = self
+                    .catalog
+                    .get_upload(upload_id)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("Upload '{}' not found", upload_id))?;
+
+                if upload.status == "consumed" {
+                    anyhow::bail!("Upload '{}' has already been consumed", upload_id);
+                }
+
+                // Read data from storage
+                let upload_url = self.storage.upload_url(upload_id);
+                let data = self.storage.read(&upload_url).await?;
+
+                // Determine format
+                let format = format
+                    .clone()
+                    .or_else(|| {
+                        upload.content_type.as_ref().and_then(|ct| {
+                            if ct.contains("csv") {
+                                Some("csv".to_string())
+                            } else if ct.contains("json") {
+                                Some("json".to_string())
+                            } else if ct.contains("parquet") {
+                                Some("parquet".to_string())
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .unwrap_or_else(|| "csv".to_string());
+
+                let source_config = serde_json::json!({
+                    "upload_id": upload_id,
+                    "format": format
+                })
+                .to_string();
+
+                // Mark upload as consumed
+                self.catalog.consume_upload(upload_id).await?;
+
+                (data, format, source_config)
+            }
+            DatasetSource::Inline { inline } => {
+                let source_config = serde_json::json!({
+                    "format": inline.format
+                })
+                .to_string();
+                (
+                    inline.content.as_bytes().to_vec(),
+                    inline.format.clone(),
+                    source_config,
+                )
+            }
+        };
+
+        // Convert data to Arrow batches
+        let batches = match format.as_str() {
+            "csv" => {
+                // Infer schema from first 10000 rows
+                let mut cursor = std::io::Cursor::new(&data);
+                let (schema, _) = Format::default()
+                    .with_header(true)
+                    .infer_schema(&mut cursor, Some(10_000))?;
+                cursor.seek(SeekFrom::Start(0))?;
+
+                // Build reader with inferred schema
+                let reader = ReaderBuilder::new(Arc::new(schema))
+                    .with_header(true)
+                    .build(cursor)?;
+                reader.into_iter().collect::<Result<Vec<_>, _>>()?
+            }
+            "json" => {
+                // Use arrow-json crate directly for JSON parsing
+                use arrow_json::reader::infer_json_schema_from_seekable;
+
+                let mut cursor = std::io::Cursor::new(&data);
+                let (schema, _) = infer_json_schema_from_seekable(&mut cursor, Some(10_000))?;
+                cursor.seek(SeekFrom::Start(0))?;
+
+                let reader = arrow_json::ReaderBuilder::new(Arc::new(schema))
+                    .with_batch_size(1024)
+                    .build(cursor)?;
+
+                reader.into_iter().collect::<Result<Vec<_>, _>>()?
+            }
+            "parquet" => {
+                // Use DataFusion to read parquet from bytes
+                use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+                let cursor = axum::body::Bytes::from(data);
+                let reader = ParquetRecordBatchReaderBuilder::try_new(cursor)?.build()?;
+                reader.into_iter().collect::<Result<Vec<_>, _>>()?
+            }
+            _ => anyhow::bail!("Unsupported format: {}", format),
+        };
+
+        if batches.is_empty() {
+            anyhow::bail!("No data found in the input");
+        }
+
+        let schema = batches[0].schema();
+        let schema_json = serde_json::to_string(&schema.as_ref())?;
+
+        // Write to parquet storage
+        let dataset_id = crate::id::generate_dataset_id();
+        let handle = self.storage.prepare_dataset_write(&dataset_id);
+
+        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
+            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+        writer.init(&schema)?;
+
+        for batch in &batches {
+            writer.write_batch(batch)?;
+        }
+        writer.close()?;
+
+        // Finalize storage (upload to S3 if needed)
+        let dir_url = self.storage.finalize_dataset_write(&handle).await?;
+        let parquet_url = format!("{}/data.parquet", dir_url);
+
+        // Create catalog record
+        let now = Utc::now();
+        let dataset = crate::catalog::DatasetInfo {
+            id: dataset_id,
+            label: label.to_string(),
+            schema_name: "default".to_string(),
+            table_name,
+            parquet_url,
+            arrow_schema_json: schema_json,
+            source_type: "upload".to_string(),
+            source_config,
+            created_at: now,
+            updated_at: now,
+        };
+
+        self.catalog.create_dataset(&dataset).await?;
+
+        Ok(dataset)
+    }
+
     /// Process any pending directory deletions that are due.
     pub async fn process_pending_deletions(&self) -> Result<usize> {
         let pending = self.catalog.get_pending_deletions().await?;
