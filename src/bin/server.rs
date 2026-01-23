@@ -15,13 +15,8 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let now = Instant::now();
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .init();
+    // Initialize telemetry (tracing + optional OpenTelemetry)
+    runtimedb::telemetry::init_telemetry().expect("Failed to initialize telemetry");
 
     let cli = Cli::parse();
 
@@ -60,6 +55,9 @@ async fn main() -> Result<()> {
     }
 
     tracing::info!("Server shutdown complete");
+
+    // Flush pending telemetry spans
+    runtimedb::telemetry::shutdown_telemetry();
 
     Ok(())
 }
