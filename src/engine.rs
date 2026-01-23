@@ -760,6 +760,17 @@ impl RuntimeEngine {
     }
 
     /// Refresh data for a single table using atomic swap.
+    #[tracing::instrument(
+        name = "refresh_table",
+        skip(self),
+        fields(
+            runtimedb.connection_id = %connection_id,
+            runtimedb.schema = %schema_name,
+            runtimedb.table = %table_name,
+            runtimedb.rows_synced = tracing::field::Empty,
+            runtimedb.warnings_count = tracing::field::Empty,
+        )
+    )]
     pub async fn refresh_table_data(
         &self,
         connection_id: &str,
@@ -797,6 +808,9 @@ impl RuntimeEngine {
                 });
             }
         }
+
+        tracing::Span::current().record("runtimedb.rows_synced", rows_synced);
+        tracing::Span::current().record("runtimedb.warnings_count", warnings.len());
 
         Ok(TableRefreshResult {
             connection_id: connection_id.to_string(),
