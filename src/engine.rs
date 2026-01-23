@@ -4,7 +4,8 @@ use crate::catalog::{
 use crate::datafetch::native::StreamingParquetWriter;
 use crate::datafetch::{BatchWriter, FetchOrchestrator, NativeFetcher};
 use crate::datafusion::{
-    block_on, InformationSchemaProvider, RuntimeCatalogProvider, RuntimeDbCatalogProvider,
+    block_on, DatasetsCatalogProvider, InformationSchemaProvider, RuntimeCatalogProvider,
+    RuntimeDbCatalogProvider,
 };
 use crate::http::models::{
     ConnectionRefreshResult, ConnectionSchemaError, RefreshWarning, SchemaRefreshResult,
@@ -1080,8 +1081,8 @@ impl RuntimeEngine {
         writer.close()?;
 
         // Finalize storage (upload to S3 if needed)
-        let dir_url = self.storage.finalize_dataset_write(&handle).await?;
-        let parquet_url = format!("{}/data.parquet", dir_url);
+        // Note: finalize_dataset_write returns the full file URL including data.parquet
+        let parquet_url = self.storage.finalize_dataset_write(&handle).await?;
 
         // Create catalog record
         let now = Utc::now();
@@ -1468,6 +1469,13 @@ impl RuntimeEngineBuilder {
         engine
             .df_ctx
             .register_catalog("runtimedb", runtimedb_catalog);
+
+        // Register the datasets catalog for user-uploaded datasets
+        let datasets_catalog = Arc::new(DatasetsCatalogProvider::new(
+            engine.catalog.clone(),
+            &engine.df_ctx,
+        ));
+        engine.df_ctx.register_catalog("datasets", datasets_catalog);
 
         // Process any pending deletions from previous runs
         if let Err(e) = engine.process_pending_deletions().await {
