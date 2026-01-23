@@ -157,12 +157,20 @@ impl NativeFetcher {
 
 #[async_trait]
 impl DataFetcher for NativeFetcher {
+    #[tracing::instrument(
+        name = "discover_tables",
+        skip(self, source, secrets),
+        fields(
+            runtimedb.backend = %source.source_type(),
+            runtimedb.tables_found = tracing::field::Empty,
+        )
+    )]
     async fn discover_tables(
         &self,
         source: &Source,
         secrets: &SecretManager,
     ) -> Result<Vec<TableMetadata>, DataFetchError> {
-        match source {
+        let tables = match source {
             Source::Duckdb { .. } | Source::Motherduck { .. } => {
                 duckdb::discover_tables(source, secrets).await
             }
@@ -170,9 +178,20 @@ impl DataFetcher for NativeFetcher {
             Source::Iceberg { .. } => iceberg::discover_tables(source, secrets).await,
             Source::Mysql { .. } => mysql::discover_tables(source, secrets).await,
             Source::Snowflake { .. } => snowflake::discover_tables(source, secrets).await,
-        }
+        }?;
+        tracing::Span::current().record("runtimedb.tables_found", tables.len());
+        Ok(tables)
     }
 
+    #[tracing::instrument(
+        name = "fetch_table",
+        skip(self, source, secrets, writer),
+        fields(
+            runtimedb.backend = %source.source_type(),
+            runtimedb.schema = %schema,
+            runtimedb.table = %table,
+        )
+    )]
     async fn fetch_table(
         &self,
         source: &Source,
