@@ -41,7 +41,8 @@ CREATE TABLE uploads (
   content_type TEXT,
   content_encoding TEXT,
   size_bytes BIGINT NOT NULL,
-  created_at TIMESTAMP NOT NULL
+  created_at TIMESTAMP NOT NULL,
+  consumed_at TIMESTAMP           -- set when status becomes 'consumed'
 );
 ```
 
@@ -50,15 +51,19 @@ CREATE TABLE uploads (
 CREATE TABLE datasets (
   id TEXT PRIMARY KEY,           -- data_abc123
   label TEXT NOT NULL,
-  table_name TEXT NOT NULL UNIQUE,
+  schema_name TEXT NOT NULL DEFAULT 'default',
+  table_name TEXT NOT NULL,
   parquet_url TEXT NOT NULL,
   arrow_schema_json TEXT NOT NULL,
   source_type TEXT NOT NULL,     -- 'upload' | 'url' | 'query' (future)
   source_config TEXT NOT NULL,   -- JSON blob
   created_at TIMESTAMP NOT NULL,
-  updated_at TIMESTAMP NOT NULL
+  updated_at TIMESTAMP NOT NULL,
+  UNIQUE(schema_name, table_name)
 );
 ```
+
+Note: `schema_name` defaults to `'default'` and is not user-configurable in v1. This prepares for future multi-schema support.
 
 `source_config` for uploads:
 ```json
@@ -108,7 +113,8 @@ Response 200:
       "status": "pending",
       "size_bytes": 1048576,
       "content_type": "text/csv",
-      "created_at": "2026-01-23T10:00:00Z"
+      "created_at": "2026-01-23T10:00:00Z",
+      "consumed_at": null
     }
   ]
 }
@@ -168,6 +174,8 @@ Response 201:
   "status": "ready"
 }
 ```
+
+**Inline size limit:** 1MB max. Returns 400 if exceeded.
 
 ### List Datasets
 
@@ -262,10 +270,10 @@ When `POST /v1/datasets` is called:
 1. **Resolve format** - Explicit `format` > `content_type` from upload > error
 2. **Load raw bytes** - Stream from `storage_url` (handles S3 or local)
 3. **Decompress if needed** - Based on `content_encoding`
-4. **Infer schema** - Parse first N rows, build Arrow schema
+4. **Infer schema** - Parse first 10,000 rows, build Arrow schema
 5. **Apply overrides** - User-specified column types replace inferred ones
 6. **Stream convert** - Parse full file, write to Parquet via `StreamingParquetWriter`
-7. **Update catalog** - Mark upload as `consumed`, insert dataset record
+7. **Update catalog** - Mark upload as `consumed` (set `consumed_at`), insert dataset record
 8. **Register with DataFusion** - Dataset becomes queryable
 
 For Parquet uploads: rewrite with our settings (compression, encoding). Schema overrides return error: "altering parquet schema is currently unsupported".
@@ -316,6 +324,13 @@ The `source_type` + `source_config` pattern supports future sources:
 - Pending upload cleanup (tracking only, cleanup deferred)
 - Parquet schema modification
 - Custom catalogs (only `datasets` for now)
+- User-configurable schema_name (hardcoded to `default`)
+
+## Future Considerations
+
+- **Type promotion rules**: When schema inference encounters conflicting types across rows (e.g., integers then floats), define promotion hierarchy
+- **Configurable sampling**: Allow users to specify sample size or sampling strategy for schema inference
+- **Large file sampling**: For files > N rows, consider sampling from multiple locations rather than just first 10,000 rows
 
 ## Acceptance Criteria
 
