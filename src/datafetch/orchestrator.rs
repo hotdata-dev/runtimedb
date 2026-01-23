@@ -108,8 +108,9 @@ impl FetchOrchestrator {
             }
         }
 
-        tracing::Span::current().record("runtimedb.rows_written", row_count);
-        tracing::Span::current().record("runtimedb.cache_url", &parquet_url);
+        tracing::Span::current()
+            .record("runtimedb.rows_written", row_count)
+            .record("runtimedb.cache_url", &parquet_url);
 
         Ok((parquet_url, row_count))
     }
@@ -215,8 +216,9 @@ impl FetchOrchestrator {
             return Err(e);
         }
 
-        tracing::Span::current().record("runtimedb.rows_synced", row_count);
-        tracing::Span::current().record("runtimedb.cache_url", &new_url);
+        tracing::Span::current()
+            .record("runtimedb.rows_synced", row_count)
+            .record("runtimedb.cache_url", &new_url);
 
         Ok((new_url, old_path, row_count))
     }

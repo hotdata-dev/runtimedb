@@ -818,8 +818,9 @@ impl RuntimeEngine {
             }
         }
 
-        tracing::Span::current().record("runtimedb.rows_synced", rows_synced);
-        tracing::Span::current().record("runtimedb.warnings_count", warnings.len());
+        tracing::Span::current()
+            .record("runtimedb.rows_synced", rows_synced)
+            .record("runtimedb.warnings_count", warnings.len());
 
         Ok(TableRefreshResult {
             connection_id: connection_id.to_string(),
@@ -940,9 +941,10 @@ impl RuntimeEngine {
 
         result.duration_ms = start.elapsed().as_millis() as u64;
 
-        tracing::Span::current().record("runtimedb.tables_refreshed", result.tables_refreshed);
-        tracing::Span::current().record("runtimedb.tables_failed", result.tables_failed);
-        tracing::Span::current().record("runtimedb.rows_synced", result.total_rows);
+        tracing::Span::current()
+            .record("runtimedb.tables_refreshed", result.tables_refreshed)
+            .record("runtimedb.tables_failed", result.tables_failed)
+            .record("runtimedb.rows_synced", result.total_rows);
 
         Ok(result)
     }

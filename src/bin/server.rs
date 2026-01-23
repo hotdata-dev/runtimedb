@@ -54,10 +54,10 @@ async fn main() -> Result<()> {
         tracing::error!("Error during engine shutdown: {}", e);
     }
 
-    tracing::info!("Server shutdown complete");
-
     // Flush pending telemetry spans
     runtimedb::telemetry::shutdown_telemetry();
+
+    tracing::info!("Server shutdown complete");
 
     Ok(())
 }

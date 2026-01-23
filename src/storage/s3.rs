@@ -220,8 +220,9 @@ impl StorageManager for S3Storage {
         let s3_path = ObjectPath::from(s3_key.as_str());
 
         // Record the key and cache_url on the current span
-        tracing::Span::current().record("runtimedb.key", &s3_key);
-        tracing::Span::current().record("runtimedb.cache_url", &versioned_dir_url);
+        tracing::Span::current()
+            .record("runtimedb.key", &s3_key)
+            .record("runtimedb.cache_url", &versioned_dir_url);
 
         // Stream file to S3 using BufWriter to avoid loading entire file into memory.
         // BufWriter adaptively uses put() for small files or put_multipart() for large files.
