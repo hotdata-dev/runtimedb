@@ -1,0 +1,87 @@
+# Floating point test values for type coverage testing.
+#
+# These values cover IEEE 754 floating point types including special values.
+# Uses approximate comparison for values that may have precision differences.
+
+[category]
+name = "floats"
+description = "Floating point values including special IEEE 754 values"
+semantic_type = "Float"
+
+# === Basic values ===
+
+[[values]]
+name = "zero"
+sql = "0.0"
+expected = "0"
+note = "Zero value"
+
+[[values]]
+name = "one"
+sql = "1.0"
+expected = "1"
+note = "Unity value"
+
+[[values]]
+name = "negative"
+sql = "-1.0"
+expected = "-1"
+note = "Negative unity"
+
+[[values]]
+name = "pi"
+sql = "3.141592653589793"
+expected = "3.141592653589793"
+comparison = "approximate"
+epsilon = 0.0000001
+note = "Pi with double precision, uses approximate comparison"
+
+[[values]]
+name = "small"
+sql = "0.000001"
+expected = "0.000001"
+comparison = "approximate"
+epsilon = 0.0000000001
+note = "Small positive value near zero"
+
+[[values]]
+name = "large"
+sql = "1.7976931348623157e+308"
+expected = "1.7976931348623157e+308"
+comparison = "approximate"
+epsilon = 1e+300
+note = "Near maximum double precision value"
+
+# === Special IEEE 754 values ===
+
+[[values]]
+name = "nan"
+sql = "'NaN'::float8"
+expected = "NaN"
+comparison = "string"
+note = "IEEE 754 Not-a-Number, requires special string comparison"
+
+[[values]]
+name = "pos_infinity"
+sql = "'Infinity'::float8"
+expected = "Infinity"
+comparison = "string"
+note = "IEEE 754 positive infinity"
+
+[[values]]
+name = "neg_infinity"
+sql = "'-Infinity'::float8"
+expected = "-Infinity"
+comparison = "string"
+note = "IEEE 754 negative infinity"
+
+# === NULL value ===
+
+[[values]]
+name = "null"
+sql = "NULL"
+expected = ""
+expected_null = "NULL"
+note = "NULL float value"
+[values.requires]
+nullable = true

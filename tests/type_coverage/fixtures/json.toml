@@ -1,0 +1,65 @@
+# JSON test values for type coverage testing.
+#
+# These values cover JSON and JSONB types.
+# Uses string comparison since JSON equality is complex.
+
+[category]
+name = "json"
+description = "JSON values including objects, arrays, and nested structures"
+semantic_type = "Json"
+
+# === Basic structures ===
+
+[[values]]
+name = "empty_object"
+sql = "'{}'"
+expected = "{}"
+comparison = "string"
+note = "Empty JSON object"
+
+[[values]]
+name = "empty_array"
+sql = "'[]'"
+expected = "[]"
+comparison = "string"
+note = "Empty JSON array"
+
+[[values]]
+name = "simple_object"
+sql = "'{\"name\": \"test\", \"value\": 42}'"
+expected = "{\"name\":\"test\",\"value\":42}"
+comparison = "string"
+note = "Simple JSON object with string and number"
+
+[[values]]
+name = "nested"
+sql = "'{\"outer\": {\"inner\": {\"deep\": true}}}'"
+expected = "{\"outer\":{\"inner\":{\"deep\":true}}}"
+comparison = "string"
+note = "Nested JSON object"
+
+[[values]]
+name = "with_types"
+sql = "'{\"string\": \"hello\", \"number\": 123.45, \"bool\": true, \"null\": null, \"array\": [1, 2, 3]}'"
+expected = "{\"array\":[1,2,3],\"bool\":true,\"null\":null,\"number\":123.45,\"string\":\"hello\"}"
+comparison = "string"
+note = "JSON with various types (object keys may be reordered)"
+
+[[values]]
+name = "unicode"
+sql = "'{\"greeting\": \"Hello, 世界!\"}'"
+expected = "{\"greeting\":\"Hello, 世界!\"}"
+comparison = "string"
+note = "JSON with unicode characters"
+
+# === NULL value ===
+
+[[values]]
+name = "null"
+sql = "NULL"
+expected = ""
+expected_null = "NULL"
+comparison = "string"
+note = "NULL JSON value"
+[values.requires]
+nullable = true

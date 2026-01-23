@@ -1,0 +1,72 @@
+# Timestamp test values for type coverage testing.
+#
+# These values cover timestamp types with and without timezone.
+# Uses ISO 8601 format for portability across databases.
+
+[category]
+name = "timestamps"
+description = "Timestamp values with various dates, times, and precision"
+semantic_type = "Timestamp"
+
+# === Epoch and historical values ===
+
+[[values]]
+name = "epoch"
+sql = "'1970-01-01 00:00:00'"
+expected = "1970-01-01T00:00:00"
+note = "Unix epoch timestamp"
+
+[[values]]
+name = "before_epoch"
+sql = "'1969-07-20 20:17:40'"
+expected = "1969-07-20T20:17:40"
+note = "Apollo 11 moon landing, before Unix epoch"
+
+# === Modern and future values ===
+
+[[values]]
+name = "modern"
+sql = "'2024-06-15 14:30:00'"
+expected = "2024-06-15T14:30:00"
+note = "Modern timestamp"
+
+[[values]]
+name = "far_future"
+sql = "'2099-12-31 23:59:59'"
+expected = "2099-12-31T23:59:59"
+note = "Far future timestamp"
+
+# === Precision values ===
+
+[[values]]
+name = "microseconds"
+sql = "'2024-01-15 10:30:45.123456'"
+expected = "2024-01-15T10:30:45.123456"
+note = "Timestamp with microsecond precision"
+[values.requires]
+min_scale = 6
+
+# === Time of day edge cases ===
+
+[[values]]
+name = "midnight"
+sql = "'2024-01-01 00:00:00'"
+expected = "2024-01-01T00:00:00"
+note = "Midnight timestamp"
+
+[[values]]
+name = "end_of_day"
+sql = "'2024-01-01 23:59:59'"
+expected = "2024-01-01T23:59:59"
+note = "Last second of the day"
+
+# === NULL value ===
+
+[[values]]
+name = "null"
+sql = "NULL"
+expected = ""
+expected_null = "NULL"
+note = "NULL timestamp value"
+[values.requires]
+nullable = true

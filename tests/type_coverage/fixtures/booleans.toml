@@ -1,0 +1,33 @@
+# Boolean test values for type coverage testing.
+#
+# These values cover the boolean type with true, false, and null.
+
+[category]
+name = "booleans"
+description = "Boolean values: true, false, and null"
+semantic_type = "Boolean"
+
+# === Boolean values ===
+
+[[values]]
+name = "true"
+sql = "TRUE"
+expected = "true"
+note = "Boolean true value"
+
+[[values]]
+name = "false"
+sql = "FALSE"
+expected = "false"
+note = "Boolean false value"
+
+# === NULL value ===
+
+[[values]]
+name = "null"
+sql = "NULL"
+expected = ""
+expected_null = "NULL"
+note = "NULL boolean value"
+[values.requires]
+nullable = true

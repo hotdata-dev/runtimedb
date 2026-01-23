@@ -1,0 +1,76 @@
+# String/text test values for type coverage testing.
+#
+# These values cover character and text types (CHAR, VARCHAR, TEXT).
+# Byte size requirements determine compatibility with fixed-length types.
+
+[category]
+name = "strings"
+description = "Character and text values including unicode and special characters"
+semantic_type = "String"
+
+# === Basic values ===
+
+[[values]]
+name = "empty"
+sql = "''"
+expected = ""
+note = "Empty string"
+
+[[values]]
+name = "simple"
+sql = "'hello world'"
+expected = "hello world"
+note = "Simple ASCII string"
+[values.requires]
+min_bytes = 11
+
+[[values]]
+name = "unicode"
+sql = "'Hello, 世界! 🌍'"
+expected = "Hello, 世界! 🌍"
+note = "Unicode string with CJK characters and emoji"
+[values.requires]
+min_bytes = 20
+
+[[values]]
+name = "special_chars"
+sql = "'tab:\there, quote:''single'', backslash:\\'"
+expected = "tab:\there, quote:'single', backslash:\\"
+note = "String with special characters (tab, quotes, backslash)"
+[values.requires]
+min_bytes = 40
+
+[[values]]
+name = "newlines"
+sql = "'line1\nline2\nline3'"
+expected = "line1\nline2\nline3"
+note = "String with newline characters"
+[values.requires]
+min_bytes = 17
+
+[[values]]
+name = "long_string"
+sql = "'Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.'"
+expected = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua."
+note = "Long string for testing text types"
+[values.requires]
+min_bytes = 123
+
+[[values]]
+name = "whitespace_only"
+sql = "'   '"
+expected = "   "
+note = "String containing only whitespace"
+[values.requires]
+min_bytes = 3
+
+# === NULL value ===
+
+[[values]]
+name = "null"
+sql = "NULL"
+expected = ""
+expected_null = "NULL"
+note = "NULL string value"
+[values.requires]
+nullable = true
