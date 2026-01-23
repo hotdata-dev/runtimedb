@@ -2,8 +2,8 @@ use crate::http::handlers::{
     create_connection_handler, create_secret_handler, delete_connection_handler,
     delete_secret_handler, get_connection_handler, get_result_handler, get_secret_handler,
     health_handler, information_schema_handler, list_connections_handler, list_results_handler,
-    list_secrets_handler, purge_connection_cache_handler, purge_table_cache_handler, query_handler,
-    refresh_handler, update_secret_handler,
+    list_secrets_handler, list_uploads, purge_connection_cache_handler, purge_table_cache_handler,
+    query_handler, refresh_handler, update_secret_handler, upload_file,
 };
 use crate::RuntimeEngine;
 use axum::routing::{delete, get, post};
@@ -27,6 +27,7 @@ pub const PATH_SECRETS: &str = "/secrets";
 pub const PATH_SECRET: &str = "/secrets/{name}";
 pub const PATH_RESULTS: &str = "/results";
 pub const PATH_RESULT: &str = "/results/{id}";
+pub const PATH_FILES: &str = "/v1/files";
 
 impl AppServer {
     pub fn new(engine: RuntimeEngine) -> Self {
@@ -62,6 +63,7 @@ impl AppServer {
                 )
                 .route(PATH_RESULTS, get(list_results_handler))
                 .route(PATH_RESULT, get(get_result_handler))
+                .route(PATH_FILES, post(upload_file).get(list_uploads))
                 .with_state(engine.clone()),
             engine,
         }

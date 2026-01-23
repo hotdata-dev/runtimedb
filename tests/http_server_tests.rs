@@ -1401,6 +1401,104 @@ async fn test_create_connection_with_secret_id() -> Result<()> {
     Ok(())
 }
 
+// === Upload Endpoint Tests ===
+
+async fn parse_body(response: Response) -> serde_json::Value {
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_upload_file_endpoint() -> Result<()> {
+    let (app, _temp) = setup_test().await?;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/files")
+                .header("content-type", "text/csv")
+                .body(Body::from("id,name\n1,test\n2,other"))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body: serde_json::Value = parse_body(response).await;
+    assert!(body["id"].as_str().unwrap().starts_with("upld"));
+    assert_eq!(body["status"], "pending");
+    assert!(body["size_bytes"].as_i64().unwrap() > 0);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_uploads_empty() -> Result<()> {
+    let (app, _temp) = setup_test().await?;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/files")
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body: serde_json::Value = parse_body(response).await;
+    assert!(body["uploads"].as_array().unwrap().is_empty());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_uploads_after_upload() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Upload a file first
+    let _ = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/files")
+                .header("content-type", "text/csv")
+                .body(Body::from("a,b\n1,2"))?,
+        )
+        .await?;
+
+    // List uploads
+    let response = app
+        .router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/files")
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body: serde_json::Value = parse_body(response).await;
+    let uploads = body["uploads"].as_array().unwrap();
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(uploads[0]["status"], "pending");
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_create_connection_with_both_secret_name_and_id_fails() -> Result<()> {
     let (app, _tempdir) = setup_test().await?;

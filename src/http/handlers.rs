@@ -4,16 +4,17 @@ use crate::http::models::{
     ColumnInfo, ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse,
     CreateSecretRequest, CreateSecretResponse, DiscoveryStatus, GetConnectionResponse,
     GetSecretResponse, InformationSchemaResponse, ListConnectionsResponse, ListResultsResponse,
-    ListSecretsResponse, QueryRequest, QueryResponse, RefreshRequest, RefreshResponse, ResultInfo,
-    SchemaRefreshResult, SecretMetadataResponse, TableInfo, UpdateSecretRequest,
-    UpdateSecretResponse,
+    ListSecretsResponse, ListUploadsResponse, QueryRequest, QueryResponse, RefreshRequest,
+    RefreshResponse, ResultInfo, SchemaRefreshResult, SecretMetadataResponse, TableInfo,
+    UpdateSecretRequest, UpdateSecretResponse, UploadInfo, UploadResponse,
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
 use crate::source::{Credential, Source};
 use crate::RuntimeEngine;
 use axum::{
+    body::Bytes,
     extract::{Path, Query as QueryParams, State},
-    http::StatusCode,
+    http::{header, HeaderMap, StatusCode},
     Json,
 };
 use datafusion::arrow::datatypes::Schema;
@@ -870,5 +871,69 @@ pub async fn get_result_handler(
         row_count,
         execution_time_ms,
         warning: None,
+    }))
+}
+
+// ==================== Upload Handlers ====================
+
+/// Query parameters for listing uploads
+#[derive(Debug, Deserialize)]
+pub struct ListUploadsParams {
+    pub status: Option<String>,
+}
+
+/// Handler for POST /v1/files - Upload a file
+pub async fn upload_file(
+    State(engine): State<Arc<RuntimeEngine>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<(StatusCode, Json<UploadResponse>), ApiError> {
+    // Get content type from headers
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // Store the upload
+    let upload = engine
+        .store_upload(body.to_vec(), content_type)
+        .await
+        .map_err(|e| ApiError::internal_error(format!("Failed to store upload: {}", e)))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(UploadResponse {
+            id: upload.id,
+            status: upload.status,
+            size_bytes: upload.size_bytes,
+            content_type: upload.content_type,
+            created_at: upload.created_at,
+        }),
+    ))
+}
+
+/// Handler for GET /v1/files - List uploads
+pub async fn list_uploads(
+    State(engine): State<Arc<RuntimeEngine>>,
+    QueryParams(params): QueryParams<ListUploadsParams>,
+) -> Result<Json<ListUploadsResponse>, ApiError> {
+    let status = params.status.as_deref();
+    let uploads = engine
+        .catalog()
+        .list_uploads(status)
+        .await
+        .map_err(|e| ApiError::internal_error(format!("Failed to list uploads: {}", e)))?;
+
+    Ok(Json(ListUploadsResponse {
+        uploads: uploads
+            .into_iter()
+            .map(|u| UploadInfo {
+                id: u.id,
+                status: u.status,
+                size_bytes: u.size_bytes,
+                content_type: u.content_type,
+                created_at: u.created_at,
+            })
+            .collect(),
     }))
 }

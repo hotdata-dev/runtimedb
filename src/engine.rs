@@ -894,6 +894,40 @@ impl RuntimeEngine {
         Ok(result)
     }
 
+    /// Store an uploaded file and create an upload record.
+    pub async fn store_upload(
+        &self,
+        data: Vec<u8>,
+        content_type: Option<String>,
+    ) -> Result<crate::catalog::UploadInfo> {
+        let upload_id = crate::id::generate_upload_id();
+        let size_bytes = data.len() as i64;
+
+        // Write to storage
+        let local_path = self.storage.prepare_upload_write(&upload_id);
+        if let Some(parent) = local_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(&local_path, &data).await?;
+        let storage_url = self.storage.finalize_upload_write(&upload_id).await?;
+
+        // Create catalog record
+        let now = Utc::now();
+        let upload = crate::catalog::UploadInfo {
+            id: upload_id,
+            status: "pending".to_string(),
+            storage_url,
+            content_type,
+            content_encoding: None,
+            size_bytes,
+            created_at: now,
+            consumed_at: None,
+        };
+        self.catalog.create_upload(&upload).await?;
+
+        Ok(upload)
+    }
+
     /// Process any pending directory deletions that are due.
     pub async fn process_pending_deletions(&self) -> Result<usize> {
         let pending = self.catalog.get_pending_deletions().await?;
