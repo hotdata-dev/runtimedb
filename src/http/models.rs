@@ -298,6 +298,124 @@ pub enum RefreshResponse {
     Connection(ConnectionRefreshResult),
 }
 
+// Upload models
+
+/// Response body for POST /v1/files
+#[derive(Debug, Serialize)]
+pub struct UploadResponse {
+    pub id: String,
+    pub status: String,
+    pub size_bytes: i64,
+    pub content_type: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Response body for GET /v1/files
+#[derive(Debug, Serialize)]
+pub struct ListUploadsResponse {
+    pub uploads: Vec<UploadInfo>,
+}
+
+/// Single upload info for listing
+#[derive(Debug, Serialize)]
+pub struct UploadInfo {
+    pub id: String,
+    pub status: String,
+    pub size_bytes: i64,
+    pub content_type: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+// Dataset models
+
+/// Request body for POST /v1/datasets
+#[derive(Debug, Deserialize)]
+pub struct CreateDatasetRequest {
+    pub label: String,
+    /// Optional table_name - if not provided, derived from label
+    #[serde(default)]
+    pub table_name: Option<String>,
+    pub source: DatasetSource,
+}
+
+/// Dataset source specification
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum DatasetSource {
+    /// Create from a previously uploaded file
+    Upload {
+        upload_id: String,
+        #[serde(default)]
+        format: Option<String>,
+    },
+    /// Create from inline data (small payloads)
+    Inline { inline: InlineData },
+}
+
+/// Inline data specification
+#[derive(Debug, Deserialize)]
+pub struct InlineData {
+    pub format: String,
+    pub content: String,
+}
+
+/// Response body for POST /v1/datasets
+#[derive(Debug, Serialize)]
+pub struct CreateDatasetResponse {
+    pub id: String,
+    pub label: String,
+    pub table_name: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Response body for GET /v1/datasets
+#[derive(Debug, Serialize)]
+pub struct ListDatasetsResponse {
+    pub datasets: Vec<DatasetSummary>,
+}
+
+/// Dataset summary for listing
+#[derive(Debug, Serialize)]
+pub struct DatasetSummary {
+    pub id: String,
+    pub label: String,
+    pub table_name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Response body for GET /v1/datasets/{id}
+#[derive(Debug, Serialize)]
+pub struct GetDatasetResponse {
+    pub id: String,
+    pub label: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub source_type: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub columns: Vec<ColumnInfo>,
+}
+
+/// Request body for PUT /v1/datasets/{id}
+#[derive(Debug, Deserialize)]
+pub struct UpdateDatasetRequest {
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub table_name: Option<String>,
+}
+
+/// Response body for PUT /v1/datasets/{id}
+#[derive(Debug, Serialize)]
+pub struct UpdateDatasetResponse {
+    pub id: String,
+    pub label: String,
+    pub table_name: String,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
