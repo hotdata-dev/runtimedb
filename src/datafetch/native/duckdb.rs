@@ -240,8 +240,10 @@ fn fetch_table_to_channel(
     Ok(())
 }
 
-/// Convert DuckDB type name to Arrow DataType
-fn duckdb_type_to_arrow(duckdb_type: &str) -> datafusion::arrow::datatypes::DataType {
+/// Convert DuckDB type name to Arrow DataType.
+///
+/// This is the authoritative type mapping implementation. Tests validate against this.
+pub fn duckdb_type_to_arrow(duckdb_type: &str) -> datafusion::arrow::datatypes::DataType {
     use datafusion::arrow::datatypes::{DataType, TimeUnit};
 
     let type_upper = duckdb_type.to_uppercase();
@@ -261,7 +263,7 @@ fn duckdb_type_to_arrow(duckdb_type: &str) -> datafusion::arrow::datatypes::Data
         "UBIGINT" => DataType::UInt64,
         "REAL" | "FLOAT4" | "FLOAT" => DataType::Float32,
         "DOUBLE" | "FLOAT8" => DataType::Float64,
-        "DECIMAL" | "NUMERIC" => DataType::Decimal128(38, 10),
+        "DECIMAL" | "NUMERIC" => parse_decimal_params(&type_upper),
         "VARCHAR" | "TEXT" | "STRING" | "CHAR" | "BPCHAR" => DataType::Utf8,
         "BLOB" | "BYTEA" | "BINARY" | "VARBINARY" => DataType::Binary,
         "DATE" => DataType::Date32,
@@ -277,21 +279,317 @@ fn duckdb_type_to_arrow(duckdb_type: &str) -> datafusion::arrow::datatypes::Data
     }
 }
 
+/// Parse DECIMAL(precision, scale) parameters from type string.
+/// Returns Decimal128 with extracted parameters, or defaults to (38, 10) if parsing fails.
+fn parse_decimal_params(type_str: &str) -> datafusion::arrow::datatypes::DataType {
+    use datafusion::arrow::datatypes::DataType;
+    // Use shared parsing logic, fall back to DuckDB's default of (38, 10)
+    super::parse_decimal_params(type_str).unwrap_or(DataType::Decimal128(38, 10))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion::arrow::datatypes::{DataType, IntervalUnit, TimeUnit};
+
+    // =========================================================================
+    // Boolean types
+    // =========================================================================
 
     #[test]
-    fn test_duckdb_type_mapping() {
-        use datafusion::arrow::datatypes::DataType;
+    fn test_duckdb_boolean_types() {
+        assert!(matches!(duckdb_type_to_arrow("BOOLEAN"), DataType::Boolean));
+        assert!(matches!(duckdb_type_to_arrow("BOOL"), DataType::Boolean));
+    }
 
+    // =========================================================================
+    // Integer types - Signed
+    // =========================================================================
+
+    #[test]
+    fn test_duckdb_tinyint_type() {
+        assert!(matches!(duckdb_type_to_arrow("TINYINT"), DataType::Int8));
+        assert!(matches!(duckdb_type_to_arrow("INT1"), DataType::Int8));
+    }
+
+    #[test]
+    fn test_duckdb_smallint_type() {
+        assert!(matches!(duckdb_type_to_arrow("SMALLINT"), DataType::Int16));
+        assert!(matches!(duckdb_type_to_arrow("INT2"), DataType::Int16));
+    }
+
+    #[test]
+    fn test_duckdb_integer_type() {
         assert!(matches!(duckdb_type_to_arrow("INTEGER"), DataType::Int32));
+        assert!(matches!(duckdb_type_to_arrow("INT"), DataType::Int32));
+        assert!(matches!(duckdb_type_to_arrow("INT4"), DataType::Int32));
+    }
+
+    #[test]
+    fn test_duckdb_bigint_type() {
+        assert!(matches!(duckdb_type_to_arrow("BIGINT"), DataType::Int64));
+        assert!(matches!(duckdb_type_to_arrow("INT8"), DataType::Int64));
+    }
+
+    #[test]
+    fn test_duckdb_hugeint_type() {
+        // HUGEINT is not explicitly handled, falls back to Utf8
+        assert!(matches!(duckdb_type_to_arrow("HUGEINT"), DataType::Utf8));
+    }
+
+    // =========================================================================
+    // Integer types - Unsigned
+    // =========================================================================
+
+    #[test]
+    fn test_duckdb_utinyint_type() {
+        assert!(matches!(duckdb_type_to_arrow("UTINYINT"), DataType::UInt8));
+    }
+
+    #[test]
+    fn test_duckdb_usmallint_type() {
+        assert!(matches!(
+            duckdb_type_to_arrow("USMALLINT"),
+            DataType::UInt16
+        ));
+    }
+
+    #[test]
+    fn test_duckdb_uinteger_type() {
+        assert!(matches!(duckdb_type_to_arrow("UINTEGER"), DataType::UInt32));
+    }
+
+    #[test]
+    fn test_duckdb_ubigint_type() {
+        assert!(matches!(duckdb_type_to_arrow("UBIGINT"), DataType::UInt64));
+    }
+
+    // =========================================================================
+    // Float types
+    // =========================================================================
+
+    #[test]
+    fn test_duckdb_float_types() {
+        assert!(matches!(duckdb_type_to_arrow("FLOAT"), DataType::Float32));
+        assert!(matches!(duckdb_type_to_arrow("REAL"), DataType::Float32));
+        assert!(matches!(duckdb_type_to_arrow("FLOAT4"), DataType::Float32));
+    }
+
+    #[test]
+    fn test_duckdb_double_types() {
+        assert!(matches!(duckdb_type_to_arrow("DOUBLE"), DataType::Float64));
+        assert!(matches!(duckdb_type_to_arrow("FLOAT8"), DataType::Float64));
+    }
+
+    // =========================================================================
+    // Decimal types
+    // NOTE: Core decimal parsing is tested in mod.rs::tests (parse_decimal_params).
+    // This test verifies DuckDB-specific fallback behavior only.
+    // =========================================================================
+
+    #[test]
+    fn test_duckdb_decimal_types_unconstrained() {
+        // Unconstrained DECIMAL/NUMERIC defaults to (38, 10) per DuckDB spec
+        match duckdb_type_to_arrow("DECIMAL") {
+            DataType::Decimal128(precision, scale) => {
+                assert_eq!(precision, 38);
+                assert_eq!(scale, 10);
+            }
+            other => panic!("Expected Decimal128, got {:?}", other),
+        }
+
+        match duckdb_type_to_arrow("NUMERIC") {
+            DataType::Decimal128(precision, scale) => {
+                assert_eq!(precision, 38);
+                assert_eq!(scale, 10);
+            }
+            other => panic!("Expected Decimal128, got {:?}", other),
+        }
+    }
+
+    // =========================================================================
+    // String types
+    // =========================================================================
+
+    #[test]
+    fn test_duckdb_varchar_types() {
         assert!(matches!(duckdb_type_to_arrow("VARCHAR"), DataType::Utf8));
         assert!(matches!(
             duckdb_type_to_arrow("VARCHAR(255)"),
             DataType::Utf8
         ));
-        assert!(matches!(duckdb_type_to_arrow("BOOLEAN"), DataType::Boolean));
-        assert!(matches!(duckdb_type_to_arrow("BIGINT"), DataType::Int64));
+    }
+
+    #[test]
+    fn test_duckdb_text_type() {
+        assert!(matches!(duckdb_type_to_arrow("TEXT"), DataType::Utf8));
+    }
+
+    #[test]
+    fn test_duckdb_string_type() {
+        assert!(matches!(duckdb_type_to_arrow("STRING"), DataType::Utf8));
+    }
+
+    #[test]
+    fn test_duckdb_char_types() {
+        assert!(matches!(duckdb_type_to_arrow("CHAR"), DataType::Utf8));
+        assert!(matches!(duckdb_type_to_arrow("CHAR(10)"), DataType::Utf8));
+        assert!(matches!(duckdb_type_to_arrow("BPCHAR"), DataType::Utf8));
+    }
+
+    // =========================================================================
+    // Binary types
+    // =========================================================================
+
+    #[test]
+    fn test_duckdb_binary_types() {
+        assert!(matches!(duckdb_type_to_arrow("BLOB"), DataType::Binary));
+        assert!(matches!(duckdb_type_to_arrow("BYTEA"), DataType::Binary));
+        assert!(matches!(duckdb_type_to_arrow("BINARY"), DataType::Binary));
+        assert!(matches!(
+            duckdb_type_to_arrow("VARBINARY"),
+            DataType::Binary
+        ));
+    }
+
+    // =========================================================================
+    // Date/Time types
+    // =========================================================================
+
+    #[test]
+    fn test_duckdb_date_type() {
+        assert!(matches!(duckdb_type_to_arrow("DATE"), DataType::Date32));
+    }
+
+    #[test]
+    fn test_duckdb_time_type() {
+        match duckdb_type_to_arrow("TIME") {
+            DataType::Time64(unit) => {
+                assert!(matches!(unit, TimeUnit::Microsecond));
+            }
+            other => panic!("Expected Time64, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_duckdb_timestamp_type() {
+        match duckdb_type_to_arrow("TIMESTAMP") {
+            DataType::Timestamp(unit, tz) => {
+                assert!(matches!(unit, TimeUnit::Microsecond));
+                assert!(tz.is_none());
+            }
+            other => panic!("Expected Timestamp, got {:?}", other),
+        }
+
+        match duckdb_type_to_arrow("DATETIME") {
+            DataType::Timestamp(unit, tz) => {
+                assert!(matches!(unit, TimeUnit::Microsecond));
+                assert!(tz.is_none());
+            }
+            other => panic!("Expected Timestamp, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_duckdb_timestamptz_type() {
+        match duckdb_type_to_arrow("TIMESTAMPTZ") {
+            DataType::Timestamp(unit, tz) => {
+                assert!(matches!(unit, TimeUnit::Microsecond));
+                assert_eq!(tz.as_deref(), Some("UTC"));
+            }
+            other => panic!("Expected Timestamp with UTC, got {:?}", other),
+        }
+
+        match duckdb_type_to_arrow("TIMESTAMP WITH TIME ZONE") {
+            DataType::Timestamp(unit, tz) => {
+                assert!(matches!(unit, TimeUnit::Microsecond));
+                assert_eq!(tz.as_deref(), Some("UTC"));
+            }
+            other => panic!("Expected Timestamp with UTC, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_duckdb_interval_type() {
+        match duckdb_type_to_arrow("INTERVAL") {
+            DataType::Interval(unit) => {
+                assert!(matches!(unit, IntervalUnit::MonthDayNano));
+            }
+            other => panic!("Expected Interval, got {:?}", other),
+        }
+    }
+
+    // =========================================================================
+    // UUID type
+    // =========================================================================
+
+    #[test]
+    fn test_duckdb_uuid_type() {
+        assert!(matches!(duckdb_type_to_arrow("UUID"), DataType::Utf8));
+    }
+
+    // =========================================================================
+    // JSON type
+    // =========================================================================
+
+    #[test]
+    fn test_duckdb_json_type() {
+        assert!(matches!(duckdb_type_to_arrow("JSON"), DataType::Utf8));
+    }
+
+    // =========================================================================
+    // Unknown types (fall back to Utf8)
+    // =========================================================================
+
+    #[test]
+    fn test_duckdb_unknown_type_fallback() {
+        assert!(matches!(
+            duckdb_type_to_arrow("UNKNOWN_TYPE"),
+            DataType::Utf8
+        ));
+        assert!(matches!(
+            duckdb_type_to_arrow("CUSTOM_TYPE"),
+            DataType::Utf8
+        ));
+        assert!(matches!(duckdb_type_to_arrow("LIST"), DataType::Utf8));
+        assert!(matches!(duckdb_type_to_arrow("STRUCT"), DataType::Utf8));
+        assert!(matches!(duckdb_type_to_arrow("MAP"), DataType::Utf8));
+    }
+
+    // =========================================================================
+    // Case insensitivity
+    // =========================================================================
+
+    #[test]
+    fn test_duckdb_case_insensitivity() {
+        // DuckDB uses uppercase internally, but should handle lowercase too
+        assert!(matches!(duckdb_type_to_arrow("boolean"), DataType::Boolean));
+        assert!(matches!(duckdb_type_to_arrow("Boolean"), DataType::Boolean));
+        assert!(matches!(duckdb_type_to_arrow("integer"), DataType::Int32));
+        assert!(matches!(duckdb_type_to_arrow("Integer"), DataType::Int32));
+        assert!(matches!(duckdb_type_to_arrow("varchar"), DataType::Utf8));
+        assert!(matches!(duckdb_type_to_arrow("VarChar"), DataType::Utf8));
+        assert!(matches!(duckdb_type_to_arrow("bigint"), DataType::Int64));
+        assert!(matches!(duckdb_type_to_arrow("BigInt"), DataType::Int64));
+    }
+
+    // =========================================================================
+    // Parameterized types (with size info)
+    // =========================================================================
+
+    #[test]
+    fn test_duckdb_parameterized_types() {
+        // Ensure types with size parameters are handled correctly
+        assert!(matches!(
+            duckdb_type_to_arrow("VARCHAR(255)"),
+            DataType::Utf8
+        ));
+        assert!(matches!(duckdb_type_to_arrow("CHAR(10)"), DataType::Utf8));
+
+        // Decimal with parameters
+        match duckdb_type_to_arrow("DECIMAL(18,4)") {
+            DataType::Decimal128(_, _) => {}
+            other => panic!("Expected Decimal128, got {:?}", other),
+        }
     }
 }
