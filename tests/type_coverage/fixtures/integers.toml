@@ -1,0 +1,115 @@
+# Integer test values for type coverage testing.
+#
+# These values cover the range of integer types across different databases.
+# Each value specifies requirements that determine compatibility with target types.
+
+[category]
+name = "integers"
+description = "Integer values covering various ranges and edge cases"
+semantic_type = "Integer"
+
+# === Zero and small positive values ===
+
+[[values]]
+name = "zero"
+sql = "0"
+expected = "0"
+note = "Zero value, compatible with all integer types"
+
+[[values]]
+name = "positive_small"
+sql = "42"
+expected = "42"
+note = "Small positive integer"
+
+[[values]]
+name = "negative_small"
+sql = "-42"
+expected = "-42"
+[values.requires]
+signed = true
+
+# === 8-bit boundaries ===
+
+[[values]]
+name = "u8_max"
+sql = "255"
+expected = "255"
+note = "Maximum unsigned 8-bit value (TINYINT UNSIGNED max)"
+
+# === 16-bit boundaries ===
+
+[[values]]
+name = "i16_max"
+sql = "32767"
+expected = "32767"
+note = "Maximum signed 16-bit value (SMALLINT max)"
+
+[[values]]
+name = "i16_min"
+sql = "-32768"
+expected = "-32768"
+note = "Minimum signed 16-bit value (SMALLINT min)"
+[values.requires]
+signed = true
+
+[[values]]
+name = "u16_max"
+sql = "65535"
+expected = "65535"
+note = "Maximum unsigned 16-bit value (SMALLINT UNSIGNED max)"
+
+# === 32-bit boundaries ===
+
+[[values]]
+name = "i32_max"
+sql = "2147483647"
+expected = "2147483647"
+note = "Maximum signed 32-bit value (INTEGER max)"
+
+[[values]]
+name = "i32_min"
+sql = "-2147483648"
+expected = "-2147483648"
+note = "Minimum signed 32-bit value (INTEGER min)"
+[values.requires]
+signed = true
+
+[[values]]
+name = "u32_max"
+sql = "4294967295"
+expected = "4294967295"
+note = "Maximum unsigned 32-bit value (INTEGER UNSIGNED max)"
+
+# === 64-bit boundaries ===
+
+[[values]]
+name = "i64_max"
+sql = "9223372036854775807"
+expected = "9223372036854775807"
+note = "Maximum signed 64-bit value (BIGINT max)"
+
+[[values]]
+name = "i64_min"
+sql = "-9223372036854775808"
+expected = "-9223372036854775808"
+note = "Minimum signed 64-bit value (BIGINT min)"
+[values.requires]
+signed = true
+
+[[values]]
+name = "u64_max"
+sql = "18446744073709551615"
+expected = "18446744073709551615"
+note = "Maximum unsigned 64-bit value (BIGINT UNSIGNED max)"
+
+# === NULL value ===
+
+[[values]]
+name = "null"
+sql = "NULL"
+expected = ""
+expected_null = "NULL"
+note = "NULL integer value"
+[values.requires]
+nullable = true

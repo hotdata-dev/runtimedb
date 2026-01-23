@@ -1,0 +1,63 @@
+# Binary/blob test values for type coverage testing.
+#
+# These values cover binary types (BYTEA, BLOB, VARBINARY).
+# SQL values use a database-neutral representation that tests will convert
+# to the appropriate syntax for each database.
+#
+# Note: The `sql` field contains hex bytes (without prefix) that tests will
+# convert to appropriate database syntax:
+# - PostgreSQL: '\xHEX'::bytea
+# - MySQL: X'HEX'
+# - DuckDB: '\xHH\xHH...'::BLOB (byte-by-byte)
+#
+# IMPORTANT: Only include printable ASCII values that can be reliably compared
+# as text across all databases. Binary data with non-printable characters
+# cannot be reliably compared when databases cast to text.
+
+[category]
+name = "binary"
+description = "Binary data values including empty and printable ASCII patterns"
+semantic_type = "Binary"
+
+# === Basic values ===
+
+[[values]]
+name = "empty"
+sql = ""
+expected = ""
+note = "Empty binary value"
+
+[[values]]
+name = "simple_ascii"
+sql = "48454C4C4F"
+expected = "HELLO"
+note = "Simple ASCII bytes (HELLO in hex)"
+[values.requires]
+min_bytes = 5
+
+[[values]]
+name = "single_byte"
+sql = "41"
+expected = "A"
+note = "Single byte (ASCII 'A')"
+[values.requires]
+min_bytes = 1
+
+[[values]]
+name = "lowercase_text"
+sql = "68656C6C6F"
+expected = "hello"
+note = "Lowercase ASCII bytes (hello in hex)"
+[values.requires]
+min_bytes = 5
+
+# === NULL value ===
+
+[[values]]
+name = "null"
+sql = "NULL"
+expected = ""
+expected_null = "NULL"
+note = "NULL binary value"
+[values.requires]
+nullable = true

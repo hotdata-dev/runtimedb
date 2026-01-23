@@ -1,0 +1,96 @@
+# Decimal/numeric test values for type coverage testing.
+#
+# These values cover fixed-precision decimal types (DECIMAL, NUMERIC).
+# Precision and scale requirements determine compatibility with target types.
+
+[category]
+name = "decimals"
+description = "Fixed-precision decimal values with various precision and scale"
+semantic_type = "Decimal"
+
+# === Basic values ===
+
+[[values]]
+name = "zero"
+sql = "0.00"
+expected = "0.00"
+note = "Zero with scale 2"
+[values.requires]
+min_scale = 2
+
+[[values]]
+name = "simple"
+sql = "123.45"
+expected = "123.45"
+note = "Simple decimal with 5 digits precision, 2 scale"
+[values.requires]
+min_precision = 5
+min_scale = 2
+
+[[values]]
+name = "negative"
+sql = "-123.45"
+expected = "-123.45"
+note = "Negative decimal value"
+[values.requires]
+min_precision = 5
+min_scale = 2
+signed = true
+
+[[values]]
+name = "high_precision"
+sql = "12345678901234567890.123456789"
+expected = "12345678901234567890.123456789"
+note = "Very large decimal requiring high precision"
+[values.requires]
+min_precision = 29
+min_scale = 9
+
+[[values]]
+name = "leading_zeros_scale"
+sql = "0.000123"
+expected = "0.000123"
+note = "Value with leading zeros after decimal point"
+[values.requires]
+min_precision = 6
+min_scale = 6
+
+[[values]]
+name = "trailing_zeros"
+sql = "100.00"
+expected = "100.00"
+note = "Value with trailing zeros in fractional part"
+[values.requires]
+min_precision = 5
+min_scale = 2
+
+[[values]]
+name = "money_format"
+sql = "9999.99"
+expected = "9999.99"
+note = "Common money format (4 integer digits, 2 decimal)"
+[values.requires]
+min_precision = 6
+min_scale = 2
+
+# === Values requiring Utf8 fallback (precision > 38) ===
+
+[[values]]
+name = "ultra_high_precision"
+sql = "123456789012345678901234567890123456789.123456789"
+expected = "123456789012345678901234567890123456789.123456789"
+note = "48-digit decimal that exceeds Decimal128's 38-digit limit, requiring Utf8 fallback"
+[values.requires]
+min_precision = 48
+min_scale = 9
+
+# === NULL value ===
+
+[[values]]
+name = "null"
+sql = "NULL"
+expected = ""
+expected_null = "NULL"
+note = "NULL decimal value"
+[values.requires]
+nullable = true
