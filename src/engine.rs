@@ -19,7 +19,6 @@ use datafusion::arrow::datatypes::Schema;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::CatalogProvider;
 use datafusion::prelude::*;
-use log::{info, warn};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,6 +26,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::error;
+use tracing::{info, warn};
 
 /// Default insecure encryption key for development use only.
 /// This key is publicly known and provides NO security.
@@ -353,9 +353,20 @@ impl RuntimeEngine {
     }
 
     /// Execute a SQL query and return the results.
+    #[tracing::instrument(
+        name = "execute_query",
+        skip(self, sql),
+        fields(
+            runtimedb.sql = tracing::field::Empty,
+            runtimedb.rows_returned = tracing::field::Empty,
+        )
+    )]
     pub async fn execute_query(&self, sql: &str) -> Result<QueryResponse> {
         info!("Executing query: {}", sql);
         let start = Instant::now();
+        if crate::telemetry::include_sql_in_traces() {
+            tracing::Span::current().record("runtimedb.sql", sql);
+        }
         let df = self.df_ctx.sql(sql).await.map_err(|e| {
             error!("Error executing query: {}", e);
             e
@@ -367,6 +378,9 @@ impl RuntimeEngine {
         })?;
         info!("Execution completed in {:?}", start.elapsed());
         info!("Results available");
+
+        let row_count: usize = results.iter().map(|b| b.num_rows()).sum();
+        tracing::Span::current().record("runtimedb.rows_returned", row_count);
 
         Ok(QueryResponse {
             schema,
