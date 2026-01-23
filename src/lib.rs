@@ -2,6 +2,7 @@ pub mod catalog;
 pub mod config;
 pub mod datafetch;
 pub mod datafusion;
+pub mod datasets;
 mod engine;
 pub mod http;
 pub mod id;
