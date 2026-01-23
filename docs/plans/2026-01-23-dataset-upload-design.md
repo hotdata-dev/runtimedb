@@ -251,7 +251,7 @@ Deletes catalog entry and schedules Parquet files for deletion (using existing g
 - Contains only letters, numbers, underscores
 - Not a SQL reserved word
 - Max 128 characters
-- Unique across datasets
+- Unique within schema (currently only `default` schema exists)
 
 ### Format resolution:
 1. Explicit `format` in request
