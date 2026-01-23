@@ -5,7 +5,7 @@ use datafusion::prelude::SessionContext;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{CacheWriteHandle, StorageManager};
+use super::{CacheWriteHandle, DatasetWriteHandle, StorageManager};
 
 #[derive(Debug)]
 pub struct FilesystemStorage {
@@ -139,6 +139,55 @@ impl StorageManager for FilesystemStorage {
             .join(&handle.table)
             .join(&handle.version);
         Ok(format!("file://{}", version_dir.display()))
+    }
+
+    // Upload operations
+
+    fn upload_url(&self, upload_id: &str) -> String {
+        let path = self.cache_base.join("uploads").join(upload_id).join("raw");
+        format!("file://{}", path.display())
+    }
+
+    fn prepare_upload_write(&self, upload_id: &str) -> PathBuf {
+        self.cache_base.join("uploads").join(upload_id).join("raw")
+    }
+
+    async fn finalize_upload_write(&self, upload_id: &str) -> Result<String> {
+        // For local storage, the file is already in place.
+        Ok(self.upload_url(upload_id))
+    }
+
+    // Dataset operations
+
+    fn dataset_url(&self, dataset_id: &str, version: &str) -> String {
+        let path = self
+            .cache_base
+            .join("datasets")
+            .join(dataset_id)
+            .join(version)
+            .join("data.parquet");
+        format!("file://{}", path.display())
+    }
+
+    fn prepare_dataset_write(&self, dataset_id: &str) -> DatasetWriteHandle {
+        let version = nanoid::nanoid!(8);
+        let local_path = self
+            .cache_base
+            .join("datasets")
+            .join(dataset_id)
+            .join(&version)
+            .join("data.parquet");
+
+        DatasetWriteHandle {
+            local_path,
+            version,
+            dataset_id: dataset_id.to_string(),
+        }
+    }
+
+    async fn finalize_dataset_write(&self, handle: &DatasetWriteHandle) -> Result<String> {
+        // For local storage, the file is already in place.
+        Ok(self.dataset_url(&handle.dataset_id, &handle.version))
     }
 }
 

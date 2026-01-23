@@ -231,7 +231,7 @@ mod tests {
         BatchWriter, ColumnMetadata, DataFetchError, DataFetcher, TableMetadata,
     };
     use crate::secrets::{SecretMetadata, SecretStatus};
-    use crate::storage::{CacheWriteHandle, StorageManager};
+    use crate::storage::{CacheWriteHandle, DatasetWriteHandle, StorageManager};
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use datafusion::arrow::datatypes::DataType as ArrowDataType;
@@ -409,6 +409,51 @@ mod tests {
                 .join(&handle.table)
                 .join(&handle.version);
             Ok(format!("file://{}", version_dir.display()))
+        }
+
+        fn upload_url(&self, upload_id: &str) -> String {
+            format!(
+                "file://{}/uploads/{}/raw",
+                self.base_path.display(),
+                upload_id
+            )
+        }
+
+        fn prepare_upload_write(&self, upload_id: &str) -> PathBuf {
+            self.base_path.join("uploads").join(upload_id).join("raw")
+        }
+
+        async fn finalize_upload_write(&self, upload_id: &str) -> Result<String> {
+            Ok(self.upload_url(upload_id))
+        }
+
+        fn dataset_url(&self, dataset_id: &str, version: &str) -> String {
+            format!(
+                "file://{}/datasets/{}/{}/data.parquet",
+                self.base_path.display(),
+                dataset_id,
+                version
+            )
+        }
+
+        fn prepare_dataset_write(&self, dataset_id: &str) -> DatasetWriteHandle {
+            let version = format!("v{}", self.version_counter.fetch_add(1, Ordering::SeqCst));
+            let local_path = self
+                .base_path
+                .join("datasets")
+                .join(dataset_id)
+                .join(&version)
+                .join("data.parquet");
+
+            DatasetWriteHandle {
+                local_path,
+                version,
+                dataset_id: dataset_id.to_string(),
+            }
+        }
+
+        async fn finalize_dataset_write(&self, handle: &DatasetWriteHandle) -> Result<String> {
+            Ok(self.dataset_url(&handle.dataset_id, &handle.version))
         }
     }
 
