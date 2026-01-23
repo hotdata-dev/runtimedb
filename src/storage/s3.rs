@@ -112,6 +112,15 @@ impl StorageManager for S3Storage {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "delete_cache",
+        skip(self),
+        fields(
+            runtimedb.backend = "s3",
+            runtimedb.bucket = %self.bucket,
+            runtimedb.prefix = %prefix,
+        )
+    )]
     async fn delete_prefix(&self, prefix: &str) -> Result<()> {
         let url = Url::parse(prefix)?;
         let prefix_path = url.path().trim_start_matches('/');
@@ -151,6 +160,17 @@ impl StorageManager for S3Storage {
         })
     }
 
+    #[tracing::instrument(
+        name = "prepare_cache_write",
+        skip(self),
+        fields(
+            runtimedb.backend = "s3",
+            runtimedb.connection_id = connection_id,
+            runtimedb.schema = %schema,
+            runtimedb.table = %table,
+            runtimedb.bucket = %self.bucket,
+        )
+    )]
     fn prepare_cache_write(
         &self,
         connection_id: i32,
@@ -177,16 +197,31 @@ impl StorageManager for S3Storage {
         }
     }
 
+    #[tracing::instrument(
+        name = "finalize_cache_write",
+        skip(self),
+        fields(
+            runtimedb.backend = "s3",
+            runtimedb.bucket = %self.bucket,
+            runtimedb.key = tracing::field::Empty,
+            runtimedb.cache_url = tracing::field::Empty,
+        )
+    )]
     async fn finalize_cache_write(&self, handle: &CacheWriteHandle) -> Result<String> {
         // Build S3 path using the version from the handle
         let versioned_dir_url = format!(
             "s3://{}/cache/{}/{}/{}/{}",
             self.bucket, handle.connection_id, handle.schema, handle.table, handle.version
         );
-        let s3_path = ObjectPath::from(format!(
+        let s3_key = format!(
             "cache/{}/{}/{}/{}/data.parquet",
             handle.connection_id, handle.schema, handle.table, handle.version
-        ));
+        );
+        let s3_path = ObjectPath::from(s3_key.as_str());
+
+        // Record the key and cache_url on the current span
+        tracing::Span::current().record("runtimedb.key", &s3_key);
+        tracing::Span::current().record("runtimedb.cache_url", &versioned_dir_url);
 
         // Stream file to S3 using BufWriter to avoid loading entire file into memory.
         // BufWriter adaptively uses put() for small files or put_multipart() for large files.
