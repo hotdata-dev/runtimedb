@@ -826,6 +826,17 @@ impl RuntimeEngine {
     ///
     /// By default, only refreshes tables that already have cached data (parquet_path is set).
     /// Set `include_uncached` to true to also sync tables that haven't been cached yet.
+    #[tracing::instrument(
+        name = "refresh_connection",
+        skip(self),
+        fields(
+            runtimedb.connection_id = %connection_id,
+            runtimedb.parallelism = self.parallel_refresh_count,
+            runtimedb.tables_refreshed = tracing::field::Empty,
+            runtimedb.tables_failed = tracing::field::Empty,
+            runtimedb.rows_synced = tracing::field::Empty,
+        )
+    )]
     pub async fn refresh_connection_data(
         &self,
         connection_id: &str,
@@ -919,6 +930,11 @@ impl RuntimeEngine {
         }
 
         result.duration_ms = start.elapsed().as_millis() as u64;
+
+        tracing::Span::current().record("runtimedb.tables_refreshed", result.tables_refreshed);
+        tracing::Span::current().record("runtimedb.tables_failed", result.tables_failed);
+        tracing::Span::current().record("runtimedb.rows_synced", result.total_rows);
+
         Ok(result)
     }
 
