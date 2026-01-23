@@ -187,17 +187,13 @@ impl SchemaProvider for DatasetsSchemaProvider {
         let mut all_names = Vec::new();
         let mut offset = 0;
 
-        loop {
-            match block_on(self.catalog.list_datasets(PAGE_SIZE, offset)) {
-                Ok((datasets, has_more)) => {
-                    all_names.extend(datasets.into_iter().map(|d| d.table_name));
-                    if !has_more {
-                        break;
-                    }
-                    offset += PAGE_SIZE;
-                }
-                Err(_) => break,
+        while let Ok((datasets, has_more)) = block_on(self.catalog.list_datasets(PAGE_SIZE, offset))
+        {
+            all_names.extend(datasets.into_iter().map(|d| d.table_name));
+            if !has_more {
+                break;
             }
+            offset += PAGE_SIZE;
         }
 
         all_names

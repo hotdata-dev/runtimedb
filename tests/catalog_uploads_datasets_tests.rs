@@ -154,6 +154,170 @@ async fn test_consume_upload() {
     assert!(!not_found);
 }
 
+#[tokio::test]
+async fn test_claim_upload() {
+    let (catalog, _temp_dir) = create_test_catalog().await;
+
+    let upload = UploadInfo {
+        id: "upld_to_claim".to_string(),
+        status: "pending".to_string(),
+        storage_url: "s3://bucket/test.parquet".to_string(),
+        content_type: None,
+        content_encoding: None,
+        size_bytes: 500,
+        created_at: Utc::now(),
+        consumed_at: None,
+    };
+
+    catalog.create_upload(&upload).await.unwrap();
+
+    // Claim the upload
+    let claimed = catalog.claim_upload("upld_to_claim").await.unwrap();
+    assert!(claimed);
+
+    // Verify status changed to processing
+    let retrieved = catalog.get_upload("upld_to_claim").await.unwrap().unwrap();
+    assert_eq!(retrieved.status, "processing");
+
+    // Claiming again should return false (already claimed)
+    let claimed_again = catalog.claim_upload("upld_to_claim").await.unwrap();
+    assert!(!claimed_again);
+
+    // Claiming nonexistent upload returns false
+    let not_found = catalog.claim_upload("nonexistent").await.unwrap();
+    assert!(!not_found);
+}
+
+#[tokio::test]
+async fn test_release_upload() {
+    let (catalog, _temp_dir) = create_test_catalog().await;
+
+    let upload = UploadInfo {
+        id: "upld_to_release".to_string(),
+        status: "pending".to_string(),
+        storage_url: "s3://bucket/test.parquet".to_string(),
+        content_type: None,
+        content_encoding: None,
+        size_bytes: 500,
+        created_at: Utc::now(),
+        consumed_at: None,
+    };
+
+    catalog.create_upload(&upload).await.unwrap();
+
+    // First claim the upload
+    let claimed = catalog.claim_upload("upld_to_release").await.unwrap();
+    assert!(claimed);
+    let retrieved = catalog
+        .get_upload("upld_to_release")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retrieved.status, "processing");
+
+    // Release it back to pending
+    let released = catalog.release_upload("upld_to_release").await.unwrap();
+    assert!(released);
+
+    // Verify status changed back to pending
+    let retrieved = catalog
+        .get_upload("upld_to_release")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retrieved.status, "pending");
+
+    // Releasing a pending upload returns false
+    let released_again = catalog.release_upload("upld_to_release").await.unwrap();
+    assert!(!released_again);
+
+    // Releasing nonexistent upload returns false
+    let not_found = catalog.release_upload("nonexistent").await.unwrap();
+    assert!(!not_found);
+}
+
+#[tokio::test]
+async fn test_claim_then_consume() {
+    let (catalog, _temp_dir) = create_test_catalog().await;
+
+    let upload = UploadInfo {
+        id: "upld_claim_consume".to_string(),
+        status: "pending".to_string(),
+        storage_url: "s3://bucket/test.parquet".to_string(),
+        content_type: None,
+        content_encoding: None,
+        size_bytes: 500,
+        created_at: Utc::now(),
+        consumed_at: None,
+    };
+
+    catalog.create_upload(&upload).await.unwrap();
+
+    // Claim the upload
+    let claimed = catalog.claim_upload("upld_claim_consume").await.unwrap();
+    assert!(claimed);
+
+    // Consume from processing state should work
+    let consumed = catalog.consume_upload("upld_claim_consume").await.unwrap();
+    assert!(consumed);
+
+    // Verify final state
+    let retrieved = catalog
+        .get_upload("upld_claim_consume")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retrieved.status, "consumed");
+    assert!(retrieved.consumed_at.is_some());
+}
+
+#[tokio::test]
+async fn test_cannot_claim_consumed_upload() {
+    let (catalog, _temp_dir) = create_test_catalog().await;
+
+    let upload = UploadInfo {
+        id: "upld_already_consumed".to_string(),
+        status: "consumed".to_string(),
+        storage_url: "s3://bucket/test.parquet".to_string(),
+        content_type: None,
+        content_encoding: None,
+        size_bytes: 500,
+        created_at: Utc::now(),
+        consumed_at: Some(Utc::now()),
+    };
+
+    catalog.create_upload(&upload).await.unwrap();
+
+    // Cannot claim a consumed upload
+    let claimed = catalog.claim_upload("upld_already_consumed").await.unwrap();
+    assert!(!claimed);
+}
+
+#[tokio::test]
+async fn test_cannot_release_consumed_upload() {
+    let (catalog, _temp_dir) = create_test_catalog().await;
+
+    let upload = UploadInfo {
+        id: "upld_consumed_no_release".to_string(),
+        status: "consumed".to_string(),
+        storage_url: "s3://bucket/test.parquet".to_string(),
+        content_type: None,
+        content_encoding: None,
+        size_bytes: 500,
+        created_at: Utc::now(),
+        consumed_at: Some(Utc::now()),
+    };
+
+    catalog.create_upload(&upload).await.unwrap();
+
+    // Cannot release a consumed upload
+    let released = catalog
+        .release_upload("upld_consumed_no_release")
+        .await
+        .unwrap();
+    assert!(!released);
+}
+
 // ============================================================================
 // Dataset tests
 // ============================================================================

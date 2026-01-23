@@ -971,20 +971,37 @@ impl RuntimeEngine {
             anyhow::bail!("Table name '{}' is already in use", table_name);
         }
 
+        // Track claimed upload ID for rollback on failure
+        let mut claimed_upload_id: Option<String> = None;
+
         // Get data and format based on source
         let (data, format, source_type, source_config) = match &source {
             DatasetSource::Upload { upload_id, format } => {
                 // Atomically claim the upload to prevent concurrent dataset creation
                 // This must happen before reading data to avoid race conditions
-                let claimed = self.catalog.consume_upload(upload_id).await?;
+                let claimed = self.catalog.claim_upload(upload_id).await?;
                 if !claimed {
-                    // Either upload doesn't exist or was already consumed
+                    // Either upload doesn't exist, was already claimed, or consumed
                     let upload = self.catalog.get_upload(upload_id).await?;
-                    if upload.is_none() {
-                        anyhow::bail!("Upload '{}' not found", upload_id);
+                    match upload {
+                        None => anyhow::bail!("Upload '{}' not found", upload_id),
+                        Some(u) if u.status == "consumed" => {
+                            anyhow::bail!("Upload '{}' has already been consumed", upload_id)
+                        }
+                        Some(u) if u.status == "processing" => {
+                            anyhow::bail!(
+                                "Upload '{}' is currently being processed by another request",
+                                upload_id
+                            )
+                        }
+                        Some(_) => {
+                            anyhow::bail!("Upload '{}' is not available", upload_id)
+                        }
                     }
-                    anyhow::bail!("Upload '{}' has already been consumed", upload_id);
                 }
+
+                // Track that we claimed this upload for potential rollback
+                claimed_upload_id = Some(upload_id.clone());
 
                 // Get upload info for format detection (we know it exists since claim succeeded)
                 let upload = self
@@ -995,7 +1012,14 @@ impl RuntimeEngine {
 
                 // Read data from storage
                 let upload_url = self.storage.upload_url(upload_id);
-                let data = self.storage.read(&upload_url).await?;
+                let data = match self.storage.read(&upload_url).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        // Release the upload back to pending state
+                        let _ = self.catalog.release_upload(upload_id).await;
+                        return Err(e);
+                    }
+                };
 
                 // Determine format
                 let format = format
@@ -1037,52 +1061,79 @@ impl RuntimeEngine {
             }
         };
 
+        // Helper macro to release upload on error
+        macro_rules! release_on_error {
+            ($result:expr) => {
+                match $result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        if let Some(ref upload_id) = claimed_upload_id {
+                            let _ = self.catalog.release_upload(upload_id).await;
+                        }
+                        return Err(e.into());
+                    }
+                }
+            };
+        }
+
         // Convert data to Arrow batches
         let batches = match format.as_str() {
             "csv" => {
                 // Infer schema from first 10000 rows
                 let mut cursor = std::io::Cursor::new(&data);
-                let (schema, _) = Format::default()
+                let (schema, _) = release_on_error!(Format::default()
                     .with_header(true)
-                    .infer_schema(&mut cursor, Some(10_000))?;
-                cursor.seek(SeekFrom::Start(0))?;
+                    .infer_schema(&mut cursor, Some(10_000)));
+                release_on_error!(cursor.seek(SeekFrom::Start(0)));
 
                 // Build reader with inferred schema
-                let reader = ReaderBuilder::new(Arc::new(schema))
+                let reader = release_on_error!(ReaderBuilder::new(Arc::new(schema))
                     .with_header(true)
-                    .build(cursor)?;
-                reader.into_iter().collect::<Result<Vec<_>, _>>()?
+                    .build(cursor));
+                release_on_error!(reader.into_iter().collect::<Result<Vec<_>, _>>())
             }
             "json" => {
                 // Use arrow-json crate directly for JSON parsing
                 use arrow_json::reader::infer_json_schema_from_seekable;
 
                 let mut cursor = std::io::Cursor::new(&data);
-                let (schema, _) = infer_json_schema_from_seekable(&mut cursor, Some(10_000))?;
-                cursor.seek(SeekFrom::Start(0))?;
+                let (schema, _) =
+                    release_on_error!(infer_json_schema_from_seekable(&mut cursor, Some(10_000)));
+                release_on_error!(cursor.seek(SeekFrom::Start(0)));
 
-                let reader = arrow_json::ReaderBuilder::new(Arc::new(schema))
+                let reader = release_on_error!(arrow_json::ReaderBuilder::new(Arc::new(schema))
                     .with_batch_size(1024)
-                    .build(cursor)?;
+                    .build(cursor));
 
-                reader.into_iter().collect::<Result<Vec<_>, _>>()?
+                release_on_error!(reader.into_iter().collect::<Result<Vec<_>, _>>())
             }
             "parquet" => {
                 // Use DataFusion to read parquet from bytes
                 use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
                 let cursor = axum::body::Bytes::from(data);
-                let reader = ParquetRecordBatchReaderBuilder::try_new(cursor)?.build()?;
-                reader.into_iter().collect::<Result<Vec<_>, _>>()?
+                let reader = release_on_error!(release_on_error!(
+                    ParquetRecordBatchReaderBuilder::try_new(cursor)
+                )
+                .build());
+                release_on_error!(reader.into_iter().collect::<Result<Vec<_>, _>>())
             }
-            _ => anyhow::bail!("Unsupported format: {}", format),
+            _ => {
+                if let Some(ref upload_id) = claimed_upload_id {
+                    let _ = self.catalog.release_upload(upload_id).await;
+                }
+                anyhow::bail!("Unsupported format: {}", format);
+            }
         };
 
         if batches.is_empty() {
+            if let Some(ref upload_id) = claimed_upload_id {
+                let _ = self.catalog.release_upload(upload_id).await;
+            }
             anyhow::bail!("No data found in the input");
         }
 
         let schema = batches[0].schema();
-        let schema_json = serde_json::to_string(&schema.as_ref())?;
+        let schema_json = release_on_error!(serde_json::to_string(&schema.as_ref()));
 
         // Write to parquet storage
         let dataset_id = crate::id::generate_dataset_id();
@@ -1090,16 +1141,23 @@ impl RuntimeEngine {
 
         let mut writer: Box<dyn crate::datafetch::BatchWriter> =
             Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
-        writer.init(&schema)?;
+        release_on_error!(writer.init(&schema));
 
         for batch in &batches {
-            writer.write_batch(batch)?;
+            release_on_error!(writer.write_batch(batch));
         }
-        writer.close()?;
+        release_on_error!(writer.close());
 
         // Finalize storage (upload to S3 if needed)
         // Note: finalize_dataset_write returns the full file URL including data.parquet
-        let parquet_url = self.storage.finalize_dataset_write(&handle).await?;
+        let parquet_url = release_on_error!(self.storage.finalize_dataset_write(&handle).await);
+
+        // From this point on, if we fail we need to clean up the parquet file too
+        // Extract the directory URL from the file URL (remove /data.parquet)
+        let parquet_dir_url = parquet_url
+            .strip_suffix("/data.parquet")
+            .unwrap_or(&parquet_url)
+            .to_string();
 
         // Create catalog record
         let now = Utc::now();
@@ -1116,7 +1174,36 @@ impl RuntimeEngine {
             updated_at: now,
         };
 
-        self.catalog.create_dataset(&dataset).await?;
+        if let Err(e) = self.catalog.create_dataset(&dataset).await {
+            // Clean up the parquet file we wrote
+            if let Err(cleanup_err) = self.storage.delete_prefix(&parquet_dir_url).await {
+                tracing::warn!(
+                    dataset_id = %dataset.id,
+                    path = %parquet_dir_url,
+                    error = %cleanup_err,
+                    "Failed to clean up orphaned parquet directory after catalog insert failure"
+                );
+            }
+            // Release the upload back to pending state
+            if let Some(ref upload_id) = claimed_upload_id {
+                let _ = self.catalog.release_upload(upload_id).await;
+            }
+            return Err(e);
+        }
+
+        // Only consume the upload after everything succeeded
+        if let Some(ref upload_id) = claimed_upload_id {
+            if let Err(e) = self.catalog.consume_upload(upload_id).await {
+                // Dataset was created successfully, but we couldn't mark upload as consumed.
+                // This is not fatal - the upload will remain in "processing" state but the
+                // dataset is valid. Log a warning but don't fail.
+                tracing::warn!(
+                    upload_id = %upload_id,
+                    error = %e,
+                    "Failed to mark upload as consumed after successful dataset creation"
+                );
+            }
+        }
 
         Ok(dataset)
     }

@@ -506,8 +506,31 @@ impl CatalogManager for PostgresCatalogManager {
     }
 
     async fn consume_upload(&self, id: &str) -> Result<bool> {
+        // Accept both pending and processing states (processing is the expected state after claim)
         let result = sqlx::query(
-            "UPDATE uploads SET status = 'consumed', consumed_at = NOW() WHERE id = $1 AND status = 'pending'",
+            "UPDATE uploads SET status = 'consumed', consumed_at = NOW() WHERE id = $1 AND status IN ('pending', 'processing')",
+        )
+        .bind(id)
+        .execute(self.backend.pool())
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn claim_upload(&self, id: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE uploads SET status = 'processing' WHERE id = $1 AND status = 'pending'",
+        )
+        .bind(id)
+        .execute(self.backend.pool())
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn release_upload(&self, id: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE uploads SET status = 'pending' WHERE id = $1 AND status = 'processing'",
         )
         .bind(id)
         .execute(self.backend.pool())

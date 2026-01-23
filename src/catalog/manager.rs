@@ -237,8 +237,16 @@ pub trait CatalogManager: Debug + Send + Sync {
     /// List uploads, optionally filtered by status.
     async fn list_uploads(&self, status: Option<&str>) -> Result<Vec<UploadInfo>>;
 
-    /// Mark an upload as consumed. Returns true if the upload was pending and is now consumed.
+    /// Mark an upload as consumed. Returns true if the upload was pending/processing and is now consumed.
     async fn consume_upload(&self, id: &str) -> Result<bool>;
+
+    /// Atomically claim an upload for processing. Returns true if the upload was pending
+    /// and is now in "processing" state. This prevents concurrent dataset creation.
+    async fn claim_upload(&self, id: &str) -> Result<bool>;
+
+    /// Release a claimed upload back to pending state. Used when dataset creation fails
+    /// after claiming but before consuming. Returns true if the upload was processing.
+    async fn release_upload(&self, id: &str) -> Result<bool>;
 
     // Dataset management methods
 

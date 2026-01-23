@@ -559,10 +559,33 @@ impl CatalogManager for SqliteCatalogManager {
 
     async fn consume_upload(&self, id: &str) -> Result<bool> {
         let consumed_at = Utc::now().to_rfc3339();
+        // Accept both pending and processing states (processing is the expected state after claim)
         let result = sqlx::query(
-            "UPDATE uploads SET status = 'consumed', consumed_at = ? WHERE id = ? AND status = 'pending'",
+            "UPDATE uploads SET status = 'consumed', consumed_at = ? WHERE id = ? AND status IN ('pending', 'processing')",
         )
         .bind(&consumed_at)
+        .bind(id)
+        .execute(self.backend.pool())
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn claim_upload(&self, id: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE uploads SET status = 'processing' WHERE id = ? AND status = 'pending'",
+        )
+        .bind(id)
+        .execute(self.backend.pool())
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn release_upload(&self, id: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE uploads SET status = 'pending' WHERE id = ? AND status = 'processing'",
+        )
         .bind(id)
         .execute(self.backend.pool())
         .await?;

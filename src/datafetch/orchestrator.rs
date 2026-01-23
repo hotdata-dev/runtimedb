@@ -701,6 +701,14 @@ mod tests {
             Ok(false)
         }
 
+        async fn claim_upload(&self, _id: &str) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn release_upload(&self, _id: &str) -> Result<bool> {
+            Ok(false)
+        }
+
         async fn create_dataset(&self, _dataset: &crate::catalog::DatasetInfo) -> Result<()> {
             Ok(())
         }
