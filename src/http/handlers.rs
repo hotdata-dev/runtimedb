@@ -882,12 +882,28 @@ pub struct ListUploadsParams {
     pub status: Option<String>,
 }
 
+/// Maximum upload size: 2GB
+const MAX_UPLOAD_SIZE: usize = 2 * 1024 * 1024 * 1024;
+
 /// Handler for POST /v1/files - Upload a file
 pub async fn upload_file(
     State(engine): State<Arc<RuntimeEngine>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<(StatusCode, Json<UploadResponse>), ApiError> {
+    // Validate upload is not empty
+    if body.is_empty() {
+        return Err(ApiError::bad_request("Upload cannot be empty"));
+    }
+
+    // Validate upload size
+    if body.len() > MAX_UPLOAD_SIZE {
+        return Err(ApiError::bad_request(format!(
+            "Upload exceeds maximum size of {} bytes",
+            MAX_UPLOAD_SIZE
+        )));
+    }
+
     // Get content type from headers
     let content_type = headers
         .get(header::CONTENT_TYPE)
