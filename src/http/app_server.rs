@@ -9,6 +9,7 @@ use crate::RuntimeEngine;
 use axum::routing::{delete, get, post};
 use axum::Router;
 use std::sync::Arc;
+use tower_http::trace::TraceLayer;
 
 pub struct AppServer {
     pub router: Router,
@@ -62,7 +63,8 @@ impl AppServer {
                 )
                 .route(PATH_RESULTS, get(list_results_handler))
                 .route(PATH_RESULT, get(get_result_handler))
-                .with_state(engine.clone()),
+                .with_state(engine.clone())
+                .layer(TraceLayer::new_for_http()),
             engine,
         }
     }
