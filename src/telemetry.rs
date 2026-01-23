@@ -5,9 +5,11 @@
 //! Otherwise, only console logging is enabled.
 
 use opentelemetry::trace::TracerProvider;
+use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::SdkTracerProvider;
+use opentelemetry_sdk::Resource;
 use std::sync::OnceLock;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -35,6 +37,15 @@ pub fn init_telemetry() -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     let fmt_layer = tracing_subscriber::fmt::layer();
 
     if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
+        // Get service name from env or use default
+        let service_name =
+            std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "runtimedb".to_string());
+
+        // Create resource with service name
+        let resource = Resource::builder()
+            .with_attributes([KeyValue::new("service.name", service_name.clone())])
+            .build();
+
         // OTLP export enabled
         let exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_tonic()
@@ -42,6 +53,7 @@ pub fn init_telemetry() -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
             .build()?;
 
         let tracer_provider = SdkTracerProvider::builder()
+            .with_resource(resource)
             .with_batch_exporter(exporter)
             .build();
 
@@ -57,7 +69,7 @@ pub fn init_telemetry() -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
             .with(otel_layer)
             .init();
 
-        tracing::info!(endpoint = %endpoint, "OpenTelemetry OTLP export enabled");
+        tracing::info!(endpoint = %endpoint, service_name = %service_name, "OpenTelemetry OTLP export enabled");
     } else {
         // Console-only logging
         tracing_subscriber::registry()

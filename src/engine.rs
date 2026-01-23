@@ -394,6 +394,13 @@ impl RuntimeEngine {
     /// Returns the result ID on success, or an error if persistence fails.
     /// This is a best-effort operation - callers should handle errors gracefully
     /// since the query results are still valid even if persistence fails.
+    #[tracing::instrument(
+        name = "persist_result",
+        skip(self, schema, batches),
+        fields(
+            runtimedb.result_id = tracing::field::Empty,
+        )
+    )]
     pub async fn persist_result(
         &self,
         schema: &Arc<Schema>,
@@ -421,6 +428,8 @@ impl RuntimeEngine {
         };
 
         self.catalog.store_result(&query_result).await?;
+
+        tracing::Span::current().record("runtimedb.result_id", &result_id);
 
         Ok(result_id)
     }
