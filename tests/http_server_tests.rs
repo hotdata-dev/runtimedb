@@ -1819,7 +1819,7 @@ async fn test_get_dataset() -> Result<()> {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(&path_dataset(dataset_id))
+                .uri(path_dataset(dataset_id))
                 .body(Body::empty())?,
         )
         .await?;
@@ -1846,7 +1846,7 @@ async fn test_get_dataset_not_found() -> Result<()> {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(&path_dataset("data_nonexistent12345678901234"))
+                .uri(path_dataset("data_nonexistent12345678901234"))
                 .body(Body::empty())?,
         )
         .await?;
@@ -1897,7 +1897,7 @@ async fn test_update_dataset() -> Result<()> {
         .oneshot(
             Request::builder()
                 .method("PUT")
-                .uri(&path_dataset(dataset_id))
+                .uri(path_dataset(dataset_id))
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&json!({
                     "label": "Updated Label",
@@ -1955,7 +1955,7 @@ async fn test_delete_dataset() -> Result<()> {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri(&path_dataset(dataset_id))
+                .uri(path_dataset(dataset_id))
                 .body(Body::empty())?,
         )
         .await?;
@@ -1969,7 +1969,7 @@ async fn test_delete_dataset() -> Result<()> {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(&path_dataset(dataset_id))
+                .uri(path_dataset(dataset_id))
                 .body(Body::empty())?,
         )
         .await?;

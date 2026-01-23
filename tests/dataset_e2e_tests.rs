@@ -135,8 +135,9 @@ async fn test_full_upload_to_query_flow() {
     assert_eq!(get_f64_value(total_col.as_ref(), 1), 1050.0);
 
     // 6. List datasets shows it
-    let datasets = engine.catalog().list_datasets().await.unwrap();
+    let (datasets, has_more) = engine.catalog().list_datasets(100, 0).await.unwrap();
     assert_eq!(datasets.len(), 1);
+    assert!(!has_more);
     assert_eq!(datasets[0].id, dataset.id);
     assert_eq!(datasets[0].label, "Product Inventory");
 }
@@ -220,7 +221,7 @@ async fn test_inline_creation_and_query() {
     assert_eq!(get_i64_value(total_col.as_ref(), 0), 4500);
 
     // Also verify listing shows the dataset
-    let datasets = engine.catalog().list_datasets().await.unwrap();
+    let (datasets, _) = engine.catalog().list_datasets(100, 0).await.unwrap();
     assert_eq!(datasets.len(), 1);
     assert_eq!(datasets[0].id, dataset.id);
 }
@@ -362,7 +363,7 @@ async fn test_dataset_deletion_removes_from_catalog() {
     assert!(gone);
 
     // List datasets should be empty
-    let datasets = engine.catalog().list_datasets().await.unwrap();
+    let (datasets, _) = engine.catalog().list_datasets(100, 0).await.unwrap();
     assert!(datasets.is_empty());
 }
 
@@ -487,6 +488,42 @@ async fn test_auto_generated_table_name() {
         ))
         .await;
     assert!(result.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_reserved_word_label_rejected() {
+    let (engine, _temp) = create_test_engine().await;
+
+    // Labels that would generate SQL reserved words as table names should be rejected
+    let reserved_labels = ["select", "SELECT", "from", "where", "table", "order"];
+
+    for label in reserved_labels {
+        let result = engine
+            .create_dataset(
+                label,
+                None, // auto-generate table name
+                DatasetSource::Inline {
+                    inline: InlineData {
+                        format: "csv".to_string(),
+                        content: "a,b\n1,2".to_string(),
+                    },
+                },
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Label '{}' should produce invalid table name",
+            label
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("reserved") || err.contains("Cannot create valid table name"),
+            "Error for label '{}' should mention reserved word issue: {}",
+            label,
+            err
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

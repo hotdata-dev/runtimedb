@@ -21,7 +21,7 @@ where
 }
 
 pub use catalog_provider::RuntimeCatalogProvider;
-pub use datasets_provider::DatasetsCatalogProvider;
+pub use datasets_provider::{DatasetsCatalogProvider, DatasetsSchemaProvider};
 pub use information_schema::InformationSchemaProvider;
 pub use lazy_table_provider::LazyTableProvider;
 pub use runtimedb_catalog::RuntimeDbCatalogProvider;

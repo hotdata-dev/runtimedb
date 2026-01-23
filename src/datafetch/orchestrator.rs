@@ -717,8 +717,12 @@ mod tests {
             Ok(None)
         }
 
-        async fn list_datasets(&self) -> Result<Vec<crate::catalog::DatasetInfo>> {
-            Ok(vec![])
+        async fn list_datasets(
+            &self,
+            _limit: usize,
+            _offset: usize,
+        ) -> Result<(Vec<crate::catalog::DatasetInfo>, bool)> {
+            Ok((vec![], false))
         }
 
         async fn update_dataset(&self, _id: &str, _label: &str, _table_name: &str) -> Result<bool> {

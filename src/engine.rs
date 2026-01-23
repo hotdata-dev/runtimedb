@@ -947,7 +947,18 @@ impl RuntimeEngine {
                 crate::datasets::validate_table_name(name).map_err(|e| anyhow::anyhow!("{}", e))?;
                 name.to_string()
             }
-            None => crate::datasets::table_name_from_label(label),
+            None => {
+                let generated = crate::datasets::table_name_from_label(label);
+                // Validate the auto-generated name (labels like "select" can produce invalid names)
+                crate::datasets::validate_table_name(&generated).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Cannot create valid table name from label '{}': {}",
+                        label,
+                        e
+                    )
+                })?;
+                generated
+            }
         };
 
         // Check if table_name is already used
@@ -961,7 +972,8 @@ impl RuntimeEngine {
         }
 
         // Get data and format based on source
-        let (data, format, source_config) = match &source {
+        // Track upload_id so we can mark it consumed after successful dataset creation
+        let (data, format, source_config, upload_id_to_consume) = match &source {
             DatasetSource::Upload { upload_id, format } => {
                 // Get upload info
                 let upload = self
@@ -1002,10 +1014,7 @@ impl RuntimeEngine {
                 })
                 .to_string();
 
-                // Mark upload as consumed
-                self.catalog.consume_upload(upload_id).await?;
-
-                (data, format, source_config)
+                (data, format, source_config, Some(upload_id.clone()))
             }
             DatasetSource::Inline { inline } => {
                 let source_config = serde_json::json!({
@@ -1016,6 +1025,7 @@ impl RuntimeEngine {
                     inline.content.as_bytes().to_vec(),
                     inline.format.clone(),
                     source_config,
+                    None,
                 )
             }
         };
@@ -1101,6 +1111,12 @@ impl RuntimeEngine {
 
         self.catalog.create_dataset(&dataset).await?;
 
+        // Mark upload as consumed only after successful dataset creation
+        // This ensures the upload isn't lost if parsing or writing fails
+        if let Some(upload_id) = upload_id_to_consume {
+            self.catalog.consume_upload(&upload_id).await?;
+        }
+
         Ok(dataset)
     }
 
@@ -1122,6 +1138,26 @@ impl RuntimeEngine {
         }
 
         Ok(deleted)
+    }
+
+    /// Schedule deletion of a dataset's parquet file after the grace period.
+    /// This should be called when a dataset is deleted.
+    pub async fn schedule_dataset_file_deletion(&self, path: &str) -> Result<()> {
+        self.schedule_file_deletion(path).await
+    }
+
+    /// Invalidate the cached table provider for a dataset.
+    /// This should be called when a dataset is deleted or its table_name is changed.
+    pub fn invalidate_dataset_cache(&self, table_name: &str) {
+        use crate::datafusion::DatasetsSchemaProvider;
+
+        if let Some(catalog) = self.df_ctx.catalog("datasets") {
+            if let Some(schema) = catalog.schema("default") {
+                if let Some(provider) = schema.as_any().downcast_ref::<DatasetsSchemaProvider>() {
+                    provider.invalidate_cache(table_name);
+                }
+            }
+        }
     }
 
     /// Start background task that processes pending deletions periodically.

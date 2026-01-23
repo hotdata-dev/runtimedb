@@ -885,7 +885,7 @@ pub struct ListUploadsParams {
 }
 
 /// Maximum upload size: 2GB
-const MAX_UPLOAD_SIZE: usize = 2 * 1024 * 1024 * 1024;
+pub const MAX_UPLOAD_SIZE: usize = 2 * 1024 * 1024 * 1024;
 
 /// Handler for POST /v1/files - Upload a file
 pub async fn upload_file(
@@ -1017,27 +1017,56 @@ pub async fn create_dataset(
     ))
 }
 
+/// Default limit for listing datasets
+const DEFAULT_DATASETS_LIMIT: usize = 100;
+
+/// Maximum limit for listing datasets
+const MAX_DATASETS_LIMIT: usize = 1000;
+
+/// Query parameters for listing datasets
+#[derive(Debug, Deserialize)]
+pub struct ListDatasetsParams {
+    /// Maximum number of datasets to return (default: 100, max: 1000)
+    pub limit: Option<usize>,
+    /// Offset for pagination (default: 0)
+    pub offset: Option<usize>,
+}
+
 /// Handler for GET /v1/datasets - List all datasets
 pub async fn list_datasets(
     State(engine): State<Arc<RuntimeEngine>>,
+    QueryParams(params): QueryParams<ListDatasetsParams>,
 ) -> Result<Json<ListDatasetsResponse>, ApiError> {
-    let datasets = engine
+    let limit = params
+        .limit
+        .unwrap_or(DEFAULT_DATASETS_LIMIT)
+        .min(MAX_DATASETS_LIMIT);
+    let offset = params.offset.unwrap_or(0);
+
+    let (datasets, has_more) = engine
         .catalog()
-        .list_datasets()
+        .list_datasets(limit, offset)
         .await
         .map_err(|e| ApiError::internal_error(format!("Failed to list datasets: {}", e)))?;
 
+    let count = datasets.len();
+    let datasets = datasets
+        .into_iter()
+        .map(|d| DatasetSummary {
+            id: d.id,
+            label: d.label,
+            table_name: d.table_name,
+            created_at: d.created_at,
+            updated_at: d.updated_at,
+        })
+        .collect();
+
     Ok(Json(ListDatasetsResponse {
-        datasets: datasets
-            .into_iter()
-            .map(|d| DatasetSummary {
-                id: d.id,
-                label: d.label,
-                table_name: d.table_name,
-                created_at: d.created_at,
-                updated_at: d.updated_at,
-            })
-            .collect(),
+        datasets,
+        count,
+        offset,
+        limit,
+        has_more,
     }))
 }
 
@@ -1095,12 +1124,31 @@ pub async fn update_dataset(
         .ok_or_else(|| ApiError::not_found(format!("Dataset '{}' not found", id)))?;
 
     // Use existing values if not provided in request
+    let old_table_name = existing.table_name.clone();
     let new_label = request.label.unwrap_or(existing.label);
     let new_table_name = request.table_name.unwrap_or(existing.table_name);
 
     // Validate new table_name
     crate::datasets::validate_table_name(&new_table_name)
         .map_err(|e| ApiError::bad_request(format!("Invalid table name: {}", e)))?;
+
+    // Check table_name uniqueness if it's changing
+    if new_table_name != old_table_name {
+        if let Some(existing_dataset) = engine
+            .catalog()
+            .get_dataset_by_table_name("default", &new_table_name)
+            .await
+            .map_err(|e| ApiError::internal_error(format!("Failed to check table name: {}", e)))?
+        {
+            // Another dataset already uses this table_name
+            if existing_dataset.id != id {
+                return Err(ApiError::conflict(format!(
+                    "Table name '{}' is already in use by dataset '{}'",
+                    new_table_name, existing_dataset.id
+                )));
+            }
+        }
+    }
 
     // Update in catalog
     let updated = engine
@@ -1111,6 +1159,11 @@ pub async fn update_dataset(
 
     if !updated {
         return Err(ApiError::not_found(format!("Dataset '{}' not found", id)));
+    }
+
+    // Invalidate cache for the old table name if it changed
+    if new_table_name != old_table_name {
+        engine.invalidate_dataset_cache(&old_table_name);
     }
 
     // Fetch updated dataset to get updated_at
@@ -1140,11 +1193,29 @@ pub async fn delete_dataset(
         .await
         .map_err(|e| ApiError::internal_error(format!("Failed to delete dataset: {}", e)))?;
 
-    if deleted.is_none() {
-        return Err(ApiError::not_found(format!("Dataset '{}' not found", id)));
+    let deleted = match deleted {
+        Some(d) => d,
+        None => return Err(ApiError::not_found(format!("Dataset '{}' not found", id))),
+    };
+
+    // Schedule parquet directory deletion after grace period
+    // parquet_url is the full file path (e.g., .../version/data.parquet)
+    // but delete_prefix expects the directory, so strip the filename
+    let dir_url = deleted
+        .parquet_url
+        .strip_suffix("/data.parquet")
+        .unwrap_or(&deleted.parquet_url);
+    if let Err(e) = engine.schedule_dataset_file_deletion(dir_url).await {
+        tracing::warn!(
+            dataset_id = %id,
+            dir_url = %dir_url,
+            error = %e,
+            "Failed to schedule parquet directory deletion"
+        );
     }
 
-    // TODO: Schedule parquet file deletion
+    // Invalidate the cached table provider
+    engine.invalidate_dataset_cache(&deleted.table_name);
 
     Ok(StatusCode::NO_CONTENT)
 }

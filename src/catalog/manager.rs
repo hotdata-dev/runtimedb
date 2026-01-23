@@ -255,8 +255,10 @@ pub trait CatalogManager: Debug + Send + Sync {
         table_name: &str,
     ) -> Result<Option<DatasetInfo>>;
 
-    /// List all datasets.
-    async fn list_datasets(&self) -> Result<Vec<DatasetInfo>>;
+    /// List all datasets with pagination.
+    /// Datasets are ordered by label ascending.
+    /// Returns (datasets, has_more) where has_more indicates if there are more datasets after this page.
+    async fn list_datasets(&self, limit: usize, offset: usize) -> Result<(Vec<DatasetInfo>, bool)>;
 
     /// Update a dataset's label and table_name. Returns true if the dataset existed.
     async fn update_dataset(&self, id: &str, label: &str, table_name: &str) -> Result<bool>;

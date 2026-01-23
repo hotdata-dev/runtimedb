@@ -625,18 +625,26 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(row.map(DatasetInfoRow::into_dataset_info))
     }
 
-    async fn list_datasets(&self) -> Result<Vec<DatasetInfo>> {
+    async fn list_datasets(&self, limit: usize, offset: usize) -> Result<(Vec<DatasetInfo>, bool)> {
+        // Fetch one extra to determine if there are more results
+        let fetch_limit = limit + 1;
         let rows: Vec<DatasetInfoRow> = sqlx::query_as(
             "SELECT id, label, schema_name, table_name, parquet_url, arrow_schema_json, source_type, source_config, created_at, updated_at \
-             FROM datasets ORDER BY label",
+             FROM datasets ORDER BY label LIMIT ? OFFSET ?",
         )
+        .bind(fetch_limit as i64)
+        .bind(offset as i64)
         .fetch_all(self.backend.pool())
         .await?;
 
-        Ok(rows
+        let has_more = rows.len() > limit;
+        let datasets: Vec<DatasetInfo> = rows
             .into_iter()
+            .take(limit)
             .map(DatasetInfoRow::into_dataset_info)
-            .collect())
+            .collect();
+
+        Ok((datasets, has_more))
     }
 
     async fn update_dataset(&self, id: &str, label: &str, table_name: &str) -> Result<bool> {

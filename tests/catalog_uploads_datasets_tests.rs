@@ -352,6 +352,7 @@ async fn test_list_datasets() {
         catalog.create_dataset(&dataset).await.unwrap();
     }
 
-    let datasets = catalog.list_datasets().await.unwrap();
+    let (datasets, has_more) = catalog.list_datasets(100, 0).await.unwrap();
     assert_eq!(datasets.len(), 3);
+    assert!(!has_more);
 }

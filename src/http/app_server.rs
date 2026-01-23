@@ -4,9 +4,10 @@ use crate::http::handlers::{
     get_secret_handler, health_handler, information_schema_handler, list_connections_handler,
     list_datasets, list_results_handler, list_secrets_handler, list_uploads,
     purge_connection_cache_handler, purge_table_cache_handler, query_handler, refresh_handler,
-    update_dataset, update_secret_handler, upload_file,
+    update_dataset, update_secret_handler, upload_file, MAX_UPLOAD_SIZE,
 };
 use crate::RuntimeEngine;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post};
 use axum::Router;
 use std::sync::Arc;
@@ -66,7 +67,13 @@ impl AppServer {
                 )
                 .route(PATH_RESULTS, get(list_results_handler))
                 .route(PATH_RESULT, get(get_result_handler))
-                .route(PATH_FILES, post(upload_file).get(list_uploads))
+                // Upload route with body limit to reject oversized requests before buffering
+                .route(
+                    PATH_FILES,
+                    post(upload_file)
+                        .layer(DefaultBodyLimit::max(MAX_UPLOAD_SIZE))
+                        .get(list_uploads),
+                )
                 .route(PATH_DATASETS, post(create_dataset).get(list_datasets))
                 .route(
                     PATH_DATASET,

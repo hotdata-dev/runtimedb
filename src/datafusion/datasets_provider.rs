@@ -69,6 +69,14 @@ impl<V> BoundedCache<V> {
         self.order.push_back(key);
     }
 
+    /// Remove an entry from the cache.
+    fn remove(&mut self, key: &str) {
+        if self.entries.remove(key).is_some() {
+            // Remove from order queue (O(n) but called infrequently)
+            self.order.retain(|k| k != key);
+        }
+    }
+
     fn len(&self) -> usize {
         self.entries.len()
     }
@@ -158,6 +166,13 @@ impl DatasetsSchemaProvider {
             table_cache: RwLock::new(BoundedCache::new(DEFAULT_CACHE_CAPACITY)),
         }
     }
+
+    /// Invalidate a cached table by name.
+    /// Call this when a dataset is deleted or its table_name is changed.
+    pub fn invalidate_cache(&self, table_name: &str) {
+        let mut cache = self.table_cache.write().expect("cache lock poisoned");
+        cache.remove(table_name);
+    }
 }
 
 #[async_trait]
@@ -167,9 +182,9 @@ impl SchemaProvider for DatasetsSchemaProvider {
     }
 
     fn table_names(&self) -> Vec<String> {
-        // Query catalog for all datasets
-        match block_on(self.catalog.list_datasets()) {
-            Ok(datasets) => datasets.into_iter().map(|d| d.table_name).collect(),
+        // Query catalog for all datasets (use a high limit to get all names)
+        match block_on(self.catalog.list_datasets(10000, 0)) {
+            Ok((datasets, _)) => datasets.into_iter().map(|d| d.table_name).collect(),
             Err(_) => Vec::new(),
         }
     }

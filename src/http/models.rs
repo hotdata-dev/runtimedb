@@ -373,6 +373,14 @@ pub struct CreateDatasetResponse {
 #[derive(Debug, Serialize)]
 pub struct ListDatasetsResponse {
     pub datasets: Vec<DatasetSummary>,
+    /// Number of datasets returned in this response
+    pub count: usize,
+    /// Pagination offset used for this request
+    pub offset: usize,
+    /// Limit used for this request
+    pub limit: usize,
+    /// Whether there are more datasets available after this page
+    pub has_more: bool,
 }
 
 /// Dataset summary for listing
