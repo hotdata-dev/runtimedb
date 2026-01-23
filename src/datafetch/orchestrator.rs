@@ -636,6 +636,53 @@ mod tests {
         async fn count_connections_by_secret_id(&self, _secret_id: &str) -> Result<i64> {
             Ok(0)
         }
+
+        async fn create_upload(&self, _upload: &crate::catalog::UploadInfo) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get_upload(&self, _id: &str) -> Result<Option<crate::catalog::UploadInfo>> {
+            Ok(None)
+        }
+
+        async fn list_uploads(
+            &self,
+            _status: Option<&str>,
+        ) -> Result<Vec<crate::catalog::UploadInfo>> {
+            Ok(vec![])
+        }
+
+        async fn consume_upload(&self, _id: &str) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn create_dataset(&self, _dataset: &crate::catalog::DatasetInfo) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get_dataset(&self, _id: &str) -> Result<Option<crate::catalog::DatasetInfo>> {
+            Ok(None)
+        }
+
+        async fn get_dataset_by_table_name(
+            &self,
+            _schema_name: &str,
+            _table_name: &str,
+        ) -> Result<Option<crate::catalog::DatasetInfo>> {
+            Ok(None)
+        }
+
+        async fn list_datasets(&self) -> Result<Vec<crate::catalog::DatasetInfo>> {
+            Ok(vec![])
+        }
+
+        async fn update_dataset(&self, _id: &str, _label: &str, _table_name: &str) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn delete_dataset(&self, _id: &str) -> Result<Option<crate::catalog::DatasetInfo>> {
+            Ok(None)
+        }
     }
 
     /// Create a test SecretManager
