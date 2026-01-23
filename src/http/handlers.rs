@@ -28,6 +28,14 @@ use tracing::{error, warn};
 type SerializedBatchData = (Vec<String>, Vec<bool>, Vec<Vec<serde_json::Value>>);
 
 /// Handler for POST /query
+#[tracing::instrument(
+    name = "handler_query",
+    skip(engine, request),
+    fields(
+        runtimedb.row_count = tracing::field::Empty,
+        runtimedb.result_id = tracing::field::Empty,
+    )
+)]
 pub async fn query_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Json(request): Json<QueryRequest>,
@@ -58,6 +66,10 @@ pub async fn query_handler(
     // Serialize results for HTTP response
     let (columns, nullable, rows) = serialize_batches(schema, batches)?;
     let row_count = rows.len();
+
+    tracing::Span::current()
+        .record("runtimedb.row_count", row_count)
+        .record("runtimedb.result_id", result_id.as_deref().unwrap_or(""));
 
     Ok(Json(QueryResponse {
         result_id,
@@ -105,6 +117,11 @@ fn serialize_batches(
 }
 
 /// Handler for GET /information_schema
+#[tracing::instrument(
+    name = "handler_information_schema",
+    skip(engine, params),
+    fields(runtimedb.table_count = tracing::field::Empty)
+)]
 pub async fn information_schema_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     QueryParams(params): QueryParams<HashMap<String, String>>,
@@ -176,6 +193,8 @@ pub async fn information_schema_handler(
         })
         .collect();
 
+    tracing::Span::current().record("runtimedb.table_count", table_infos.len());
+
     Ok(Json(InformationSchemaResponse {
         tables: table_infos,
     }))
@@ -193,6 +212,15 @@ pub async fn health_handler() -> (StatusCode, Json<serde_json::Value>) {
 }
 
 /// Handler for POST /connections
+#[tracing::instrument(
+    name = "handler_create_connection",
+    skip(engine, request),
+    fields(
+        runtimedb.connection_name = %request.name,
+        runtimedb.source_type = %request.source_type,
+        runtimedb.connection_id = tracing::field::Empty,
+    )
+)]
 pub async fn create_connection_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Json(request): Json<CreateConnectionRequest>,
@@ -486,6 +514,8 @@ pub async fn create_connection_handler(
             }
         };
 
+    tracing::Span::current().record("runtimedb.connection_id", &conn_id);
+
     Ok((
         StatusCode::CREATED,
         Json(CreateConnectionResponse {
@@ -500,6 +530,7 @@ pub async fn create_connection_handler(
 }
 
 /// Handler for GET /connections
+#[tracing::instrument(name = "handler_list_connections", skip(engine))]
 pub async fn list_connections_handler(
     State(engine): State<Arc<RuntimeEngine>>,
 ) -> Result<Json<ListConnectionsResponse>, ApiError> {
@@ -520,6 +551,11 @@ pub async fn list_connections_handler(
 }
 
 /// Handler for GET /connections/{connection_id}
+#[tracing::instrument(
+    name = "handler_get_connection",
+    skip(engine),
+    fields(runtimedb.connection_id = %connection_id)
+)]
 pub async fn get_connection_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(connection_id): Path<String>,
@@ -546,6 +582,11 @@ pub async fn get_connection_handler(
 }
 
 /// Handler for DELETE /connections/{connection_id}
+#[tracing::instrument(
+    name = "handler_delete_connection",
+    skip(engine),
+    fields(runtimedb.connection_id = %connection_id)
+)]
 pub async fn delete_connection_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(connection_id): Path<String>,
@@ -566,6 +607,11 @@ pub async fn delete_connection_handler(
 }
 
 /// Handler for DELETE /connections/{connection_id}/cache
+#[tracing::instrument(
+    name = "handler_purge_connection_cache",
+    skip(engine),
+    fields(runtimedb.connection_id = %connection_id)
+)]
 pub async fn purge_connection_cache_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(connection_id): Path<String>,
@@ -583,7 +629,7 @@ pub async fn purge_connection_cache_handler(
 }
 
 /// Path parameters for table cache operations
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct TableCachePath {
     connection_id: String,
     schema: String,
@@ -591,6 +637,15 @@ pub struct TableCachePath {
 }
 
 /// Handler for DELETE /connections/{connection_id}/tables/{schema}/{table}/cache
+#[tracing::instrument(
+    name = "handler_purge_table_cache",
+    skip(engine),
+    fields(
+        runtimedb.connection_id = %params.connection_id,
+        runtimedb.schema = %params.schema,
+        runtimedb.table = %params.table,
+    )
+)]
 pub async fn purge_table_cache_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(params): Path<TableCachePath>,
@@ -613,6 +668,11 @@ pub async fn purge_table_cache_handler(
 // Secret management handlers
 
 /// Handler for POST /secrets
+#[tracing::instrument(
+    name = "handler_create_secret",
+    skip(engine, request),
+    fields(runtimedb.secret_name = %request.name)
+)]
 pub async fn create_secret_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Json(request): Json<CreateSecretRequest>,
@@ -636,6 +696,11 @@ pub async fn create_secret_handler(
 }
 
 /// Handler for PUT /secrets/{name}
+#[tracing::instrument(
+    name = "handler_update_secret",
+    skip(engine, request),
+    fields(runtimedb.secret_name = %name)
+)]
 pub async fn update_secret_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(name): Path<String>,
@@ -656,6 +721,7 @@ pub async fn update_secret_handler(
 }
 
 /// Handler for GET /secrets
+#[tracing::instrument(name = "handler_list_secrets", skip(engine))]
 pub async fn list_secrets_handler(
     State(engine): State<Arc<RuntimeEngine>>,
 ) -> Result<Json<ListSecretsResponse>, ApiError> {
@@ -672,6 +738,11 @@ pub async fn list_secrets_handler(
 }
 
 /// Handler for GET /secrets/{name}
+#[tracing::instrument(
+    name = "handler_get_secret",
+    skip(engine),
+    fields(runtimedb.secret_name = %name)
+)]
 pub async fn get_secret_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(name): Path<String>,
@@ -688,6 +759,11 @@ pub async fn get_secret_handler(
 }
 
 /// Handler for DELETE /secrets/{name}
+#[tracing::instrument(
+    name = "handler_delete_secret",
+    skip(engine),
+    fields(runtimedb.secret_name = %name)
+)]
 pub async fn delete_secret_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(name): Path<String>,
@@ -700,6 +776,14 @@ pub async fn delete_secret_handler(
 }
 
 /// Handler for POST /refresh
+#[tracing::instrument(
+    name = "handler_refresh",
+    skip(engine, request),
+    fields(
+        runtimedb.connection_id = request.connection_id.as_deref().unwrap_or("all"),
+        runtimedb.data_refresh = request.data,
+    )
+)]
 pub async fn refresh_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Json(request): Json<RefreshRequest>,
@@ -811,6 +895,7 @@ pub struct ListResultsParams {
 }
 
 /// Handler for GET /results
+#[tracing::instrument(name = "handler_list_results", skip(engine, params))]
 pub async fn list_results_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     QueryParams(params): QueryParams<ListResultsParams>,
@@ -845,6 +930,11 @@ pub async fn list_results_handler(
 }
 
 /// Handler for GET /results/{id}
+#[tracing::instrument(
+    name = "handler_get_result",
+    skip(engine),
+    fields(runtimedb.result_id = %id)
+)]
 pub async fn get_result_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(id): Path<String>,

@@ -142,6 +142,11 @@ impl SecretManager {
     }
 
     /// Get a secret's raw bytes by name.
+    #[tracing::instrument(
+        name = "secret_get",
+        skip(self),
+        fields(runtimedb.secret_name = %name)
+    )]
     pub async fn get(&self, name: &str) -> Result<Vec<u8>, SecretError> {
         let normalized = validate_and_normalize_name(name)?;
 
@@ -168,6 +173,7 @@ impl SecretManager {
     }
 
     /// Get a secret's raw bytes by ID.
+    #[tracing::instrument(name = "secret_get_by_id", skip(self))]
     pub async fn get_by_id(&self, id: &str) -> Result<Vec<u8>, SecretError> {
         // Fetch metadata to get provider_ref for the backend
         let metadata = self
@@ -234,6 +240,14 @@ impl SecretManager {
     /// If another request races us at step 1, we detect it and return appropriate error.
     ///
     /// Returns the generated secret ID on success.
+    #[tracing::instrument(
+        name = "secret_create",
+        skip(self, value),
+        fields(
+            runtimedb.secret_name = %name,
+            runtimedb.secret_id = tracing::field::Empty,
+        )
+    )]
     pub async fn create(&self, name: &str, value: &[u8]) -> Result<String, SecretError> {
         use crate::catalog::OptimisticLock;
 
@@ -351,6 +365,7 @@ impl SecretManager {
             )));
         }
 
+        tracing::Span::current().record("runtimedb.secret_id", &secret_id);
         Ok(secret_id)
     }
 
@@ -358,6 +373,11 @@ impl SecretManager {
     ///
     /// Fails with `NotFound` if the secret doesn't exist.
     /// For creating a new secret, use `create` instead.
+    #[tracing::instrument(
+        name = "secret_update",
+        skip(self, value),
+        fields(runtimedb.secret_name = %name)
+    )]
     pub async fn update(&self, name: &str, value: &[u8]) -> Result<(), SecretError> {
         let normalized = validate_and_normalize_name(name)?;
 
@@ -436,6 +456,11 @@ impl SecretManager {
     ///
     /// This method is idempotent - calling it multiple times on the same secret
     /// (or a non-existent secret) is safe and will succeed.
+    #[tracing::instrument(
+        name = "secret_delete",
+        skip(self),
+        fields(runtimedb.secret_name = %name)
+    )]
     pub async fn delete(&self, name: &str) -> Result<(), SecretError> {
         let normalized = validate_and_normalize_name(name)?;
 
@@ -491,6 +516,7 @@ impl SecretManager {
     }
 
     /// List all secrets (metadata only, no values).
+    #[tracing::instrument(name = "secret_list", skip(self))]
     pub async fn list(&self) -> Result<Vec<SecretMetadata>, SecretError> {
         self.catalog
             .list_secrets()
