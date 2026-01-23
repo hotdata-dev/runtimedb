@@ -78,6 +78,14 @@ impl StorageManager for FilesystemStorage {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "delete_cache",
+        skip(self),
+        fields(
+            runtimedb.backend = "filesystem",
+            runtimedb.prefix = %prefix,
+        )
+    )]
     async fn delete_prefix(&self, prefix: &str) -> Result<()> {
         // Handle both file:// URLs and raw paths
         let path_str = prefix.strip_prefix("file://").unwrap_or(prefix);
@@ -100,6 +108,16 @@ impl StorageManager for FilesystemStorage {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "prepare_cache_write",
+        skip(self),
+        fields(
+            runtimedb.backend = "filesystem",
+            runtimedb.connection_id = connection_id,
+            runtimedb.schema = %schema,
+            runtimedb.table = %table,
+        )
+    )]
     fn prepare_cache_write(
         &self,
         connection_id: i32,
@@ -129,6 +147,14 @@ impl StorageManager for FilesystemStorage {
         }
     }
 
+    #[tracing::instrument(
+        name = "finalize_cache_write",
+        skip(self),
+        fields(
+            runtimedb.backend = "filesystem",
+            runtimedb.cache_url = tracing::field::Empty,
+        )
+    )]
     async fn finalize_cache_write(&self, handle: &CacheWriteHandle) -> Result<String> {
         // For local storage, the file is already in place.
         // Return the versioned directory URL (for ListingTable compatibility).
@@ -138,7 +164,9 @@ impl StorageManager for FilesystemStorage {
             .join(&handle.schema)
             .join(&handle.table)
             .join(&handle.version);
-        Ok(format!("file://{}", version_dir.display()))
+        let url = format!("file://{}", version_dir.display());
+        tracing::Span::current().record("runtimedb.cache_url", &url);
+        Ok(url)
     }
 }
 
