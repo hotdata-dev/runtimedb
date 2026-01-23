@@ -972,19 +972,26 @@ impl RuntimeEngine {
         }
 
         // Get data and format based on source
-        // Track upload_id so we can mark it consumed after successful dataset creation
-        let (data, format, source_config, upload_id_to_consume) = match &source {
+        let (data, format, source_type, source_config) = match &source {
             DatasetSource::Upload { upload_id, format } => {
-                // Get upload info
+                // Atomically claim the upload to prevent concurrent dataset creation
+                // This must happen before reading data to avoid race conditions
+                let claimed = self.catalog.consume_upload(upload_id).await?;
+                if !claimed {
+                    // Either upload doesn't exist or was already consumed
+                    let upload = self.catalog.get_upload(upload_id).await?;
+                    if upload.is_none() {
+                        anyhow::bail!("Upload '{}' not found", upload_id);
+                    }
+                    anyhow::bail!("Upload '{}' has already been consumed", upload_id);
+                }
+
+                // Get upload info for format detection (we know it exists since claim succeeded)
                 let upload = self
                     .catalog
                     .get_upload(upload_id)
                     .await?
-                    .ok_or_else(|| anyhow::anyhow!("Upload '{}' not found", upload_id))?;
-
-                if upload.status == "consumed" {
-                    anyhow::bail!("Upload '{}' has already been consumed", upload_id);
-                }
+                    .expect("Upload should exist after successful claim");
 
                 // Read data from storage
                 let upload_url = self.storage.upload_url(upload_id);
@@ -1014,7 +1021,7 @@ impl RuntimeEngine {
                 })
                 .to_string();
 
-                (data, format, source_config, Some(upload_id.clone()))
+                (data, format, "upload", source_config)
             }
             DatasetSource::Inline { inline } => {
                 let source_config = serde_json::json!({
@@ -1024,8 +1031,8 @@ impl RuntimeEngine {
                 (
                     inline.content.as_bytes().to_vec(),
                     inline.format.clone(),
+                    "inline",
                     source_config,
-                    None,
                 )
             }
         };
@@ -1103,19 +1110,13 @@ impl RuntimeEngine {
             table_name,
             parquet_url,
             arrow_schema_json: schema_json,
-            source_type: "upload".to_string(),
+            source_type: source_type.to_string(),
             source_config,
             created_at: now,
             updated_at: now,
         };
 
         self.catalog.create_dataset(&dataset).await?;
-
-        // Mark upload as consumed only after successful dataset creation
-        // This ensures the upload isn't lost if parsing or writing fails
-        if let Some(upload_id) = upload_id_to_consume {
-            self.catalog.consume_upload(&upload_id).await?;
-        }
 
         Ok(dataset)
     }

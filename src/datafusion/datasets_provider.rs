@@ -182,11 +182,25 @@ impl SchemaProvider for DatasetsSchemaProvider {
     }
 
     fn table_names(&self) -> Vec<String> {
-        // Query catalog for all datasets (use a high limit to get all names)
-        match block_on(self.catalog.list_datasets(10000, 0)) {
-            Ok((datasets, _)) => datasets.into_iter().map(|d| d.table_name).collect(),
-            Err(_) => Vec::new(),
+        // Query catalog for all datasets, paginating until exhaustion
+        const PAGE_SIZE: usize = 1000;
+        let mut all_names = Vec::new();
+        let mut offset = 0;
+
+        loop {
+            match block_on(self.catalog.list_datasets(PAGE_SIZE, offset)) {
+                Ok((datasets, has_more)) => {
+                    all_names.extend(datasets.into_iter().map(|d| d.table_name));
+                    if !has_more {
+                        break;
+                    }
+                    offset += PAGE_SIZE;
+                }
+                Err(_) => break,
+            }
         }
+
+        all_names
     }
 
     async fn table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>> {
