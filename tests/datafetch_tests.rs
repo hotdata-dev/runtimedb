@@ -686,7 +686,7 @@ mod postgres_container_tests {
     /// legitimately contain NULL values.
     #[tokio::test]
     async fn test_postgres_fetch_numeric_nullable_columns() {
-        use datafusion::arrow::array::{Array, StringArray};
+        use datafusion::arrow::array::Array;
         use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
         use runtimedb::datafetch::{BatchWriter, StreamingParquetWriter};
         use std::fs::File;
@@ -787,13 +787,14 @@ mod postgres_container_tests {
         assert_eq!(total_rows, 4, "Should have 4 rows");
 
         // Verify NULL values are correctly preserved
+        // Constrained NUMERIC(10,2) is now stored as Decimal128, not StringArray
         let batch = &batches[0];
         let price_col = batch
             .column_by_name("price")
             .unwrap()
             .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
+            .downcast_ref::<datafusion::arrow::array::Decimal128Array>()
+            .expect("price should be Decimal128Array for NUMERIC(10,2)");
 
         // Row 0: 99.99, Row 1: NULL, Row 2: 149.99, Row 3: NULL
         assert!(!price_col.is_null(0), "Row 0 price should not be null");
@@ -801,9 +802,13 @@ mod postgres_container_tests {
         assert!(!price_col.is_null(2), "Row 2 price should not be null");
         assert!(price_col.is_null(3), "Row 3 price should be null");
 
-        // Verify actual values
-        assert_eq!(price_col.value(0), "99.99");
-        assert_eq!(price_col.value(2), "149.99");
+        // Verify actual values (Decimal128 with scale=2, so 99.99 -> 9999)
+        assert_eq!(price_col.value(0), 9999_i128, "Row 0 price should be 99.99");
+        assert_eq!(
+            price_col.value(2),
+            14999_i128,
+            "Row 2 price should be 149.99"
+        );
     }
 }
 
