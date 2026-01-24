@@ -1,3 +1,4 @@
+mod bounded_cache;
 mod catalog_provider;
 mod datasets_provider;
 mod information_schema;
