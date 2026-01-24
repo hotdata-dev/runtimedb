@@ -20,7 +20,6 @@ use datafusion::arrow::datatypes::Schema;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::CatalogProvider;
 use datafusion::prelude::*;
-use log::{info, warn};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,6 +27,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::error;
+use tracing::{info, warn};
 
 /// Default insecure encryption key for development use only.
 /// This key is publicly known and provides NO security.
@@ -284,6 +284,15 @@ impl RuntimeEngine {
     ///
     /// The Source should already contain a Credential with the secret ID if authentication
     /// is required. The secret_id is extracted from the Source for DB queryability.
+    #[tracing::instrument(
+        name = "register_connection",
+        skip(self, source),
+        fields(
+            runtimedb.connection_name = %name,
+            runtimedb.source_type = %source.source_type(),
+            runtimedb.connection_id = tracing::field::Empty,
+        )
+    )]
     pub async fn register_connection(&self, name: &str, source: Source) -> Result<String> {
         let source_type = source.source_type();
         // Extract secret_id from the Source's credential for DB storage (denormalized for queries)
@@ -314,6 +323,7 @@ impl RuntimeEngine {
 
         self.df_ctx.register_catalog(name, catalog_provider);
 
+        tracing::Span::current().record("runtimedb.connection_id", &external_id);
         info!("Connection '{}' registered (discovery pending)", name);
 
         Ok(external_id)
@@ -354,9 +364,20 @@ impl RuntimeEngine {
     }
 
     /// Execute a SQL query and return the results.
+    #[tracing::instrument(
+        name = "execute_query",
+        skip(self, sql),
+        fields(
+            runtimedb.sql = tracing::field::Empty,
+            runtimedb.rows_returned = tracing::field::Empty,
+        )
+    )]
     pub async fn execute_query(&self, sql: &str) -> Result<QueryResponse> {
         info!("Executing query: {}", sql);
         let start = Instant::now();
+        if crate::telemetry::include_sql_in_traces() {
+            tracing::Span::current().record("runtimedb.sql", sql);
+        }
         let df = self.df_ctx.sql(sql).await.map_err(|e| {
             error!("Error executing query: {}", e);
             e
@@ -368,6 +389,9 @@ impl RuntimeEngine {
         })?;
         info!("Execution completed in {:?}", start.elapsed());
         info!("Results available");
+
+        let row_count: usize = results.iter().map(|b| b.num_rows()).sum();
+        tracing::Span::current().record("runtimedb.rows_returned", row_count);
 
         Ok(QueryResponse {
             schema,
@@ -381,6 +405,13 @@ impl RuntimeEngine {
     /// Returns the result ID on success, or an error if persistence fails.
     /// This is a best-effort operation - callers should handle errors gracefully
     /// since the query results are still valid even if persistence fails.
+    #[tracing::instrument(
+        name = "persist_result",
+        skip(self, schema, batches),
+        fields(
+            runtimedb.result_id = tracing::field::Empty,
+        )
+    )]
     pub async fn persist_result(
         &self,
         schema: &Arc<Schema>,
@@ -408,6 +439,8 @@ impl RuntimeEngine {
         };
 
         self.catalog.store_result(&query_result).await?;
+
+        tracing::Span::current().record("runtimedb.result_id", &result_id);
 
         Ok(result_id)
     }
@@ -454,6 +487,14 @@ impl RuntimeEngine {
     /// Note: Empty results are persisted with schema only. This ensures GET /results/{id}
     /// works for all result IDs returned by POST /query. A future optimization could avoid
     /// persisting empty results entirely if storage space becomes a concern.
+    #[tracing::instrument(
+        name = "write_results_to_parquet",
+        skip(self, schema, batches),
+        fields(
+            runtimedb.result_id = %result_id,
+            runtimedb.batch_count = batches.len(),
+        )
+    )]
     fn write_results_to_parquet(
         &self,
         result_id: &str,
@@ -483,6 +524,11 @@ impl RuntimeEngine {
     }
 
     /// Purge all cached data for a connection (clears parquet files and resets sync state).
+    #[tracing::instrument(
+        name = "purge_connection",
+        skip(self),
+        fields(runtimedb.connection_id = %connection_id)
+    )]
     pub async fn purge_connection(&self, connection_id: &str) -> Result<()> {
         // Get connection info (validates it exists and gives us the ID)
         let conn = self
@@ -518,6 +564,15 @@ impl RuntimeEngine {
     }
 
     /// Purge cached data for a single table (clears parquet file and resets sync state).
+    #[tracing::instrument(
+        name = "purge_table",
+        skip(self),
+        fields(
+            runtimedb.connection_id = %connection_id,
+            runtimedb.schema = %schema_name,
+            runtimedb.table = %table_name,
+        )
+    )]
     pub async fn purge_table(
         &self,
         connection_id: &str,
@@ -563,6 +618,11 @@ impl RuntimeEngine {
     ///
     /// If the connection has an associated secret that is not used by any other
     /// connections, the secret will also be deleted.
+    #[tracing::instrument(
+        name = "remove_connection",
+        skip(self),
+        fields(runtimedb.connection_id = %external_id)
+    )]
     pub async fn remove_connection(&self, external_id: &str) -> Result<()> {
         // Get connection info (validates it exists and gives us the ID)
         let conn = self
@@ -663,6 +723,15 @@ impl RuntimeEngine {
     /// (they are not automatically deleted).
     ///
     /// Returns counts of (added, modified).
+    #[tracing::instrument(
+        name = "refresh_schema",
+        skip(self),
+        fields(
+            runtimedb.connection_id = %connection_id,
+            runtimedb.tables_added = tracing::field::Empty,
+            runtimedb.tables_modified = tracing::field::Empty,
+        )
+    )]
     pub async fn refresh_schema(&self, connection_id: &str) -> Result<(usize, usize)> {
         let conn = self
             .catalog
@@ -704,11 +773,22 @@ impl RuntimeEngine {
                 .await?;
         }
 
+        tracing::Span::current()
+            .record("runtimedb.tables_added", added_count)
+            .record("runtimedb.tables_modified", modified);
         Ok((added_count, modified))
     }
 
     /// Refresh schema for all connections.
     /// Continues processing remaining connections if one fails.
+    #[tracing::instrument(
+        name = "refresh_all_schemas",
+        skip(self),
+        fields(
+            runtimedb.connections_refreshed = tracing::field::Empty,
+            runtimedb.connections_failed = tracing::field::Empty,
+        )
+    )]
     pub async fn refresh_all_schemas(&self) -> Result<SchemaRefreshResult> {
         let connections = self.catalog.list_connections().await?;
         let mut result = SchemaRefreshResult {
@@ -743,10 +823,27 @@ impl RuntimeEngine {
         }
 
         result.tables_discovered = self.catalog.list_tables(None).await?.len();
+        tracing::Span::current()
+            .record(
+                "runtimedb.connections_refreshed",
+                result.connections_refreshed,
+            )
+            .record("runtimedb.connections_failed", result.connections_failed);
         Ok(result)
     }
 
     /// Refresh data for a single table using atomic swap.
+    #[tracing::instrument(
+        name = "refresh_table",
+        skip(self),
+        fields(
+            runtimedb.connection_id = %connection_id,
+            runtimedb.schema = %schema_name,
+            runtimedb.table = %table_name,
+            runtimedb.rows_synced = tracing::field::Empty,
+            runtimedb.warnings_count = tracing::field::Empty,
+        )
+    )]
     pub async fn refresh_table_data(
         &self,
         connection_id: &str,
@@ -785,6 +882,10 @@ impl RuntimeEngine {
             }
         }
 
+        tracing::Span::current()
+            .record("runtimedb.rows_synced", rows_synced)
+            .record("runtimedb.warnings_count", warnings.len());
+
         Ok(TableRefreshResult {
             connection_id: connection_id.to_string(),
             schema_name: schema_name.to_string(),
@@ -799,6 +900,17 @@ impl RuntimeEngine {
     ///
     /// By default, only refreshes tables that already have cached data (parquet_path is set).
     /// Set `include_uncached` to true to also sync tables that haven't been cached yet.
+    #[tracing::instrument(
+        name = "refresh_connection",
+        skip(self),
+        fields(
+            runtimedb.connection_id = %connection_id,
+            runtimedb.parallelism = self.parallel_refresh_count,
+            runtimedb.tables_refreshed = tracing::field::Empty,
+            runtimedb.tables_failed = tracing::field::Empty,
+            runtimedb.rows_synced = tracing::field::Empty,
+        )
+    )]
     pub async fn refresh_connection_data(
         &self,
         connection_id: &str,
@@ -892,6 +1004,12 @@ impl RuntimeEngine {
         }
 
         result.duration_ms = start.elapsed().as_millis() as u64;
+
+        tracing::Span::current()
+            .record("runtimedb.tables_refreshed", result.tables_refreshed)
+            .record("runtimedb.tables_failed", result.tables_failed)
+            .record("runtimedb.rows_synced", result.total_rows);
+
         Ok(result)
     }
 
@@ -1234,6 +1352,11 @@ impl RuntimeEngine {
     }
 
     /// Process any pending directory deletions that are due.
+    #[tracing::instrument(
+        name = "process_pending_deletions",
+        skip(self),
+        fields(runtimedb.deletions_processed = tracing::field::Empty)
+    )]
     pub async fn process_pending_deletions(&self) -> Result<usize> {
         let pending = self.catalog.get_pending_deletions().await?;
         let mut deleted = 0;
@@ -1250,6 +1373,7 @@ impl RuntimeEngine {
             }
         }
 
+        tracing::Span::current().record("runtimedb.deletions_processed", deleted);
         Ok(deleted)
     }
 

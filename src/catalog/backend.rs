@@ -98,6 +98,14 @@ where
         .map_err(Into::into)
     }
 
+    #[tracing::instrument(
+        name = "catalog_add_connection",
+        skip(self, config_json),
+        fields(
+            runtimedb.connection_name = %name,
+            runtimedb.source_type = %source_type,
+        )
+    )]
     pub async fn add_connection(
         &self,
         name: &str,
@@ -200,6 +208,15 @@ where
             .map_err(Into::into)
     }
 
+    #[tracing::instrument(
+        name = "catalog_add_table",
+        skip(self, arrow_schema_json),
+        fields(
+            runtimedb.connection_id = connection_id,
+            runtimedb.schema = %schema_name,
+            runtimedb.table = %table_name,
+        )
+    )]
     pub async fn add_table(
         &self,
         connection_id: i32,
@@ -305,6 +322,15 @@ where
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "catalog_clear_table_cache",
+        skip(self),
+        fields(
+            runtimedb.connection_id = connection_id,
+            runtimedb.schema = %schema_name,
+            runtimedb.table = %table_name,
+        )
+    )]
     pub async fn clear_table_cache_metadata(
         &self,
         connection_id: i32,
@@ -326,6 +352,11 @@ where
         Ok(table)
     }
 
+    #[tracing::instrument(
+        name = "catalog_clear_connection_cache",
+        skip(self),
+        fields(runtimedb.connection_name = %name)
+    )]
     pub async fn clear_connection_cache_metadata(&self, name: &str) -> Result<()> {
         let connection = self
             .get_connection(name)
@@ -343,6 +374,11 @@ where
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "catalog_delete_connection",
+        skip(self),
+        fields(runtimedb.connection_name = %name)
+    )]
     pub async fn delete_connection(&self, name: &str) -> Result<()> {
         let connection = self
             .get_connection(name)

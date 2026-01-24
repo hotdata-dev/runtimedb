@@ -46,6 +46,13 @@ impl Credential {
 
     /// Resolve the credential to a plaintext string.
     /// Returns an error if the credential is None or the secret cannot be found/decoded.
+    #[tracing::instrument(
+        name = "resolve_credential",
+        skip(self, secrets),
+        fields(
+            runtimedb.has_credential = !matches!(self, Credential::None),
+        )
+    )]
     pub async fn resolve(&self, secrets: &SecretManager) -> anyhow::Result<String> {
         match self {
             Credential::None => Err(anyhow::anyhow!("no credential configured")),
