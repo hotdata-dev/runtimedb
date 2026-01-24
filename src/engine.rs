@@ -935,8 +935,9 @@ impl RuntimeEngine {
         label: &str,
         table_name: Option<&str>,
         source: crate::http::models::DatasetSource,
-    ) -> Result<crate::catalog::DatasetInfo> {
+    ) -> Result<crate::catalog::DatasetInfo, crate::datasets::DatasetError> {
         use crate::datafetch::native::StreamingParquetWriter;
+        use crate::datasets::DatasetError;
         use crate::http::models::DatasetSource;
         use datafusion::arrow::csv::{reader::Format, ReaderBuilder};
         use std::io::{Seek, SeekFrom};
@@ -944,18 +945,18 @@ impl RuntimeEngine {
         // Generate or validate table_name
         let table_name = match table_name {
             Some(name) => {
-                crate::datasets::validate_table_name(name).map_err(|e| anyhow::anyhow!("{}", e))?;
+                crate::datasets::validate_table_name(name)
+                    .map_err(DatasetError::InvalidTableName)?;
                 name.to_string()
             }
             None => {
                 let generated = crate::datasets::table_name_from_label(label);
                 // Validate the auto-generated name (labels like "select" can produce invalid names)
                 crate::datasets::validate_table_name(&generated).map_err(|e| {
-                    anyhow::anyhow!(
-                        "Cannot create valid table name from label '{}': {}",
-                        label,
-                        e
-                    )
+                    DatasetError::InvalidGeneratedTableName {
+                        label: label.to_string(),
+                        error: e,
+                    }
                 })?;
                 generated
             }
@@ -965,10 +966,11 @@ impl RuntimeEngine {
         if self
             .catalog
             .get_dataset_by_table_name("default", &table_name)
-            .await?
+            .await
+            .map_err(DatasetError::Catalog)?
             .is_some()
         {
-            anyhow::bail!("Table name '{}' is already in use", table_name);
+            return Err(DatasetError::TableNameInUse(table_name));
         }
 
         // Track claimed upload ID for rollback on failure
@@ -979,25 +981,28 @@ impl RuntimeEngine {
             DatasetSource::Upload { upload_id, format } => {
                 // Atomically claim the upload to prevent concurrent dataset creation
                 // This must happen before reading data to avoid race conditions
-                let claimed = self.catalog.claim_upload(upload_id).await?;
+                let claimed = self
+                    .catalog
+                    .claim_upload(upload_id)
+                    .await
+                    .map_err(DatasetError::Catalog)?;
                 if !claimed {
                     // Either upload doesn't exist, was already claimed, or consumed
-                    let upload = self.catalog.get_upload(upload_id).await?;
-                    match upload {
-                        None => anyhow::bail!("Upload '{}' not found", upload_id),
+                    let upload = self
+                        .catalog
+                        .get_upload(upload_id)
+                        .await
+                        .map_err(DatasetError::Catalog)?;
+                    return Err(match upload {
+                        None => DatasetError::UploadNotFound(upload_id.clone()),
                         Some(u) if u.status == "consumed" => {
-                            anyhow::bail!("Upload '{}' has already been consumed", upload_id)
+                            DatasetError::UploadConsumed(upload_id.clone())
                         }
                         Some(u) if u.status == "processing" => {
-                            anyhow::bail!(
-                                "Upload '{}' is currently being processed by another request",
-                                upload_id
-                            )
+                            DatasetError::UploadProcessing(upload_id.clone())
                         }
-                        Some(_) => {
-                            anyhow::bail!("Upload '{}' is not available", upload_id)
-                        }
-                    }
+                        Some(_) => DatasetError::UploadNotAvailable(upload_id.clone()),
+                    });
                 }
 
                 // Track that we claimed this upload for potential rollback
@@ -1007,7 +1012,8 @@ impl RuntimeEngine {
                 let upload = self
                     .catalog
                     .get_upload(upload_id)
-                    .await?
+                    .await
+                    .map_err(DatasetError::Catalog)?
                     .expect("Upload should exist after successful claim");
 
                 // Read data from storage
@@ -1017,7 +1023,7 @@ impl RuntimeEngine {
                     Err(e) => {
                         // Release the upload back to pending state
                         let _ = self.catalog.release_upload(upload_id).await;
-                        return Err(e);
+                        return Err(DatasetError::Storage(e));
                     }
                 };
 
@@ -1061,8 +1067,8 @@ impl RuntimeEngine {
             }
         };
 
-        // Helper macro to release upload on error
-        macro_rules! release_on_error {
+        // Helper macro to release upload on error and return ParseError
+        macro_rules! release_on_parse_error {
             ($result:expr) => {
                 match $result {
                     Ok(v) => v,
@@ -1070,7 +1076,7 @@ impl RuntimeEngine {
                         if let Some(ref upload_id) = claimed_upload_id {
                             let _ = self.catalog.release_upload(upload_id).await;
                         }
-                        return Err(e.into());
+                        return Err(DatasetError::ParseError(e.into()));
                     }
                 }
             };
@@ -1081,47 +1087,50 @@ impl RuntimeEngine {
             "csv" => {
                 // Infer schema from first 10000 rows
                 let mut cursor = std::io::Cursor::new(&data);
-                let (schema, _) = release_on_error!(Format::default()
+                let (schema, _) = release_on_parse_error!(Format::default()
                     .with_header(true)
                     .infer_schema(&mut cursor, Some(10_000)));
-                release_on_error!(cursor.seek(SeekFrom::Start(0)));
+                release_on_parse_error!(cursor.seek(SeekFrom::Start(0)));
 
                 // Build reader with inferred schema
-                let reader = release_on_error!(ReaderBuilder::new(Arc::new(schema))
+                let reader = release_on_parse_error!(ReaderBuilder::new(Arc::new(schema))
                     .with_header(true)
                     .build(cursor));
-                release_on_error!(reader.into_iter().collect::<Result<Vec<_>, _>>())
+                release_on_parse_error!(reader.into_iter().collect::<Result<Vec<_>, _>>())
             }
             "json" => {
                 // Use arrow-json crate directly for JSON parsing
                 use arrow_json::reader::infer_json_schema_from_seekable;
 
                 let mut cursor = std::io::Cursor::new(&data);
-                let (schema, _) =
-                    release_on_error!(infer_json_schema_from_seekable(&mut cursor, Some(10_000)));
-                release_on_error!(cursor.seek(SeekFrom::Start(0)));
+                let (schema, _) = release_on_parse_error!(infer_json_schema_from_seekable(
+                    &mut cursor,
+                    Some(10_000)
+                ));
+                release_on_parse_error!(cursor.seek(SeekFrom::Start(0)));
 
-                let reader = release_on_error!(arrow_json::ReaderBuilder::new(Arc::new(schema))
-                    .with_batch_size(1024)
-                    .build(cursor));
+                let reader =
+                    release_on_parse_error!(arrow_json::ReaderBuilder::new(Arc::new(schema))
+                        .with_batch_size(1024)
+                        .build(cursor));
 
-                release_on_error!(reader.into_iter().collect::<Result<Vec<_>, _>>())
+                release_on_parse_error!(reader.into_iter().collect::<Result<Vec<_>, _>>())
             }
             "parquet" => {
                 // Use DataFusion to read parquet from bytes
                 use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
                 let cursor = axum::body::Bytes::from(data);
-                let reader = release_on_error!(release_on_error!(
+                let reader = release_on_parse_error!(release_on_parse_error!(
                     ParquetRecordBatchReaderBuilder::try_new(cursor)
                 )
                 .build());
-                release_on_error!(reader.into_iter().collect::<Result<Vec<_>, _>>())
+                release_on_parse_error!(reader.into_iter().collect::<Result<Vec<_>, _>>())
             }
             _ => {
                 if let Some(ref upload_id) = claimed_upload_id {
                     let _ = self.catalog.release_upload(upload_id).await;
                 }
-                anyhow::bail!("Unsupported format: {}", format);
+                return Err(DatasetError::UnsupportedFormat(format));
             }
         };
 
@@ -1129,28 +1138,44 @@ impl RuntimeEngine {
             if let Some(ref upload_id) = claimed_upload_id {
                 let _ = self.catalog.release_upload(upload_id).await;
             }
-            anyhow::bail!("No data found in the input");
+            return Err(DatasetError::EmptyData);
         }
 
         let schema = batches[0].schema();
-        let schema_json = release_on_error!(serde_json::to_string(&schema.as_ref()));
+        let schema_json = release_on_parse_error!(serde_json::to_string(&schema.as_ref()));
 
         // Write to parquet storage
         let dataset_id = crate::id::generate_dataset_id();
         let handle = self.storage.prepare_dataset_write(&dataset_id);
 
+        // Helper macro to release upload on storage error
+        macro_rules! release_on_storage_error {
+            ($result:expr) => {
+                match $result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        if let Some(ref upload_id) = claimed_upload_id {
+                            let _ = self.catalog.release_upload(upload_id).await;
+                        }
+                        return Err(DatasetError::Storage(e.into()));
+                    }
+                }
+            };
+        }
+
         let mut writer: Box<dyn crate::datafetch::BatchWriter> =
             Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
-        release_on_error!(writer.init(&schema));
+        release_on_storage_error!(writer.init(&schema));
 
         for batch in &batches {
-            release_on_error!(writer.write_batch(batch));
+            release_on_storage_error!(writer.write_batch(batch));
         }
-        release_on_error!(writer.close());
+        release_on_storage_error!(writer.close());
 
         // Finalize storage (upload to S3 if needed)
         // Note: finalize_dataset_write returns the full file URL including data.parquet
-        let parquet_url = release_on_error!(self.storage.finalize_dataset_write(&handle).await);
+        let parquet_url =
+            release_on_storage_error!(self.storage.finalize_dataset_write(&handle).await);
 
         // From this point on, if we fail we need to clean up the parquet file too
         // Extract the directory URL from the file URL (remove /data.parquet)
@@ -1188,7 +1213,7 @@ impl RuntimeEngine {
             if let Some(ref upload_id) = claimed_upload_id {
                 let _ = self.catalog.release_upload(upload_id).await;
             }
-            return Err(e);
+            return Err(DatasetError::Catalog(e));
         }
 
         // Only consume the upload after everything succeeded

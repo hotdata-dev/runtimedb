@@ -991,18 +991,9 @@ pub async fn create_dataset(
         .await
         .map_err(|e| {
             let msg = e.to_string();
-            // Map concurrent processing to Conflict (409)
-            if msg.contains("currently being processed") {
+            if e.is_conflict() {
                 ApiError::conflict(msg)
-            // Map validation errors to Bad Request
-            } else if msg.contains("reserved word")
-                || msg.contains("cannot be used as a table name")
-                || msg.contains("Invalid")
-                || msg.contains("already been consumed")
-                || msg.contains("not found")
-                || msg.contains("already in use")
-                || msg.contains("is not available")
-            {
+            } else if e.is_client_error() {
                 ApiError::bad_request(msg)
             } else {
                 ApiError::internal_error(msg)
