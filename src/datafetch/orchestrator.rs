@@ -36,6 +36,17 @@ impl FetchOrchestrator {
     /// Fetch table data from source, write to cache storage, and update catalog metadata.
     ///
     /// Returns the URL of the cached parquet file and the row count.
+    #[tracing::instrument(
+        name = "cache_table",
+        skip(self, source),
+        fields(
+            runtimedb.connection_id = connection_id,
+            runtimedb.schema = %schema_name,
+            runtimedb.table = %table_name,
+            runtimedb.rows_written = tracing::field::Empty,
+            runtimedb.cache_url = tracing::field::Empty,
+        )
+    )]
     pub async fn cache_table(
         &self,
         source: &Source,
@@ -97,6 +108,10 @@ impl FetchOrchestrator {
             }
         }
 
+        tracing::Span::current()
+            .record("runtimedb.rows_written", row_count)
+            .record("runtimedb.cache_url", &parquet_url);
+
         Ok((parquet_url, row_count))
     }
 
@@ -117,6 +132,17 @@ impl FetchOrchestrator {
     /// Returns (new_url, old_path, rows_synced).
     ///
     /// Returns an error if the table doesn't exist in the catalog (use cache_table for initial sync).
+    #[tracing::instrument(
+        name = "orchestrator_refresh_table",
+        skip(self, source),
+        fields(
+            runtimedb.connection_id = connection_id,
+            runtimedb.schema = %schema_name,
+            runtimedb.table = %table_name,
+            runtimedb.rows_synced = tracing::field::Empty,
+            runtimedb.cache_url = tracing::field::Empty,
+        )
+    )]
     pub async fn refresh_table(
         &self,
         source: &Source,
@@ -189,6 +215,10 @@ impl FetchOrchestrator {
             }
             return Err(e);
         }
+
+        tracing::Span::current()
+            .record("runtimedb.rows_synced", row_count)
+            .record("runtimedb.cache_url", &new_url);
 
         Ok((new_url, old_path, row_count))
     }

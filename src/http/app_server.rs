@@ -6,9 +6,29 @@ use crate::http::handlers::{
     refresh_handler, update_secret_handler,
 };
 use crate::RuntimeEngine;
+use axum::http::Request;
 use axum::routing::{delete, get, post};
 use axum::Router;
 use std::sync::Arc;
+use tower_http::trace::{DefaultOnResponse, MakeSpan, TraceLayer};
+use tracing::{Level, Span};
+
+/// Custom span creator that names spans after HTTP method and path.
+#[derive(Clone, Copy)]
+struct HttpMakeSpan;
+
+impl<B> MakeSpan<B> for HttpMakeSpan {
+    fn make_span(&mut self, request: &Request<B>) -> Span {
+        let method = request.method().as_str();
+        let uri = request.uri().path();
+        tracing::info_span!(
+            "http_request",
+            otel.name = %format!("{} {}", method, uri),
+            http.method = %method,
+            http.target = %uri,
+        )
+    }
+}
 
 pub struct AppServer {
     pub router: Router,
@@ -62,7 +82,12 @@ impl AppServer {
                 )
                 .route(PATH_RESULTS, get(list_results_handler))
                 .route(PATH_RESULT, get(get_result_handler))
-                .with_state(engine.clone()),
+                .with_state(engine.clone())
+                .layer(
+                    TraceLayer::new_for_http()
+                        .make_span_with(HttpMakeSpan)
+                        .on_response(DefaultOnResponse::new().level(Level::INFO)),
+                ),
             engine,
         }
     }
