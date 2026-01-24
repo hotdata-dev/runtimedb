@@ -1048,6 +1048,15 @@ impl RuntimeEngine {
     }
 
     /// Create a dataset from an upload or inline data.
+    #[tracing::instrument(
+        name = "create_dataset",
+        skip(self, source),
+        fields(
+            runtimedb.dataset_id = tracing::field::Empty,
+            runtimedb.table_name = tracing::field::Empty,
+            runtimedb.source_type = tracing::field::Empty,
+        )
+    )]
     pub async fn create_dataset(
         &self,
         label: &str,
@@ -1347,6 +1356,11 @@ impl RuntimeEngine {
                 );
             }
         }
+
+        tracing::Span::current()
+            .record("runtimedb.dataset_id", &dataset.id)
+            .record("runtimedb.table_name", &dataset.table_name)
+            .record("runtimedb.source_type", &dataset.source_type);
 
         Ok(dataset)
     }

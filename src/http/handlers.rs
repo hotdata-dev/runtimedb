@@ -978,6 +978,15 @@ pub struct ListUploadsParams {
 pub const MAX_UPLOAD_SIZE: usize = 2 * 1024 * 1024 * 1024;
 
 /// Handler for POST /v1/files - Upload a file
+#[tracing::instrument(
+    name = "handler_upload_file",
+    skip(engine, headers, body),
+    fields(
+        runtimedb.upload_id = tracing::field::Empty,
+        runtimedb.size_bytes = tracing::field::Empty,
+        runtimedb.content_type = tracing::field::Empty,
+    )
+)]
 pub async fn upload_file(
     State(engine): State<Arc<RuntimeEngine>>,
     headers: HeaderMap,
@@ -1008,6 +1017,14 @@ pub async fn upload_file(
         .await
         .map_err(|e| ApiError::internal_error(format!("Failed to store upload: {}", e)))?;
 
+    tracing::Span::current()
+        .record("runtimedb.upload_id", &upload.id)
+        .record("runtimedb.size_bytes", upload.size_bytes as i64)
+        .record(
+            "runtimedb.content_type",
+            upload.content_type.as_deref().unwrap_or(""),
+        );
+
     Ok((
         StatusCode::CREATED,
         Json(UploadResponse {
@@ -1021,6 +1038,11 @@ pub async fn upload_file(
 }
 
 /// Handler for GET /v1/files - List uploads
+#[tracing::instrument(
+    name = "handler_list_uploads",
+    skip(engine),
+    fields(runtimedb.upload_count = tracing::field::Empty)
+)]
 pub async fn list_uploads(
     State(engine): State<Arc<RuntimeEngine>>,
     QueryParams(params): QueryParams<ListUploadsParams>,
@@ -1031,6 +1053,8 @@ pub async fn list_uploads(
         .list_uploads(status)
         .await
         .map_err(|e| ApiError::internal_error(format!("Failed to list uploads: {}", e)))?;
+
+    tracing::Span::current().record("runtimedb.upload_count", uploads.len());
 
     Ok(Json(ListUploadsResponse {
         uploads: uploads
@@ -1052,6 +1076,15 @@ pub async fn list_uploads(
 const MAX_INLINE_DATA_SIZE: usize = 1_048_576;
 
 /// Handler for POST /v1/datasets - Create a dataset
+#[tracing::instrument(
+    name = "handler_create_dataset",
+    skip(engine, request),
+    fields(
+        runtimedb.dataset_id = tracing::field::Empty,
+        runtimedb.dataset_label = tracing::field::Empty,
+        runtimedb.table_name = tracing::field::Empty,
+    )
+)]
 pub async fn create_dataset(
     State(engine): State<Arc<RuntimeEngine>>,
     Json(request): Json<CreateDatasetRequest>,
@@ -1090,6 +1123,11 @@ pub async fn create_dataset(
             }
         })?;
 
+    tracing::Span::current()
+        .record("runtimedb.dataset_id", &dataset.id)
+        .record("runtimedb.dataset_label", &dataset.label)
+        .record("runtimedb.table_name", &dataset.table_name);
+
     Ok((
         StatusCode::CREATED,
         Json(CreateDatasetResponse {
@@ -1118,6 +1156,11 @@ pub struct ListDatasetsParams {
 }
 
 /// Handler for GET /v1/datasets - List all datasets
+#[tracing::instrument(
+    name = "handler_list_datasets",
+    skip(engine),
+    fields(runtimedb.dataset_count = tracing::field::Empty)
+)]
 pub async fn list_datasets(
     State(engine): State<Arc<RuntimeEngine>>,
     QueryParams(params): QueryParams<ListDatasetsParams>,
@@ -1135,6 +1178,8 @@ pub async fn list_datasets(
         .map_err(|e| ApiError::internal_error(format!("Failed to list datasets: {}", e)))?;
 
     let count = datasets.len();
+    tracing::Span::current().record("runtimedb.dataset_count", count);
+
     let datasets = datasets
         .into_iter()
         .map(|d| DatasetSummary {
@@ -1156,6 +1201,11 @@ pub async fn list_datasets(
 }
 
 /// Handler for GET /v1/datasets/{id} - Get a specific dataset
+#[tracing::instrument(
+    name = "handler_get_dataset",
+    skip(engine),
+    fields(runtimedb.dataset_id = %id)
+)]
 pub async fn get_dataset(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(id): Path<String>,
@@ -1195,6 +1245,11 @@ pub async fn get_dataset(
 }
 
 /// Handler for PUT /v1/datasets/{id} - Update a dataset
+#[tracing::instrument(
+    name = "handler_update_dataset",
+    skip(engine, request),
+    fields(runtimedb.dataset_id = %id)
+)]
 pub async fn update_dataset(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(id): Path<String>,
@@ -1268,6 +1323,11 @@ pub async fn update_dataset(
 }
 
 /// Handler for DELETE /v1/datasets/{id} - Delete a dataset
+#[tracing::instrument(
+    name = "handler_delete_dataset",
+    skip(engine),
+    fields(runtimedb.dataset_id = %id)
+)]
 pub async fn delete_dataset(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(id): Path<String>,
