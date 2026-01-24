@@ -2,9 +2,11 @@
 
 use super::validation::TableNameError;
 
-/// Errors that can occur during dataset creation.
+/// Errors that can occur during dataset operations.
 #[derive(Debug)]
 pub enum DatasetError {
+    /// Dataset not found.
+    NotFound(String),
     /// Table name validation failed.
     InvalidTableName(TableNameError),
     /// Auto-generated table name from label is invalid.
@@ -37,6 +39,7 @@ pub enum DatasetError {
 impl std::fmt::Display for DatasetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::NotFound(id) => write!(f, "Dataset '{}' not found", id),
             Self::InvalidTableName(e) => write!(f, "Invalid table name: {}", e),
             Self::InvalidGeneratedTableName { label, error } => {
                 write!(
@@ -81,7 +84,8 @@ impl DatasetError {
     pub fn is_client_error(&self) -> bool {
         matches!(
             self,
-            Self::InvalidTableName(_)
+            Self::NotFound(_)
+                | Self::InvalidTableName(_)
                 | Self::InvalidGeneratedTableName { .. }
                 | Self::TableNameInUse(_)
                 | Self::UploadNotFound(_)
@@ -91,6 +95,11 @@ impl DatasetError {
                 | Self::EmptyData
                 | Self::ParseError(_)
         )
+    }
+
+    /// Returns true if this is a not found error (404).
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::NotFound(_) | Self::UploadNotFound(_))
     }
 
     /// Returns true if this is a conflict error (409).

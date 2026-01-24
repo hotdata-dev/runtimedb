@@ -1392,6 +1392,75 @@ impl RuntimeEngine {
     }
 
     /// Schedule deletion of a dataset's parquet file after the grace period.
+    /// Update a dataset's label and/or table name.
+    #[tracing::instrument(
+        name = "update_dataset",
+        skip(self),
+        fields(runtimedb.dataset_id = %id)
+    )]
+    pub async fn update_dataset(
+        &self,
+        id: &str,
+        new_label: Option<&str>,
+        new_table_name: Option<&str>,
+    ) -> Result<crate::catalog::DatasetInfo, crate::datasets::DatasetError> {
+        use crate::datasets::DatasetError;
+
+        // Get existing dataset
+        let existing = self
+            .catalog
+            .get_dataset(id)
+            .await
+            .map_err(DatasetError::Catalog)?
+            .ok_or_else(|| DatasetError::NotFound(id.to_string()))?;
+
+        // Use existing values if not provided
+        let old_table_name = existing.table_name.clone();
+        let label = new_label.unwrap_or(&existing.label);
+        let table_name = new_table_name.unwrap_or(&existing.table_name);
+
+        // Validate new table_name
+        crate::datasets::validate_table_name(table_name).map_err(DatasetError::InvalidTableName)?;
+
+        // Check table_name uniqueness if it's changing
+        if table_name != old_table_name {
+            if let Some(existing_dataset) = self
+                .catalog
+                .get_dataset_by_table_name("default", table_name)
+                .await
+                .map_err(DatasetError::Catalog)?
+            {
+                // Another dataset already uses this table_name
+                if existing_dataset.id != id {
+                    return Err(DatasetError::TableNameInUse(table_name.to_string()));
+                }
+            }
+        }
+
+        // Update in catalog
+        let updated = self
+            .catalog
+            .update_dataset(id, label, table_name)
+            .await
+            .map_err(DatasetError::Catalog)?;
+
+        if !updated {
+            return Err(DatasetError::NotFound(id.to_string()));
+        }
+
+        // Invalidate cache for the old table name if it changed
+        if table_name != old_table_name {
+            self.invalidate_dataset_cache(&old_table_name);
+        }
+
+        // Fetch and return updated dataset
+        self.catalog
+            .get_dataset(id)
+            .await
+            .map_err(DatasetError::Catalog)?
+            .ok_or_else(|| DatasetError::NotFound(id.to_string()))
+    }
+
     /// This should be called when a dataset is deleted.
     pub async fn schedule_dataset_file_deletion(&self, path: &str) -> Result<()> {
         self.schedule_file_deletion(path).await

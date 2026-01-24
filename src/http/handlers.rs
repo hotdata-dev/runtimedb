@@ -1255,64 +1255,21 @@ pub async fn update_dataset(
     Path(id): Path<String>,
     Json(request): Json<UpdateDatasetRequest>,
 ) -> Result<Json<UpdateDatasetResponse>, ApiError> {
-    // Get existing dataset
-    let existing = engine
-        .catalog()
-        .get_dataset(&id)
-        .await
-        .map_err(|e| ApiError::internal_error(format!("Failed to get dataset: {}", e)))?
-        .ok_or_else(|| ApiError::not_found(format!("Dataset '{}' not found", id)))?;
-
-    // Use existing values if not provided in request
-    let old_table_name = existing.table_name.clone();
-    let new_label = request.label.unwrap_or(existing.label);
-    let new_table_name = request.table_name.unwrap_or(existing.table_name);
-
-    // Validate new table_name
-    crate::datasets::validate_table_name(&new_table_name)
-        .map_err(|e| ApiError::bad_request(format!("Invalid table name: {}", e)))?;
-
-    // Check table_name uniqueness if it's changing
-    if new_table_name != old_table_name {
-        if let Some(existing_dataset) = engine
-            .catalog()
-            .get_dataset_by_table_name("default", &new_table_name)
-            .await
-            .map_err(|e| ApiError::internal_error(format!("Failed to check table name: {}", e)))?
-        {
-            // Another dataset already uses this table_name
-            if existing_dataset.id != id {
-                return Err(ApiError::conflict(format!(
-                    "Table name '{}' is already in use by dataset '{}'",
-                    new_table_name, existing_dataset.id
-                )));
-            }
-        }
-    }
-
-    // Update in catalog
-    let updated = engine
-        .catalog()
-        .update_dataset(&id, &new_label, &new_table_name)
-        .await
-        .map_err(|e| ApiError::internal_error(format!("Failed to update dataset: {}", e)))?;
-
-    if !updated {
-        return Err(ApiError::not_found(format!("Dataset '{}' not found", id)));
-    }
-
-    // Invalidate cache for the old table name if it changed
-    if new_table_name != old_table_name {
-        engine.invalidate_dataset_cache(&old_table_name);
-    }
-
-    // Fetch updated dataset to get updated_at
     let dataset = engine
-        .catalog()
-        .get_dataset(&id)
+        .update_dataset(&id, request.label.as_deref(), request.table_name.as_deref())
         .await
-        .map_err(|e| ApiError::internal_error(format!("Failed to get dataset: {}", e)))?
-        .ok_or_else(|| ApiError::internal_error("Dataset disappeared after update"))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            if e.is_not_found() {
+                ApiError::not_found(msg)
+            } else if e.is_conflict() {
+                ApiError::conflict(msg)
+            } else if e.is_client_error() {
+                ApiError::bad_request(msg)
+            } else {
+                ApiError::internal_error(msg)
+            }
+        })?;
 
     Ok(Json(UpdateDatasetResponse {
         id: dataset.id,
