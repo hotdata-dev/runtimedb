@@ -1,6 +1,6 @@
 mod bounded_cache;
 mod catalog_provider;
-mod datasets_provider;
+mod datasets_catalog;
 mod information_schema;
 mod lazy_table_provider;
 mod results_schema;
@@ -22,7 +22,7 @@ where
 }
 
 pub use catalog_provider::RuntimeCatalogProvider;
-pub use datasets_provider::{DatasetsCatalogProvider, DatasetsSchemaProvider};
+pub use datasets_catalog::{DatasetsCatalogProvider, DatasetsSchemaProvider};
 pub use information_schema::InformationSchemaProvider;
 pub use lazy_table_provider::LazyTableProvider;
 pub use runtimedb_catalog::RuntimeDbCatalogProvider;
