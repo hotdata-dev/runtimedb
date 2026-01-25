@@ -628,6 +628,17 @@ impl CatalogManager for PostgresCatalogManager {
             .collect())
     }
 
+    async fn list_dataset_table_names(&self, schema_name: &str) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT table_name FROM datasets WHERE schema_name = $1 ORDER BY table_name",
+        )
+        .bind(schema_name)
+        .fetch_all(self.backend.pool())
+        .await?;
+
+        Ok(rows.into_iter().map(|(name,)| name).collect())
+    }
+
     async fn update_dataset(&self, id: &str, label: &str, table_name: &str) -> Result<bool> {
         let result = sqlx::query(
             "UPDATE datasets SET label = $1, table_name = $2, updated_at = NOW() WHERE id = $3",

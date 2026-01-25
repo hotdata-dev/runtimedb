@@ -767,6 +767,10 @@ mod tests {
             Ok(vec![])
         }
 
+        async fn list_dataset_table_names(&self, _schema_name: &str) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+
         async fn update_dataset(&self, _id: &str, _label: &str, _table_name: &str) -> Result<bool> {
             Ok(false)
         }

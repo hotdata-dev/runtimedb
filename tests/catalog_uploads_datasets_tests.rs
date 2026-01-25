@@ -614,3 +614,72 @@ async fn test_list_all_datasets_empty() {
     let datasets = catalog.list_all_datasets().await.unwrap();
     assert_eq!(datasets.len(), 0);
 }
+
+#[tokio::test]
+async fn test_list_dataset_table_names() {
+    let (catalog, _temp_dir) = create_test_catalog().await;
+
+    // Create datasets in different schemas
+    let ds1 = DatasetInfo {
+        id: "ds_1".to_string(),
+        label: "Dataset A".to_string(),
+        schema_name: "default".to_string(),
+        table_name: "table_a".to_string(),
+        parquet_url: "s3://bucket/ds1.parquet".to_string(),
+        arrow_schema_json: "{}".to_string(),
+        source_type: "upload".to_string(),
+        source_config: "{}".to_string(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let ds2 = DatasetInfo {
+        id: "ds_2".to_string(),
+        label: "Dataset B".to_string(),
+        schema_name: "default".to_string(),
+        table_name: "table_b".to_string(),
+        parquet_url: "s3://bucket/ds2.parquet".to_string(),
+        arrow_schema_json: "{}".to_string(),
+        source_type: "upload".to_string(),
+        source_config: "{}".to_string(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let ds3 = DatasetInfo {
+        id: "ds_3".to_string(),
+        label: "Dataset C".to_string(),
+        schema_name: "other_schema".to_string(),
+        table_name: "table_c".to_string(),
+        parquet_url: "s3://bucket/ds3.parquet".to_string(),
+        arrow_schema_json: "{}".to_string(),
+        source_type: "upload".to_string(),
+        source_config: "{}".to_string(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+
+    catalog.create_dataset(&ds1).await.unwrap();
+    catalog.create_dataset(&ds2).await.unwrap();
+    catalog.create_dataset(&ds3).await.unwrap();
+
+    // List table names for "default" schema - should return only tables in that schema
+    let names = catalog.list_dataset_table_names("default").await.unwrap();
+    assert_eq!(names.len(), 2);
+    // Results should be ordered by table_name
+    assert_eq!(names[0], "table_a");
+    assert_eq!(names[1], "table_b");
+
+    // List table names for "other_schema" - should return only table_c
+    let names = catalog
+        .list_dataset_table_names("other_schema")
+        .await
+        .unwrap();
+    assert_eq!(names.len(), 1);
+    assert_eq!(names[0], "table_c");
+
+    // List table names for non-existent schema - should return empty
+    let names = catalog
+        .list_dataset_table_names("nonexistent")
+        .await
+        .unwrap();
+    assert_eq!(names.len(), 0);
+}

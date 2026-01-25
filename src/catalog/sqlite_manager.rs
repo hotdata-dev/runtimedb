@@ -685,6 +685,17 @@ impl CatalogManager for SqliteCatalogManager {
             .collect())
     }
 
+    async fn list_dataset_table_names(&self, schema_name: &str) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT table_name FROM datasets WHERE schema_name = ? ORDER BY table_name",
+        )
+        .bind(schema_name)
+        .fetch_all(self.backend.pool())
+        .await?;
+
+        Ok(rows.into_iter().map(|(name,)| name).collect())
+    }
+
     async fn update_dataset(&self, id: &str, label: &str, table_name: &str) -> Result<bool> {
         let updated_at = Utc::now().to_rfc3339();
         let result = sqlx::query(
