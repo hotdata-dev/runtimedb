@@ -547,8 +547,16 @@ macro_rules! catalog_manager_tests {
 
                 // Verify structured error detection works
                 let err = result.unwrap_err();
+                let is_conflict = is_dataset_table_name_conflict(
+                    catalog,
+                    &err,
+                    "default",
+                    "my_table",
+                    None, // creating new dataset
+                )
+                .await;
                 assert!(
-                    is_dataset_table_name_conflict(&err),
+                    is_conflict,
                     "Expected is_dataset_table_name_conflict to return true for: {:?}",
                     err
                 );
@@ -600,8 +608,16 @@ macro_rules! catalog_manager_tests {
 
                 // Verify structured error detection works
                 let err = result.unwrap_err();
+                let is_conflict = is_dataset_table_name_conflict(
+                    catalog,
+                    &err,
+                    "default",
+                    "table_one",
+                    Some("ds_second"), // exclude current dataset from conflict check
+                )
+                .await;
                 assert!(
-                    is_dataset_table_name_conflict(&err),
+                    is_conflict,
                     "Expected is_dataset_table_name_conflict to return true for: {:?}",
                     err
                 );
@@ -629,15 +645,31 @@ macro_rules! catalog_manager_tests {
 
                 // Create a generic anyhow error and verify it's not misclassified
                 let generic_err = anyhow::anyhow!("some random error with unique word in it");
+                let is_conflict = is_dataset_table_name_conflict(
+                    catalog,
+                    &generic_err,
+                    "default",
+                    "some_table",
+                    None,
+                )
+                .await;
                 assert!(
-                    !is_dataset_table_name_conflict(&generic_err),
+                    !is_conflict,
                     "Generic error should not be classified as table_name conflict"
                 );
 
                 // Create an error with "duplicate" in the message but not from sqlx
                 let misleading_err = anyhow::anyhow!("duplicate key violation somewhere");
+                let is_conflict = is_dataset_table_name_conflict(
+                    catalog,
+                    &misleading_err,
+                    "default",
+                    "some_table",
+                    None,
+                )
+                .await;
                 assert!(
-                    !is_dataset_table_name_conflict(&misleading_err),
+                    !is_conflict,
                     "Non-sqlx error with 'duplicate' should not be classified as table_name conflict"
                 );
             }

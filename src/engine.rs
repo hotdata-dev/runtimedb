@@ -1352,7 +1352,15 @@ impl RuntimeEngine {
                 let _ = self.catalog.release_upload(upload_id).await;
             }
             // Check if this is a unique constraint violation on table_name (race condition)
-            if is_dataset_table_name_conflict(&e) {
+            if is_dataset_table_name_conflict(
+                self.catalog.as_ref(),
+                &e,
+                crate::datasets::DEFAULT_SCHEMA,
+                &table_name_for_error,
+                None, // creating new dataset
+            )
+            .await
+            {
                 return Err(DatasetError::TableNameInUse(table_name_for_error));
             }
             return Err(DatasetError::Catalog(e));
@@ -1521,7 +1529,15 @@ impl RuntimeEngine {
             Ok(updated) => updated,
             Err(e) => {
                 // Check if this is a unique constraint violation on table_name (race condition)
-                if is_dataset_table_name_conflict(&e) {
+                if is_dataset_table_name_conflict(
+                    self.catalog.as_ref(),
+                    &e,
+                    crate::datasets::DEFAULT_SCHEMA,
+                    table_name,
+                    Some(id), // exclude current dataset from conflict check
+                )
+                .await
+                {
                     return Err(DatasetError::TableNameInUse(table_name.to_string()));
                 }
                 return Err(DatasetError::Catalog(e));
