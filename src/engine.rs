@@ -1,5 +1,6 @@
 use crate::catalog::{
-    CatalogManager, ConnectionInfo, QueryResult, SqliteCatalogManager, TableInfo,
+    is_dataset_table_name_conflict, CatalogManager, ConnectionInfo, QueryResult,
+    SqliteCatalogManager, TableInfo,
 };
 use crate::datafetch::native::StreamingParquetWriter;
 use crate::datafetch::{BatchWriter, FetchOrchestrator, NativeFetcher};
@@ -1350,9 +1351,8 @@ impl RuntimeEngine {
             if let Some(ref upload_id) = claimed_upload_id {
                 let _ = self.catalog.release_upload(upload_id).await;
             }
-            // Check if this is a unique constraint violation (race condition on table_name)
-            let err_str = e.to_string().to_lowercase();
-            if err_str.contains("unique") || err_str.contains("duplicate") {
+            // Check if this is a unique constraint violation on table_name (race condition)
+            if is_dataset_table_name_conflict(&e) {
                 return Err(DatasetError::TableNameInUse(table_name_for_error));
             }
             return Err(DatasetError::Catalog(e));
@@ -1520,9 +1520,8 @@ impl RuntimeEngine {
         let updated = match self.catalog.update_dataset(id, label, table_name).await {
             Ok(updated) => updated,
             Err(e) => {
-                // Check if this is a unique constraint violation (race condition on table_name)
-                let err_str = e.to_string().to_lowercase();
-                if err_str.contains("unique") || err_str.contains("duplicate") {
+                // Check if this is a unique constraint violation on table_name (race condition)
+                if is_dataset_table_name_conflict(&e) {
                     return Err(DatasetError::TableNameInUse(table_name.to_string()));
                 }
                 return Err(DatasetError::Catalog(e));
