@@ -15,6 +15,8 @@ use datafusion::datasource::listing::{
 };
 use datafusion::datasource::TableProvider;
 use datafusion::error::{DataFusionError, Result};
+use datafusion::execution::session_state::SessionStateBuilder;
+use datafusion::execution::SessionState;
 use std::any::Any;
 use std::sync::{Arc, RwLock};
 
@@ -26,10 +28,16 @@ pub struct DatasetsCatalogProvider {
 }
 
 impl DatasetsCatalogProvider {
-    /// Create a new DatasetsCatalogProvider.
-    pub fn new(catalog: Arc<dyn CatalogManager>) -> Self {
+    /// Create a new DatasetsCatalogProvider using the RuntimeEnv from the given SessionContext.
+    ///
+    /// This creates a minimal session state that shares the RuntimeEnv (and thus object stores)
+    /// with the provided context, enabling fallback schema inference from parquet files.
+    pub fn with_runtime_env(
+        catalog: Arc<dyn CatalogManager>,
+        ctx: &datafusion::prelude::SessionContext,
+    ) -> Self {
         Self {
-            schema: Arc::new(DatasetsSchemaProvider::new(catalog)),
+            schema: Arc::new(DatasetsSchemaProvider::with_runtime_env(catalog, ctx)),
         }
     }
 }
@@ -59,6 +67,8 @@ impl CatalogProvider for DatasetsCatalogProvider {
 /// The cache is bounded to prevent unbounded memory growth.
 pub struct DatasetsSchemaProvider {
     catalog: Arc<dyn CatalogManager>,
+    /// Session state for fallback schema inference - shares the RuntimeEnv (and object stores)
+    session_state: Arc<SessionState>,
     /// Bounded cache of table providers keyed by table name.
     /// Uses FIFO eviction when capacity is reached.
     table_cache: RwLock<BoundedCache<Arc<dyn TableProvider>>>,
@@ -68,6 +78,7 @@ impl std::fmt::Debug for DatasetsSchemaProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DatasetsSchemaProvider")
             .field("catalog", &"...")
+            .field("session_state", &"...")
             .field(
                 "table_cache",
                 &format!(
@@ -80,10 +91,20 @@ impl std::fmt::Debug for DatasetsSchemaProvider {
 }
 
 impl DatasetsSchemaProvider {
-    /// Create a new DatasetsSchemaProvider.
-    pub fn new(catalog: Arc<dyn CatalogManager>) -> Self {
+    /// Create a new DatasetsSchemaProvider using the RuntimeEnv from the given SessionContext.
+    ///
+    /// This creates a minimal session state that shares the RuntimeEnv (and thus object stores)
+    /// with the provided context, enabling fallback schema inference from parquet files.
+    pub fn with_runtime_env(
+        catalog: Arc<dyn CatalogManager>,
+        ctx: &datafusion::prelude::SessionContext,
+    ) -> Self {
+        let session_state = SessionStateBuilder::new()
+            .with_runtime_env(ctx.runtime_env())
+            .build();
         Self {
             catalog,
+            session_state: Arc::new(session_state),
             table_cache: RwLock::new(BoundedCache::new(DEFAULT_CACHE_CAPACITY)),
         }
     }
@@ -140,14 +161,22 @@ impl SchemaProvider for DatasetsSchemaProvider {
         let file_format = ParquetFormat::default();
         let listing_options = ListingOptions::new(Arc::new(file_format));
 
-        // Use stored schema from catalog instead of re-inferring from parquet file
+        // Try to use stored schema from catalog, fall back to parquet inference if corrupted
         let schema: datafusion::arrow::datatypes::SchemaRef =
-            serde_json::from_str(&info.arrow_schema_json).map_err(|e| {
-                DataFusionError::External(Box::new(std::io::Error::other(format!(
-                    "Failed to parse stored schema for dataset '{}': {}",
-                    name, e
-                ))))
-            })?;
+            match serde_json::from_str(&info.arrow_schema_json) {
+                Ok(schema) => schema,
+                Err(e) => {
+                    // Log warning and fall back to schema inference from parquet file
+                    tracing::warn!(
+                        dataset = %name,
+                        error = %e,
+                        "Stored schema is corrupted, inferring from parquet file"
+                    );
+                    listing_options
+                        .infer_schema(self.session_state.as_ref(), &table_path)
+                        .await?
+                }
+            };
 
         let config = ListingTableConfig::new(table_path)
             .with_listing_options(listing_options)

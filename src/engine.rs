@@ -1922,7 +1922,10 @@ impl RuntimeEngineBuilder {
             .register_catalog("runtimedb", runtimedb_catalog);
 
         // Register the datasets catalog for user-uploaded datasets
-        let datasets_catalog = Arc::new(DatasetsCatalogProvider::new(engine.catalog.clone()));
+        let datasets_catalog = Arc::new(DatasetsCatalogProvider::with_runtime_env(
+            engine.catalog.clone(),
+            &engine.df_ctx,
+        ));
         engine.df_ctx.register_catalog("datasets", datasets_catalog);
 
         // Process any pending deletions from previous runs

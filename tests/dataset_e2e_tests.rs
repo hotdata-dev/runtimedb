@@ -1083,3 +1083,76 @@ async fn test_concurrent_update_to_same_table_name() {
         err
     );
 }
+
+/// Test that corrupted arrow_schema_json falls back to parquet schema inference.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_corrupted_schema_falls_back_to_parquet_inference() {
+    use sqlx::SqlitePool;
+
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create engine with known path so we can access the catalog database
+    let db_path = temp_dir.path().join("catalog.db");
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path().to_path_buf())
+        .secret_key(test_secret_key())
+        .build()
+        .await
+        .expect("Failed to create engine");
+
+    // Create a dataset with valid data
+    let csv_data = "name,value\nAlice,100\nBob,200";
+    let dataset = engine
+        .create_dataset(
+            "Test Dataset",
+            Some("test_table"),
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "csv".to_string(),
+                    content: csv_data.to_string(),
+                },
+            },
+        )
+        .await
+        .expect("Failed to create dataset");
+
+    // Verify the dataset works before corruption
+    let result = engine
+        .execute_query("SELECT name, value FROM datasets.default.test_table ORDER BY name")
+        .await
+        .expect("Query should succeed before corruption");
+
+    assert_eq!(result.results[0].num_rows(), 2);
+
+    // Now corrupt the schema in the database
+    let db_uri = format!("sqlite:{}?mode=rw", db_path.display());
+    let pool = SqlitePool::connect(&db_uri).await.unwrap();
+
+    sqlx::query("UPDATE datasets SET arrow_schema_json = 'not valid json' WHERE id = ?")
+        .bind(&dataset.id)
+        .execute(&pool)
+        .await
+        .expect("Failed to corrupt schema");
+
+    pool.close().await;
+
+    // Invalidate the cache so we force a re-read
+    engine.invalidate_dataset_cache("test_table");
+
+    // Query should still work due to fallback to parquet schema inference
+    let result = engine
+        .execute_query("SELECT name, value FROM datasets.default.test_table ORDER BY name")
+        .await
+        .expect("Query should succeed with fallback schema inference");
+
+    // Verify we got the correct data
+    assert_eq!(result.results[0].num_rows(), 2);
+    let batch = &result.results[0];
+    let name_col = batch.column_by_name("name").unwrap();
+    let value_col = batch.column_by_name("value").unwrap();
+
+    assert_eq!(get_string_value(name_col.as_ref(), 0), "Alice");
+    assert_eq!(get_string_value(name_col.as_ref(), 1), "Bob");
+    assert_eq!(get_i64_value(value_col.as_ref(), 0), 100);
+    assert_eq!(get_i64_value(value_col.as_ref(), 1), 200);
+}
