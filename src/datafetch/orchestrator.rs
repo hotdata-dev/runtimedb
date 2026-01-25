@@ -763,6 +763,10 @@ mod tests {
             Ok((vec![], false))
         }
 
+        async fn list_all_datasets(&self) -> Result<Vec<crate::catalog::DatasetInfo>> {
+            Ok(vec![])
+        }
+
         async fn update_dataset(&self, _id: &str, _label: &str, _table_name: &str) -> Result<bool> {
             Ok(false)
         }

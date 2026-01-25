@@ -103,10 +103,8 @@ impl SchemaProvider for DatasetsSchemaProvider {
     }
 
     fn table_names(&self) -> Vec<String> {
-        // Fetch all datasets - no pagination needed since we must return all names anyway
-        // Using a large limit to get everything in one query
-        match block_on(self.catalog.list_datasets(usize::MAX, 0)) {
-            Ok((datasets, _)) => datasets.into_iter().map(|d| d.table_name).collect(),
+        match block_on(self.catalog.list_all_datasets()) {
+            Ok(datasets) => datasets.into_iter().map(|d| d.table_name).collect(),
             Err(_) => Vec::new(),
         }
     }

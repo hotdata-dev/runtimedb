@@ -702,3 +702,384 @@ async fn test_empty_data_fails() {
         err
     );
 }
+
+// ============================================================================
+// Format case-insensitivity tests
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_format_case_insensitive_csv() {
+    let (engine, _temp) = create_test_engine().await;
+
+    // Test uppercase CSV
+    let dataset = engine
+        .create_dataset(
+            "Upper CSV",
+            Some("upper_csv"),
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "CSV".to_string(), // uppercase
+                    content: "a,b\n1,2".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(dataset.table_name, "upper_csv");
+
+    let result = engine
+        .execute_query("SELECT * FROM datasets.default.upper_csv")
+        .await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_format_case_insensitive_json() {
+    let (engine, _temp) = create_test_engine().await;
+
+    // Test mixed case JSON
+    let dataset = engine
+        .create_dataset(
+            "Mixed JSON",
+            Some("mixed_json"),
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "Json".to_string(), // mixed case
+                    content: r#"{"x": 1}"#.to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(dataset.table_name, "mixed_json");
+
+    let result = engine
+        .execute_query("SELECT * FROM datasets.default.mixed_json")
+        .await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_format_case_insensitive_parquet_upload() {
+    let (engine, _temp) = create_test_engine().await;
+
+    // Create a simple parquet file in memory using arrow
+    use datafusion::arrow::array::Int32Array;
+    use datafusion::arrow::datatypes::{Field, Schema};
+    use datafusion::arrow::record_batch::RecordBatch;
+    use datafusion::parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "value",
+        DataType::Int32,
+        false,
+    )]));
+    let batch =
+        RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![42]))]).unwrap();
+
+    let mut buf = Vec::new();
+    {
+        let mut writer = ArrowWriter::try_new(&mut buf, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    let upload = engine
+        .store_upload(buf, Some("application/octet-stream".to_string()))
+        .await
+        .unwrap();
+
+    // Test uppercase PARQUET format
+    let dataset = engine
+        .create_dataset(
+            "Upper Parquet",
+            Some("upper_parquet"),
+            DatasetSource::Upload {
+                upload_id: upload.id,
+                format: Some("PARQUET".to_string()), // uppercase
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(dataset.table_name, "upper_parquet");
+
+    let result = engine
+        .execute_query("SELECT * FROM datasets.default.upper_parquet")
+        .await;
+    assert!(result.is_ok());
+}
+
+// ============================================================================
+// Label validation tests
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_empty_label_rejected() {
+    let (engine, _temp) = create_test_engine().await;
+
+    let result = engine
+        .create_dataset(
+            "",
+            Some("empty_label"),
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "csv".to_string(),
+                    content: "a,b\n1,2".to_string(),
+                },
+            },
+        )
+        .await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("empty") || err.contains("label"),
+        "Error should mention empty label: {}",
+        err
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_whitespace_only_label_rejected() {
+    let (engine, _temp) = create_test_engine().await;
+
+    let result = engine
+        .create_dataset(
+            "   ",
+            Some("whitespace_label"),
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "csv".to_string(),
+                    content: "a,b\n1,2".to_string(),
+                },
+            },
+        )
+        .await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("empty") || err.contains("label"),
+        "Error should mention empty label: {}",
+        err
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_with_empty_label_rejected() {
+    let (engine, _temp) = create_test_engine().await;
+
+    // First create a valid dataset
+    let dataset = engine
+        .create_dataset(
+            "Valid Label",
+            Some("update_label_test"),
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "csv".to_string(),
+                    content: "a,b\n1,2".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    // Try to update with empty label
+    let result = engine.update_dataset(&dataset.id, Some(""), None).await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("empty") || err.contains("label"),
+        "Error should mention empty label: {}",
+        err
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_with_whitespace_label_rejected() {
+    let (engine, _temp) = create_test_engine().await;
+
+    let dataset = engine
+        .create_dataset(
+            "Valid Label",
+            Some("update_ws_label_test"),
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "csv".to_string(),
+                    content: "a,b\n1,2".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    // Try to update with whitespace-only label
+    let result = engine
+        .update_dataset(&dataset.id, Some("   \t\n  "), None)
+        .await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("empty") || err.contains("label"),
+        "Error should mention empty label: {}",
+        err
+    );
+}
+
+// ============================================================================
+// Concurrency / unique constraint tests
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_concurrent_create_same_table_name() {
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
+
+    let (engine, _temp) = create_test_engine().await;
+    let engine = Arc::new(engine);
+    let barrier = Arc::new(Barrier::new(2));
+
+    // Spawn two tasks that try to create datasets with the same table_name concurrently
+    let engine1 = engine.clone();
+    let barrier1 = barrier.clone();
+    let task1 = tokio::spawn(async move {
+        barrier1.wait().await;
+        engine1
+            .create_dataset(
+                "Dataset One",
+                Some("concurrent_table"),
+                DatasetSource::Inline {
+                    inline: InlineData {
+                        format: "csv".to_string(),
+                        content: "x,y\n1,2".to_string(),
+                    },
+                },
+            )
+            .await
+    });
+
+    let engine2 = engine.clone();
+    let barrier2 = barrier.clone();
+    let task2 = tokio::spawn(async move {
+        barrier2.wait().await;
+        engine2
+            .create_dataset(
+                "Dataset Two",
+                Some("concurrent_table"),
+                DatasetSource::Inline {
+                    inline: InlineData {
+                        format: "csv".to_string(),
+                        content: "a,b\n3,4".to_string(),
+                    },
+                },
+            )
+            .await
+    });
+
+    let (result1, result2) = tokio::join!(task1, task2);
+    let result1 = result1.unwrap();
+    let result2 = result2.unwrap();
+
+    // Exactly one should succeed, one should fail with TableNameInUse
+    let success_count = [&result1, &result2].iter().filter(|r| r.is_ok()).count();
+    let failure_count = [&result1, &result2].iter().filter(|r| r.is_err()).count();
+
+    assert_eq!(success_count, 1, "Exactly one create should succeed");
+    assert_eq!(failure_count, 1, "Exactly one create should fail");
+
+    // The failure should indicate table name conflict
+    let failed = if result1.is_err() { result1 } else { result2 };
+    let err = failed.unwrap_err().to_string();
+    assert!(
+        err.contains("in use") || err.contains("already"),
+        "Error should indicate table name conflict: {}",
+        err
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_concurrent_update_to_same_table_name() {
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
+
+    let (engine, _temp) = create_test_engine().await;
+
+    // Create two datasets with different table names
+    let dataset1 = engine
+        .create_dataset(
+            "Dataset A",
+            Some("table_a"),
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "csv".to_string(),
+                    content: "x\n1".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    let dataset2 = engine
+        .create_dataset(
+            "Dataset B",
+            Some("table_b"),
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "csv".to_string(),
+                    content: "y\n2".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    let engine = Arc::new(engine);
+    let barrier = Arc::new(Barrier::new(2));
+
+    // Concurrently try to update both datasets to use the same table_name
+    let engine1 = engine.clone();
+    let barrier1 = barrier.clone();
+    let id1 = dataset1.id.clone();
+    let task1 = tokio::spawn(async move {
+        barrier1.wait().await;
+        engine1
+            .update_dataset(&id1, None, Some("target_table"))
+            .await
+    });
+
+    let engine2 = engine.clone();
+    let barrier2 = barrier.clone();
+    let id2 = dataset2.id.clone();
+    let task2 = tokio::spawn(async move {
+        barrier2.wait().await;
+        engine2
+            .update_dataset(&id2, None, Some("target_table"))
+            .await
+    });
+
+    let (result1, result2) = tokio::join!(task1, task2);
+    let result1 = result1.unwrap();
+    let result2 = result2.unwrap();
+
+    // Exactly one should succeed, one should fail
+    let success_count = [&result1, &result2].iter().filter(|r| r.is_ok()).count();
+    let failure_count = [&result1, &result2].iter().filter(|r| r.is_err()).count();
+
+    assert_eq!(success_count, 1, "Exactly one update should succeed");
+    assert_eq!(failure_count, 1, "Exactly one update should fail");
+
+    // The failure should indicate table name conflict
+    let failed = if result1.is_err() { result1 } else { result2 };
+    let err = failed.unwrap_err().to_string();
+    assert!(
+        err.contains("in use") || err.contains("already"),
+        "Error should indicate table name conflict: {}",
+        err
+    );
+}

@@ -520,3 +520,97 @@ async fn test_list_datasets() {
     assert_eq!(datasets.len(), 3);
     assert!(!has_more);
 }
+
+#[tokio::test]
+async fn test_list_datasets_pagination() {
+    let (catalog, _temp_dir) = create_test_catalog().await;
+
+    // Create 5 datasets with labels that sort alphabetically: A, B, C, D, E
+    for (i, letter) in ['A', 'B', 'C', 'D', 'E'].iter().enumerate() {
+        let dataset = DatasetInfo {
+            id: format!("ds_{}", i + 1),
+            label: format!("{} Dataset", letter),
+            schema_name: "default".to_string(),
+            table_name: format!("table_{}", letter.to_lowercase()),
+            parquet_url: format!("s3://bucket/{}.parquet", i + 1),
+            arrow_schema_json: "{}".to_string(),
+            source_type: "csv_upload".to_string(),
+            source_config: "{}".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        catalog.create_dataset(&dataset).await.unwrap();
+    }
+
+    // First page: limit 2, offset 0
+    let (page1, has_more1) = catalog.list_datasets(2, 0).await.unwrap();
+    assert_eq!(page1.len(), 2);
+    assert!(has_more1);
+    assert_eq!(page1[0].label, "A Dataset");
+    assert_eq!(page1[1].label, "B Dataset");
+
+    // Second page: limit 2, offset 2
+    let (page2, has_more2) = catalog.list_datasets(2, 2).await.unwrap();
+    assert_eq!(page2.len(), 2);
+    assert!(has_more2);
+    assert_eq!(page2[0].label, "C Dataset");
+    assert_eq!(page2[1].label, "D Dataset");
+
+    // Third page: limit 2, offset 4
+    let (page3, has_more3) = catalog.list_datasets(2, 4).await.unwrap();
+    assert_eq!(page3.len(), 1);
+    assert!(!has_more3);
+    assert_eq!(page3[0].label, "E Dataset");
+
+    // Empty page: offset past end
+    let (page4, has_more4) = catalog.list_datasets(2, 10).await.unwrap();
+    assert_eq!(page4.len(), 0);
+    assert!(!has_more4);
+}
+
+#[tokio::test]
+async fn test_list_all_datasets() {
+    let (catalog, _temp_dir) = create_test_catalog().await;
+
+    // Create 5 datasets
+    for i in 1..=5 {
+        let dataset = DatasetInfo {
+            id: format!("ds_{}", i),
+            label: format!("Dataset {}", i),
+            schema_name: "default".to_string(),
+            table_name: format!("table_{}", i),
+            parquet_url: format!("s3://bucket/{}.parquet", i),
+            arrow_schema_json: "{}".to_string(),
+            source_type: "csv_upload".to_string(),
+            source_config: "{}".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        catalog.create_dataset(&dataset).await.unwrap();
+    }
+
+    // list_all_datasets returns all without pagination
+    let datasets = catalog.list_all_datasets().await.unwrap();
+    assert_eq!(datasets.len(), 5);
+
+    // Verify they are ordered by label
+    let labels: Vec<&str> = datasets.iter().map(|d| d.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        vec![
+            "Dataset 1",
+            "Dataset 2",
+            "Dataset 3",
+            "Dataset 4",
+            "Dataset 5"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_list_all_datasets_empty() {
+    let (catalog, _temp_dir) = create_test_catalog().await;
+
+    let datasets = catalog.list_all_datasets().await.unwrap();
+    assert_eq!(datasets.len(), 0);
+}
