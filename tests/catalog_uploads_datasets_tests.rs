@@ -662,7 +662,10 @@ async fn test_list_dataset_table_names() {
     catalog.create_dataset(&ds3).await.unwrap();
 
     // List table names for "default" schema - should return only tables in that schema
-    let names = catalog.list_dataset_table_names("default").await.unwrap();
+    let names = catalog
+        .list_dataset_table_names(Some("default"))
+        .await
+        .unwrap();
     assert_eq!(names.len(), 2);
     // Results should be ordered by table_name
     assert_eq!(names[0], "table_a");
@@ -670,7 +673,7 @@ async fn test_list_dataset_table_names() {
 
     // List table names for "other_schema" - should return only table_c
     let names = catalog
-        .list_dataset_table_names("other_schema")
+        .list_dataset_table_names(Some("other_schema"))
         .await
         .unwrap();
     assert_eq!(names.len(), 1);
@@ -678,8 +681,15 @@ async fn test_list_dataset_table_names() {
 
     // List table names for non-existent schema - should return empty
     let names = catalog
-        .list_dataset_table_names("nonexistent")
+        .list_dataset_table_names(Some("nonexistent"))
         .await
         .unwrap();
     assert_eq!(names.len(), 0);
+
+    // List all table names (no schema filter) - should return all tables
+    let names = catalog.list_dataset_table_names(None).await.unwrap();
+    assert_eq!(names.len(), 3);
+    assert_eq!(names[0], "table_a");
+    assert_eq!(names[1], "table_b");
+    assert_eq!(names[2], "table_c");
 }

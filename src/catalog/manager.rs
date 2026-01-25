@@ -273,10 +273,11 @@ pub trait CatalogManager: Debug + Send + Sync {
     /// Use this when you need all dataset names (e.g., for schema introspection).
     async fn list_all_datasets(&self) -> Result<Vec<DatasetInfo>>;
 
-    /// List table names for a specific schema.
+    /// List table names, optionally filtered by schema.
     /// Returns only the table_name column for efficiency (avoids loading large JSON fields).
     /// Use this for schema introspection where only names are needed.
-    async fn list_dataset_table_names(&self, schema_name: &str) -> Result<Vec<String>>;
+    /// If schema_name is None, returns all table names across all schemas.
+    async fn list_dataset_table_names(&self, schema_name: Option<&str>) -> Result<Vec<String>>;
 
     /// Update a dataset's label and table_name. Returns true if the dataset existed.
     async fn update_dataset(&self, id: &str, label: &str, table_name: &str) -> Result<bool>;
