@@ -2116,3 +2116,450 @@ async fn test_create_connection_with_both_secret_name_and_id_fails() -> Result<(
 
     Ok(())
 }
+
+// ============================================================================
+// Additional Dataset HTTP API Tests
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_datasets_with_pagination() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create 3 datasets with labels that sort alphabetically
+    for label in ["Alpha", "Beta", "Gamma"] {
+        let _create_response = app
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(PATH_DATASETS)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&json!({
+                        "label": label,
+                        "source": {
+                            "inline": {
+                                "format": "csv",
+                                "content": "a\n1"
+                            }
+                        }
+                    }))?))?,
+            )
+            .await?;
+    }
+
+    // Test pagination: limit=2, offset=0
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("{}?limit=2&offset=0", PATH_DATASETS))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = parse_body(response).await;
+    let datasets = body["datasets"].as_array().unwrap();
+    assert_eq!(datasets.len(), 2);
+    assert!(body["has_more"].as_bool().unwrap());
+    assert_eq!(datasets[0]["label"], "Alpha");
+    assert_eq!(datasets[1]["label"], "Beta");
+
+    // Test pagination: limit=2, offset=2
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("{}?limit=2&offset=2", PATH_DATASETS))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = parse_body(response).await;
+    let datasets = body["datasets"].as_array().unwrap();
+    assert_eq!(datasets.len(), 1);
+    assert!(!body["has_more"].as_bool().unwrap());
+    assert_eq!(datasets[0]["label"], "Gamma");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_dataset_label_only() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create a dataset
+    let create_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "Original Label",
+                    "table_name": "original_table",
+                    "source": {
+                        "inline": {
+                            "format": "csv",
+                            "content": "a\n1"
+                        }
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    let create_body: serde_json::Value = parse_body(create_response).await;
+    let dataset_id = create_body["id"].as_str().unwrap();
+
+    // Update only the label (omit table_name)
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_dataset(dataset_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "New Label"
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = parse_body(response).await;
+    assert_eq!(body["label"], "New Label");
+    assert_eq!(body["table_name"], "original_table"); // unchanged
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_dataset_table_name_only() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create a dataset
+    let create_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "My Dataset",
+                    "table_name": "old_table",
+                    "source": {
+                        "inline": {
+                            "format": "csv",
+                            "content": "a\n1"
+                        }
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    let create_body: serde_json::Value = parse_body(create_response).await;
+    let dataset_id = create_body["id"].as_str().unwrap();
+
+    // Update only the table_name (omit label)
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_dataset(dataset_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "table_name": "new_table"
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = parse_body(response).await;
+    assert_eq!(body["label"], "My Dataset"); // unchanged
+    assert_eq!(body["table_name"], "new_table");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_dataset_not_found() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Try to update a non-existent dataset
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_dataset("ds_nonexistent_12345"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "New Label"
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_dataset_table_name_conflict() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create first dataset
+    let _create1 = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "First",
+                    "table_name": "taken_name",
+                    "source": {
+                        "inline": {
+                            "format": "csv",
+                            "content": "a\n1"
+                        }
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    // Create second dataset
+    let create2 = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "Second",
+                    "table_name": "other_name",
+                    "source": {
+                        "inline": {
+                            "format": "csv",
+                            "content": "b\n2"
+                        }
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    let create2_body: serde_json::Value = parse_body(create2).await;
+    let dataset2_id = create2_body["id"].as_str().unwrap();
+
+    // Try to update second dataset to use first dataset's table_name
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_dataset(dataset2_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "table_name": "taken_name"
+                }))?))?,
+        )
+        .await?;
+
+    // Should get 409 Conflict (or 400 Bad Request depending on implementation)
+    assert!(
+        response.status() == StatusCode::CONFLICT || response.status() == StatusCode::BAD_REQUEST,
+        "Expected 409 or 400, got {}",
+        response.status()
+    );
+
+    let body: serde_json::Value = parse_body(response).await;
+    let error = body["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        error.contains("taken_name") || error.contains("in use") || error.contains("already"),
+        "Error should mention table name conflict: {}",
+        error
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_delete_dataset_not_found() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Try to delete a non-existent dataset
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(path_dataset("ds_nonexistent_12345"))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_dataset_empty_label() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "",
+                    "source": {
+                        "inline": {
+                            "format": "csv",
+                            "content": "a\n1"
+                        }
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body: serde_json::Value = parse_body(response).await;
+    let error = body["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        error.contains("empty") || error.contains("label"),
+        "Error should mention empty label: {}",
+        error
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_dataset_empty_label() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create a dataset
+    let create_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "Valid Label",
+                    "source": {
+                        "inline": {
+                            "format": "csv",
+                            "content": "a\n1"
+                        }
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    let create_body: serde_json::Value = parse_body(create_response).await;
+    let dataset_id = create_body["id"].as_str().unwrap();
+
+    // Try to update with empty label
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_dataset(dataset_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": ""
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body: serde_json::Value = parse_body(response).await;
+    let error = body["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        error.contains("empty") || error.contains("label"),
+        "Error should mention empty label: {}",
+        error
+    );
+
+    Ok(())
+}
