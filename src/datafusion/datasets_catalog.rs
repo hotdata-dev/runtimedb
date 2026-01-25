@@ -6,6 +6,7 @@
 use super::block_on;
 use super::bounded_cache::{BoundedCache, DEFAULT_CACHE_CAPACITY};
 use crate::catalog::CatalogManager;
+use crate::datasets::DEFAULT_SCHEMA;
 use async_trait::async_trait;
 use datafusion::catalog::{CatalogProvider, SchemaProvider};
 use datafusion::datasource::file_format::parquet::ParquetFormat;
@@ -45,12 +46,11 @@ impl CatalogProvider for DatasetsCatalogProvider {
     }
 
     fn schema_names(&self) -> Vec<String> {
-        // Datasets use a single "default" schema
-        vec!["default".to_string()]
+        vec![DEFAULT_SCHEMA.to_string()]
     }
 
     fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
-        if name == "default" {
+        if name == DEFAULT_SCHEMA {
             Some(self.schema.clone())
         } else {
             None
@@ -140,7 +140,7 @@ impl SchemaProvider for DatasetsSchemaProvider {
         // Look up dataset by table_name
         let dataset = self
             .catalog
-            .get_dataset_by_table_name("default", name)
+            .get_dataset_by_table_name(DEFAULT_SCHEMA, name)
             .await
             .map_err(|e| {
                 DataFusionError::External(Box::new(std::io::Error::other(e.to_string())))
@@ -181,7 +181,7 @@ impl SchemaProvider for DatasetsSchemaProvider {
     fn table_exist(&self, name: &str) -> bool {
         // This is a sync trait method, so block_on is required here
         matches!(
-            block_on(self.catalog.get_dataset_by_table_name("default", name)),
+            block_on(self.catalog.get_dataset_by_table_name(DEFAULT_SCHEMA, name)),
             Ok(Some(_))
         )
     }

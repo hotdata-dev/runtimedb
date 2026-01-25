@@ -1034,7 +1034,7 @@ impl RuntimeEngine {
         let now = Utc::now();
         let upload = crate::catalog::UploadInfo {
             id: upload_id,
-            status: "pending".to_string(),
+            status: crate::datasets::upload_status::PENDING.to_string(),
             storage_url,
             content_type,
             content_encoding: None,
@@ -1092,7 +1092,7 @@ impl RuntimeEngine {
         // Check if table_name is already used
         if self
             .catalog
-            .get_dataset_by_table_name("default", &table_name)
+            .get_dataset_by_table_name(crate::datasets::DEFAULT_SCHEMA, &table_name)
             .await
             .map_err(DatasetError::Catalog)?
             .is_some()
@@ -1120,12 +1120,13 @@ impl RuntimeEngine {
                         .get_upload(upload_id)
                         .await
                         .map_err(DatasetError::Catalog)?;
+                    use crate::datasets::upload_status;
                     return Err(match upload {
                         None => DatasetError::UploadNotFound(upload_id.clone()),
-                        Some(u) if u.status == "consumed" => {
+                        Some(u) if u.status == upload_status::CONSUMED => {
                             DatasetError::UploadConsumed(upload_id.clone())
                         }
-                        Some(u) if u.status == "processing" => {
+                        Some(u) if u.status == upload_status::PROCESSING => {
                             DatasetError::UploadProcessing(upload_id.clone())
                         }
                         Some(_) => DatasetError::UploadNotAvailable(upload_id.clone()),
@@ -1316,7 +1317,7 @@ impl RuntimeEngine {
         let dataset = crate::catalog::DatasetInfo {
             id: dataset_id,
             label: label.to_string(),
-            schema_name: "default".to_string(),
+            schema_name: crate::datasets::DEFAULT_SCHEMA.to_string(),
             table_name,
             parquet_url,
             arrow_schema_json: schema_json,
@@ -1485,7 +1486,7 @@ impl RuntimeEngine {
         if table_name != old_table_name {
             if let Some(existing_dataset) = self
                 .catalog
-                .get_dataset_by_table_name("default", table_name)
+                .get_dataset_by_table_name(crate::datasets::DEFAULT_SCHEMA, table_name)
                 .await
                 .map_err(DatasetError::Catalog)?
             {
