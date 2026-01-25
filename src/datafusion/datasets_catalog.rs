@@ -104,7 +104,7 @@ impl SchemaProvider for DatasetsSchemaProvider {
 
     fn table_names(&self) -> Vec<String> {
         // Use the efficient method that only fetches table names for this schema
-        match block_on(self.catalog.list_dataset_table_names(Some(DEFAULT_SCHEMA))) {
+        match block_on(self.catalog.list_dataset_table_names(DEFAULT_SCHEMA)) {
             Ok(names) => names,
             Err(_) => Vec::new(),
         }
