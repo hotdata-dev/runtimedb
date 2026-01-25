@@ -15,9 +15,6 @@ use datafusion::datasource::listing::{
 };
 use datafusion::datasource::TableProvider;
 use datafusion::error::{DataFusionError, Result};
-use datafusion::execution::session_state::SessionStateBuilder;
-use datafusion::execution::SessionState;
-use datafusion::prelude::SessionContext;
 use std::any::Any;
 use std::sync::{Arc, RwLock};
 
@@ -30,12 +27,9 @@ pub struct DatasetsCatalogProvider {
 
 impl DatasetsCatalogProvider {
     /// Create a new DatasetsCatalogProvider.
-    ///
-    /// The `ctx` parameter is used to share the RuntimeEnv (including object stores like S3)
-    /// with the schema provider for parquet file access.
-    pub fn new(catalog: Arc<dyn CatalogManager>, ctx: &SessionContext) -> Self {
+    pub fn new(catalog: Arc<dyn CatalogManager>) -> Self {
         Self {
-            schema: Arc::new(DatasetsSchemaProvider::new(catalog, ctx)),
+            schema: Arc::new(DatasetsSchemaProvider::new(catalog)),
         }
     }
 }
@@ -61,12 +55,10 @@ impl CatalogProvider for DatasetsCatalogProvider {
 /// Schema provider for datasets - lists tables from the datasets catalog table.
 ///
 /// Caches table providers in memory since dataset schemas are immutable after creation.
-/// This avoids expensive Parquet metadata reads on repeated queries.
+/// This avoids expensive reads on repeated queries.
 /// The cache is bounded to prevent unbounded memory growth.
 pub struct DatasetsSchemaProvider {
     catalog: Arc<dyn CatalogManager>,
-    /// Session state for schema inference - shares the RuntimeEnv (and object stores) with the main session
-    session_state: Arc<SessionState>,
     /// Bounded cache of table providers keyed by table name.
     /// Uses FIFO eviction when capacity is reached.
     table_cache: RwLock<BoundedCache<Arc<dyn TableProvider>>>,
@@ -76,7 +68,6 @@ impl std::fmt::Debug for DatasetsSchemaProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DatasetsSchemaProvider")
             .field("catalog", &"...")
-            .field("session_state", &"...")
             .field(
                 "table_cache",
                 &format!(
@@ -90,17 +81,9 @@ impl std::fmt::Debug for DatasetsSchemaProvider {
 
 impl DatasetsSchemaProvider {
     /// Create a new DatasetsSchemaProvider.
-    ///
-    /// The `ctx` parameter is used to share the RuntimeEnv (including object stores like S3)
-    /// with the session state for parquet schema inference.
-    pub fn new(catalog: Arc<dyn CatalogManager>, ctx: &SessionContext) -> Self {
-        // Create a minimal session state that shares the RuntimeEnv
-        let session_state = SessionStateBuilder::new()
-            .with_runtime_env(ctx.runtime_env())
-            .build();
+    pub fn new(catalog: Arc<dyn CatalogManager>) -> Self {
         Self {
             catalog,
-            session_state: Arc::new(session_state),
             table_cache: RwLock::new(BoundedCache::new(DEFAULT_CACHE_CAPACITY)),
         }
     }
@@ -158,10 +141,14 @@ impl SchemaProvider for DatasetsSchemaProvider {
         let file_format = ParquetFormat::default();
         let listing_options = ListingOptions::new(Arc::new(file_format));
 
-        // Infer schema using the shared session state (which has access to object stores like S3)
-        let schema = listing_options
-            .infer_schema(self.session_state.as_ref(), &table_path)
-            .await?;
+        // Use stored schema from catalog instead of re-inferring from parquet file
+        let schema: datafusion::arrow::datatypes::SchemaRef =
+            serde_json::from_str(&info.arrow_schema_json).map_err(|e| {
+                DataFusionError::External(Box::new(std::io::Error::other(format!(
+                    "Failed to parse stored schema for dataset '{}': {}",
+                    name, e
+                ))))
+            })?;
 
         let config = ListingTableConfig::new(table_path)
             .with_listing_options(listing_options)

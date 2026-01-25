@@ -593,7 +593,8 @@ impl CatalogManager for PostgresCatalogManager {
 
     async fn list_datasets(&self, limit: usize, offset: usize) -> Result<(Vec<DatasetInfo>, bool)> {
         // Fetch one extra to determine if there are more results
-        let fetch_limit = (limit + 1) as i64;
+        // Use saturating_add to prevent overflow when limit is very large
+        let fetch_limit = limit.saturating_add(1) as i64;
         let rows: Vec<DatasetInfoRow> = sqlx::query_as(
             "SELECT id, label, schema_name, table_name, parquet_url, arrow_schema_json, source_type, source_config, created_at, updated_at \
              FROM datasets ORDER BY label LIMIT $1 OFFSET $2",

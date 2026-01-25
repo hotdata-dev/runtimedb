@@ -7,6 +7,8 @@ use super::validation::TableNameError;
 pub enum DatasetError {
     /// Dataset not found.
     NotFound(String),
+    /// Label is empty or whitespace-only.
+    InvalidLabel,
     /// Table name validation failed.
     InvalidTableName(TableNameError),
     /// Auto-generated table name from label is invalid.
@@ -40,6 +42,7 @@ impl std::fmt::Display for DatasetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotFound(id) => write!(f, "Dataset '{}' not found", id),
+            Self::InvalidLabel => write!(f, "Dataset label cannot be empty"),
             Self::InvalidTableName(e) => write!(f, "Invalid table name: {}", e),
             Self::InvalidGeneratedTableName { label, error } => {
                 write!(
@@ -85,6 +88,7 @@ impl DatasetError {
         matches!(
             self,
             Self::NotFound(_)
+                | Self::InvalidLabel
                 | Self::InvalidTableName(_)
                 | Self::InvalidGeneratedTableName { .. }
                 | Self::TableNameInUse(_)

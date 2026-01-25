@@ -1069,6 +1069,11 @@ impl RuntimeEngine {
         use datafusion::arrow::csv::{reader::Format, ReaderBuilder};
         use std::io::{Seek, SeekFrom};
 
+        // Validate label is not empty
+        if label.trim().is_empty() {
+            return Err(DatasetError::InvalidLabel);
+        }
+
         // Generate or validate table_name
         let table_name = match table_name {
             Some(name) => {
@@ -1195,6 +1200,9 @@ impl RuntimeEngine {
             }
         };
 
+        // Normalize format to lowercase for case-insensitive matching
+        let format = format.to_lowercase();
+
         // Helper macro to release upload on error and return ParseError
         macro_rules! release_on_parse_error {
             ($result:expr) => {
@@ -1314,6 +1322,7 @@ impl RuntimeEngine {
 
         // Create catalog record
         let now = Utc::now();
+        let table_name_for_error = table_name.clone();
         let dataset = crate::catalog::DatasetInfo {
             id: dataset_id,
             label: label.to_string(),
@@ -1340,6 +1349,11 @@ impl RuntimeEngine {
             // Release the upload back to pending state
             if let Some(ref upload_id) = claimed_upload_id {
                 let _ = self.catalog.release_upload(upload_id).await;
+            }
+            // Check if this is a unique constraint violation (race condition on table_name)
+            let err_str = e.to_string().to_lowercase();
+            if err_str.contains("unique") || err_str.contains("duplicate") {
+                return Err(DatasetError::TableNameInUse(table_name_for_error));
             }
             return Err(DatasetError::Catalog(e));
         }
@@ -1479,7 +1493,12 @@ impl RuntimeEngine {
         let label = new_label.unwrap_or(&existing.label);
         let table_name = new_table_name.unwrap_or(&existing.table_name);
 
-        // Validate new table_name
+        // Validate label is not empty
+        if label.trim().is_empty() {
+            return Err(DatasetError::InvalidLabel);
+        }
+
+        // Validate table_name
         crate::datasets::validate_table_name(table_name).map_err(DatasetError::InvalidTableName)?;
 
         // Check table_name uniqueness if it's changing
@@ -1498,11 +1517,17 @@ impl RuntimeEngine {
         }
 
         // Update in catalog
-        let updated = self
-            .catalog
-            .update_dataset(id, label, table_name)
-            .await
-            .map_err(DatasetError::Catalog)?;
+        let updated = match self.catalog.update_dataset(id, label, table_name).await {
+            Ok(updated) => updated,
+            Err(e) => {
+                // Check if this is a unique constraint violation (race condition on table_name)
+                let err_str = e.to_string().to_lowercase();
+                if err_str.contains("unique") || err_str.contains("duplicate") {
+                    return Err(DatasetError::TableNameInUse(table_name.to_string()));
+                }
+                return Err(DatasetError::Catalog(e));
+            }
+        };
 
         if !updated {
             return Err(DatasetError::NotFound(id.to_string()));
@@ -1882,10 +1907,7 @@ impl RuntimeEngineBuilder {
             .register_catalog("runtimedb", runtimedb_catalog);
 
         // Register the datasets catalog for user-uploaded datasets
-        let datasets_catalog = Arc::new(DatasetsCatalogProvider::new(
-            engine.catalog.clone(),
-            &engine.df_ctx,
-        ));
+        let datasets_catalog = Arc::new(DatasetsCatalogProvider::new(engine.catalog.clone()));
         engine.df_ctx.register_catalog("datasets", datasets_catalog);
 
         // Process any pending deletions from previous runs

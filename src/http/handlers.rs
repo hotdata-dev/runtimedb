@@ -1089,11 +1089,6 @@ pub async fn create_dataset(
     State(engine): State<Arc<RuntimeEngine>>,
     Json(request): Json<CreateDatasetRequest>,
 ) -> Result<(StatusCode, Json<CreateDatasetResponse>), ApiError> {
-    // Validate label is not empty
-    if request.label.trim().is_empty() {
-        return Err(ApiError::bad_request("Dataset label cannot be empty"));
-    }
-
     // Validate inline data size if present
     if let DatasetSource::Inline { ref inline } = request.source {
         if inline.content.len() > MAX_INLINE_DATA_SIZE {
