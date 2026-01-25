@@ -1210,12 +1210,14 @@ pub async fn get_dataset(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(id): Path<String>,
 ) -> Result<Json<GetDatasetResponse>, ApiError> {
-    let dataset = engine
-        .catalog()
-        .get_dataset(&id)
-        .await
-        .map_err(|e| ApiError::internal_error(format!("Failed to get dataset: {}", e)))?
-        .ok_or_else(|| ApiError::not_found(format!("Dataset '{}' not found", id)))?;
+    let dataset = engine.get_dataset(&id).await.map_err(|e| {
+        let msg = e.to_string();
+        if e.is_not_found() {
+            ApiError::not_found(msg)
+        } else {
+            ApiError::internal_error(msg)
+        }
+    })?;
 
     // Parse the arrow schema to extract column information
     let columns = deserialize_arrow_schema(&dataset.arrow_schema_json)
@@ -1289,35 +1291,14 @@ pub async fn delete_dataset(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let deleted = engine
-        .catalog()
-        .delete_dataset(&id)
-        .await
-        .map_err(|e| ApiError::internal_error(format!("Failed to delete dataset: {}", e)))?;
-
-    let deleted = match deleted {
-        Some(d) => d,
-        None => return Err(ApiError::not_found(format!("Dataset '{}' not found", id))),
-    };
-
-    // Schedule parquet directory deletion after grace period
-    // parquet_url is the full file path (e.g., .../version/data.parquet)
-    // but delete_prefix expects the directory, so strip the filename
-    let dir_url = deleted
-        .parquet_url
-        .strip_suffix("/data.parquet")
-        .unwrap_or(&deleted.parquet_url);
-    if let Err(e) = engine.schedule_dataset_file_deletion(dir_url).await {
-        tracing::warn!(
-            dataset_id = %id,
-            dir_url = %dir_url,
-            error = %e,
-            "Failed to schedule parquet directory deletion"
-        );
-    }
-
-    // Invalidate the cached table provider
-    engine.invalidate_dataset_cache(&deleted.table_name);
+    engine.delete_dataset(&id).await.map_err(|e| {
+        let msg = e.to_string();
+        if e.is_not_found() {
+            ApiError::not_found(msg)
+        } else {
+            ApiError::internal_error(msg)
+        }
+    })?;
 
     Ok(StatusCode::NO_CONTENT)
 }

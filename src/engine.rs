@@ -1392,6 +1392,65 @@ impl RuntimeEngine {
     }
 
     /// Schedule deletion of a dataset's parquet file after the grace period.
+    /// Get a dataset by ID.
+    #[tracing::instrument(
+        name = "get_dataset",
+        skip(self),
+        fields(runtimedb.dataset_id = %id)
+    )]
+    pub async fn get_dataset(
+        &self,
+        id: &str,
+    ) -> Result<crate::catalog::DatasetInfo, crate::datasets::DatasetError> {
+        use crate::datasets::DatasetError;
+
+        self.catalog
+            .get_dataset(id)
+            .await
+            .map_err(DatasetError::Catalog)?
+            .ok_or_else(|| DatasetError::NotFound(id.to_string()))
+    }
+
+    /// Delete a dataset by ID.
+    /// Handles cache invalidation and schedules parquet file cleanup.
+    #[tracing::instrument(
+        name = "delete_dataset",
+        skip(self),
+        fields(runtimedb.dataset_id = %id)
+    )]
+    pub async fn delete_dataset(&self, id: &str) -> Result<(), crate::datasets::DatasetError> {
+        use crate::datasets::DatasetError;
+
+        let deleted = self
+            .catalog
+            .delete_dataset(id)
+            .await
+            .map_err(DatasetError::Catalog)?
+            .ok_or_else(|| DatasetError::NotFound(id.to_string()))?;
+
+        // Schedule parquet directory deletion after grace period
+        // parquet_url is the full file path (e.g., .../version/data.parquet)
+        // but delete_prefix expects the directory, so strip the filename
+        let dir_url = deleted
+            .parquet_url
+            .strip_suffix("/data.parquet")
+            .unwrap_or(&deleted.parquet_url);
+
+        if let Err(e) = self.schedule_file_deletion(dir_url).await {
+            tracing::warn!(
+                dataset_id = %id,
+                dir_url = %dir_url,
+                error = %e,
+                "Failed to schedule parquet directory deletion"
+            );
+        }
+
+        // Invalidate the cached table provider
+        self.invalidate_dataset_cache(&deleted.table_name);
+
+        Ok(())
+    }
+
     /// Update a dataset's label and/or table name.
     #[tracing::instrument(
         name = "update_dataset",
@@ -1459,11 +1518,6 @@ impl RuntimeEngine {
             .await
             .map_err(DatasetError::Catalog)?
             .ok_or_else(|| DatasetError::NotFound(id.to_string()))
-    }
-
-    /// This should be called when a dataset is deleted.
-    pub async fn schedule_dataset_file_deletion(&self, path: &str) -> Result<()> {
-        self.schedule_file_deletion(path).await
     }
 
     /// Invalidate the cached table provider for a dataset.
