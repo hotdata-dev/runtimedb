@@ -7,7 +7,7 @@ pub use error::DatasetError;
 pub use validation::*;
 
 /// The default schema name for datasets.
-pub const DEFAULT_SCHEMA: &str = "default";
+pub const DEFAULT_SCHEMA: &str = "main";
 
 /// Upload status values.
 pub mod upload_status {

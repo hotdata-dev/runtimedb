@@ -7,6 +7,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rand::RngCore;
+use runtimedb::datasets::DEFAULT_SCHEMA;
 use runtimedb::http::app_server::{
     AppServer, PATH_CONNECTIONS, PATH_INFORMATION_SCHEMA, PATH_QUERY, PATH_REFRESH, PATH_SECRET,
     PATH_SECRETS,
@@ -1829,7 +1830,7 @@ async fn test_get_dataset() -> Result<()> {
     assert_eq!(body["id"], dataset_id);
     assert_eq!(body["label"], "Get Test");
     assert_eq!(body["table_name"], "get_test");
-    assert_eq!(body["schema_name"], "default");
+    assert_eq!(body["schema_name"], DEFAULT_SCHEMA);
 
     // Should include columns
     let columns = body["columns"].as_array().unwrap();

@@ -1,4 +1,5 @@
 use runtimedb::catalog::{CatalogManager, PostgresCatalogManager, SqliteCatalogManager};
+use runtimedb::datasets::DEFAULT_SCHEMA;
 use sqlx::{PgPool, SqlitePool};
 use tempfile::TempDir;
 use testcontainers::{runners::AsyncRunner, ImageExt};
@@ -515,7 +516,7 @@ macro_rules! catalog_manager_tests {
                 let ds1 = DatasetInfo {
                     id: "ds_first".to_string(),
                     label: "First Dataset".to_string(),
-                    schema_name: "default".to_string(),
+                    schema_name: DEFAULT_SCHEMA.to_string(),
                     table_name: "my_table".to_string(),
                     parquet_url: "s3://bucket/ds1.parquet".to_string(),
                     arrow_schema_json: "{}".to_string(),
@@ -532,7 +533,7 @@ macro_rules! catalog_manager_tests {
                 let ds2 = DatasetInfo {
                     id: "ds_second".to_string(),
                     label: "Second Dataset".to_string(),
-                    schema_name: "default".to_string(),
+                    schema_name: DEFAULT_SCHEMA.to_string(),
                     table_name: "my_table".to_string(), // same table_name
                     parquet_url: "s3://bucket/ds2.parquet".to_string(),
                     arrow_schema_json: "{}".to_string(),
@@ -550,7 +551,7 @@ macro_rules! catalog_manager_tests {
                 let is_conflict = is_dataset_table_name_conflict(
                     catalog,
                     &err,
-                    "default",
+                    DEFAULT_SCHEMA,
                     "my_table",
                     None, // creating new dataset
                 )
@@ -574,7 +575,7 @@ macro_rules! catalog_manager_tests {
                 let ds1 = DatasetInfo {
                     id: "ds_first".to_string(),
                     label: "First Dataset".to_string(),
-                    schema_name: "default".to_string(),
+                    schema_name: DEFAULT_SCHEMA.to_string(),
                     table_name: "table_one".to_string(),
                     parquet_url: "s3://bucket/ds1.parquet".to_string(),
                     arrow_schema_json: "{}".to_string(),
@@ -587,7 +588,7 @@ macro_rules! catalog_manager_tests {
                 let ds2 = DatasetInfo {
                     id: "ds_second".to_string(),
                     label: "Second Dataset".to_string(),
-                    schema_name: "default".to_string(),
+                    schema_name: DEFAULT_SCHEMA.to_string(),
                     table_name: "table_two".to_string(),
                     parquet_url: "s3://bucket/ds2.parquet".to_string(),
                     arrow_schema_json: "{}".to_string(),
@@ -611,7 +612,7 @@ macro_rules! catalog_manager_tests {
                 let is_conflict = is_dataset_table_name_conflict(
                     catalog,
                     &err,
-                    "default",
+                    DEFAULT_SCHEMA,
                     "table_one",
                     Some("ds_second"), // exclude current dataset from conflict check
                 )
@@ -648,7 +649,7 @@ macro_rules! catalog_manager_tests {
                 let is_conflict = is_dataset_table_name_conflict(
                     catalog,
                     &generic_err,
-                    "default",
+                    DEFAULT_SCHEMA,
                     "some_table",
                     None,
                 )
@@ -663,7 +664,7 @@ macro_rules! catalog_manager_tests {
                 let is_conflict = is_dataset_table_name_conflict(
                     catalog,
                     &misleading_err,
-                    "default",
+                    DEFAULT_SCHEMA,
                     "some_table",
                     None,
                 )

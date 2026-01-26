@@ -2,6 +2,7 @@
 
 use chrono::Utc;
 use runtimedb::catalog::{CatalogManager, DatasetInfo, SqliteCatalogManager, UploadInfo};
+use runtimedb::datasets::DEFAULT_SCHEMA;
 use tempfile::TempDir;
 
 async fn create_test_catalog() -> (SqliteCatalogManager, TempDir) {
@@ -329,7 +330,7 @@ async fn test_create_and_get_dataset() {
     let dataset = DatasetInfo {
         id: "ds_test123".to_string(),
         label: "Test Dataset".to_string(),
-        schema_name: "default".to_string(),
+        schema_name: DEFAULT_SCHEMA.to_string(),
         table_name: "test_table".to_string(),
         parquet_url: "s3://bucket/datasets/test.parquet".to_string(),
         arrow_schema_json: r#"{"fields":[]}"#.to_string(),
@@ -346,7 +347,7 @@ async fn test_create_and_get_dataset() {
     let retrieved = retrieved.unwrap();
     assert_eq!(retrieved.id, "ds_test123");
     assert_eq!(retrieved.label, "Test Dataset");
-    assert_eq!(retrieved.schema_name, "default");
+    assert_eq!(retrieved.schema_name, DEFAULT_SCHEMA);
     assert_eq!(retrieved.table_name, "test_table");
     assert_eq!(retrieved.parquet_url, "s3://bucket/datasets/test.parquet");
     assert_eq!(retrieved.source_type, "csv_upload");
@@ -359,7 +360,7 @@ async fn test_get_dataset_by_table_name() {
     let dataset = DatasetInfo {
         id: "ds_lookup".to_string(),
         label: "Lookup Dataset".to_string(),
-        schema_name: "default".to_string(),
+        schema_name: DEFAULT_SCHEMA.to_string(),
         table_name: "my_unique_table".to_string(),
         parquet_url: "s3://bucket/datasets/lookup.parquet".to_string(),
         arrow_schema_json: r#"{"fields":[]}"#.to_string(),
@@ -372,7 +373,7 @@ async fn test_get_dataset_by_table_name() {
     catalog.create_dataset(&dataset).await.unwrap();
 
     let found = catalog
-        .get_dataset_by_table_name("default", "my_unique_table")
+        .get_dataset_by_table_name(DEFAULT_SCHEMA, "my_unique_table")
         .await
         .unwrap();
     assert!(found.is_some());
@@ -380,7 +381,7 @@ async fn test_get_dataset_by_table_name() {
 
     // Not found case
     let not_found = catalog
-        .get_dataset_by_table_name("default", "nonexistent")
+        .get_dataset_by_table_name(DEFAULT_SCHEMA, "nonexistent")
         .await
         .unwrap();
     assert!(not_found.is_none());
@@ -393,7 +394,7 @@ async fn test_dataset_table_name_uniqueness() {
     let dataset1 = DatasetInfo {
         id: "ds_first".to_string(),
         label: "First Dataset".to_string(),
-        schema_name: "default".to_string(),
+        schema_name: DEFAULT_SCHEMA.to_string(),
         table_name: "unique_name".to_string(),
         parquet_url: "s3://bucket/1.parquet".to_string(),
         arrow_schema_json: "{}".to_string(),
@@ -406,7 +407,7 @@ async fn test_dataset_table_name_uniqueness() {
     let dataset2 = DatasetInfo {
         id: "ds_second".to_string(),
         label: "Second Dataset".to_string(),
-        schema_name: "default".to_string(),
+        schema_name: DEFAULT_SCHEMA.to_string(),
         table_name: "unique_name".to_string(), // Same table name!
         parquet_url: "s3://bucket/2.parquet".to_string(),
         arrow_schema_json: "{}".to_string(),
@@ -430,7 +431,7 @@ async fn test_update_dataset() {
     let dataset = DatasetInfo {
         id: "ds_update".to_string(),
         label: "Original Label".to_string(),
-        schema_name: "default".to_string(),
+        schema_name: DEFAULT_SCHEMA.to_string(),
         table_name: "original_table".to_string(),
         parquet_url: "s3://bucket/test.parquet".to_string(),
         arrow_schema_json: "{}".to_string(),
@@ -469,7 +470,7 @@ async fn test_delete_dataset() {
     let dataset = DatasetInfo {
         id: "ds_delete".to_string(),
         label: "To Delete".to_string(),
-        schema_name: "default".to_string(),
+        schema_name: DEFAULT_SCHEMA.to_string(),
         table_name: "delete_me".to_string(),
         parquet_url: "s3://bucket/delete.parquet".to_string(),
         arrow_schema_json: "{}".to_string(),
@@ -504,7 +505,7 @@ async fn test_list_datasets() {
         let dataset = DatasetInfo {
             id: format!("ds_{}", i),
             label: format!("Dataset {}", i),
-            schema_name: "default".to_string(),
+            schema_name: DEFAULT_SCHEMA.to_string(),
             table_name: format!("table_{}", i),
             parquet_url: format!("s3://bucket/{}.parquet", i),
             arrow_schema_json: "{}".to_string(),
@@ -530,7 +531,7 @@ async fn test_list_datasets_pagination() {
         let dataset = DatasetInfo {
             id: format!("ds_{}", i + 1),
             label: format!("{} Dataset", letter),
-            schema_name: "default".to_string(),
+            schema_name: DEFAULT_SCHEMA.to_string(),
             table_name: format!("table_{}", letter.to_lowercase()),
             parquet_url: format!("s3://bucket/{}.parquet", i + 1),
             arrow_schema_json: "{}".to_string(),
@@ -577,7 +578,7 @@ async fn test_list_all_datasets() {
         let dataset = DatasetInfo {
             id: format!("ds_{}", i),
             label: format!("Dataset {}", i),
-            schema_name: "default".to_string(),
+            schema_name: DEFAULT_SCHEMA.to_string(),
             table_name: format!("table_{}", i),
             parquet_url: format!("s3://bucket/{}.parquet", i),
             arrow_schema_json: "{}".to_string(),
@@ -623,7 +624,7 @@ async fn test_list_dataset_table_names() {
     let ds1 = DatasetInfo {
         id: "ds_1".to_string(),
         label: "Dataset A".to_string(),
-        schema_name: "default".to_string(),
+        schema_name: DEFAULT_SCHEMA.to_string(),
         table_name: "table_a".to_string(),
         parquet_url: "s3://bucket/ds1.parquet".to_string(),
         arrow_schema_json: "{}".to_string(),
@@ -635,7 +636,7 @@ async fn test_list_dataset_table_names() {
     let ds2 = DatasetInfo {
         id: "ds_2".to_string(),
         label: "Dataset B".to_string(),
-        schema_name: "default".to_string(),
+        schema_name: DEFAULT_SCHEMA.to_string(),
         table_name: "table_b".to_string(),
         parquet_url: "s3://bucket/ds2.parquet".to_string(),
         arrow_schema_json: "{}".to_string(),
@@ -662,7 +663,10 @@ async fn test_list_dataset_table_names() {
     catalog.create_dataset(&ds3).await.unwrap();
 
     // List table names for "default" schema - should return only tables in that schema
-    let names = catalog.list_dataset_table_names("default").await.unwrap();
+    let names = catalog
+        .list_dataset_table_names(DEFAULT_SCHEMA)
+        .await
+        .unwrap();
     assert_eq!(names.len(), 2);
     // Results should be ordered by table_name
     assert_eq!(names[0], "table_a");

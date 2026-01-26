@@ -21,7 +21,7 @@ use std::any::Any;
 use std::sync::{Arc, RwLock};
 
 /// A catalog provider for the "datasets" catalog.
-/// Provides a single "default" schema containing all user-uploaded datasets.
+/// Provides a single "main" schema containing all user-uploaded datasets.
 #[derive(Debug)]
 pub struct DatasetsCatalogProvider {
     schema: Arc<dyn SchemaProvider>,

@@ -1,6 +1,7 @@
 //! Tests for querying datasets via DataFusion.
 
 use datafusion::arrow::array::Array;
+use runtimedb::datasets::DEFAULT_SCHEMA;
 use runtimedb::http::models::{DatasetSource, InlineData};
 use runtimedb::RuntimeEngine;
 use tempfile::TempDir;
@@ -61,7 +62,10 @@ async fn test_query_dataset_after_inline_creation() {
 
     // Query it via DataFusion
     let result = engine
-        .execute_query("SELECT * FROM datasets.default.numbers ORDER BY id")
+        .execute_query(&format!(
+            "SELECT * FROM datasets.{}.numbers ORDER BY id",
+            DEFAULT_SCHEMA
+        ))
         .await
         .unwrap();
 
@@ -90,9 +94,10 @@ async fn test_query_dataset_with_aggregation() {
 
     // Run aggregation query
     let result = engine
-        .execute_query(
-            "SELECT product, SUM(amount) as total FROM datasets.default.sales GROUP BY product ORDER BY product",
-        )
+        .execute_query(&format!(
+            "SELECT product, SUM(amount) as total FROM datasets.{}.sales GROUP BY product ORDER BY product",
+            DEFAULT_SCHEMA
+        ))
         .await
         .unwrap();
 
@@ -119,7 +124,10 @@ async fn test_query_nonexistent_dataset() {
 
     // Query a dataset that doesn't exist
     let result = engine
-        .execute_query("SELECT * FROM datasets.default.nonexistent")
+        .execute_query(&format!(
+            "SELECT * FROM datasets.{}.nonexistent",
+            DEFAULT_SCHEMA
+        ))
         .await;
 
     // Should fail with an error about the table not existing
@@ -171,13 +179,14 @@ async fn test_query_multiple_datasets() {
 
     // Join the two datasets
     let result = engine
-        .execute_query(
+        .execute_query(&format!(
             "SELECT u.name, SUM(o.amount) as total_amount
-             FROM datasets.default.users u
-             JOIN datasets.default.orders o ON u.id = o.user_id
+             FROM datasets.{schema}.users u
+             JOIN datasets.{schema}.orders o ON u.id = o.user_id
              GROUP BY u.name
              ORDER BY u.name",
-        )
+            schema = DEFAULT_SCHEMA
+        ))
         .await
         .unwrap();
 
@@ -219,7 +228,10 @@ async fn test_dataset_columns_queryable() {
 
     // Verify we can query specific columns
     let result = engine
-        .execute_query("SELECT col1, col2 FROM datasets.default.test_data ORDER BY col1")
+        .execute_query(&format!(
+            "SELECT col1, col2 FROM datasets.{}.test_data ORDER BY col1",
+            DEFAULT_SCHEMA
+        ))
         .await
         .unwrap();
 
@@ -264,7 +276,10 @@ async fn test_query_dataset_with_json_data() {
 
     // Query it
     let result = engine
-        .execute_query("SELECT * FROM datasets.default.json_data ORDER BY id")
+        .execute_query(&format!(
+            "SELECT * FROM datasets.{}.json_data ORDER BY id",
+            DEFAULT_SCHEMA
+        ))
         .await
         .unwrap();
 

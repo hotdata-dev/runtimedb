@@ -10,6 +10,7 @@
 use datafusion::arrow::array::{Array, Float64Array, Int64Array, StringArray};
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::DataType;
+use runtimedb::datasets::DEFAULT_SCHEMA;
 use runtimedb::http::models::{DatasetSource, InlineData};
 use runtimedb::RuntimeEngine;
 use tempfile::TempDir;
@@ -100,7 +101,7 @@ async fn test_full_upload_to_query_flow() {
 
     assert_eq!(dataset.label, "Product Inventory");
     assert_eq!(dataset.table_name, "product_inventory");
-    assert_eq!(dataset.schema_name, "default");
+    assert_eq!(dataset.schema_name, DEFAULT_SCHEMA);
 
     // 4. Verify upload is consumed
     let consumed_upload = engine
@@ -114,9 +115,13 @@ async fn test_full_upload_to_query_flow() {
 
     // 5. Query the dataset with calculation
     let result = engine
-        .execute_query(
-            "SELECT product, price * quantity as total FROM datasets.default.product_inventory ORDER BY total DESC",
-        )
+        .execute_query(&format!(
+
+            "SELECT product, price * quantity as total FROM datasets.{}.product_inventory ORDER BY total DESC",
+
+            DEFAULT_SCHEMA
+
+        ))
         .await
         .unwrap();
 
@@ -171,7 +176,10 @@ async fn test_json_upload_and_query() {
 
     // Query with WHERE clause
     let result = engine
-        .execute_query("SELECT name FROM datasets.default.people WHERE age > 26 ORDER BY name")
+        .execute_query(&format!(
+            "SELECT name FROM datasets.{}.people WHERE age > 26 ORDER BY name",
+            DEFAULT_SCHEMA
+        ))
         .await
         .unwrap();
 
@@ -209,7 +217,10 @@ async fn test_inline_creation_and_query() {
 
     // Run aggregation query
     let result = engine
-        .execute_query("SELECT SUM(amount) as total FROM datasets.default.sales")
+        .execute_query(&format!(
+            "SELECT SUM(amount) as total FROM datasets.{}.sales",
+            DEFAULT_SCHEMA
+        ))
         .await
         .unwrap();
 
@@ -252,7 +263,10 @@ async fn test_inline_json_creation() {
 
     // Query and verify
     let result = engine
-        .execute_query("SELECT metric, value FROM datasets.default.metrics WHERE value > 50 ORDER BY value DESC")
+        .execute_query(&format!(
+            "SELECT metric, value FROM datasets.{}.metrics WHERE value > 50 ORDER BY value DESC",
+            DEFAULT_SCHEMA
+        ))
         .await
         .unwrap();
 
@@ -286,7 +300,10 @@ async fn test_dataset_update_affects_queries() {
 
     // Query works with original table name
     let result = engine
-        .execute_query("SELECT * FROM datasets.default.original_table")
+        .execute_query(&format!(
+            "SELECT * FROM datasets.{}.original_table",
+            DEFAULT_SCHEMA
+        ))
         .await;
     assert!(result.is_ok());
 
@@ -344,7 +361,10 @@ async fn test_dataset_deletion_removes_from_catalog() {
 
     // Query works
     let result = engine
-        .execute_query("SELECT * FROM datasets.default.deletable")
+        .execute_query(&format!(
+            "SELECT * FROM datasets.{}.deletable",
+            DEFAULT_SCHEMA
+        ))
         .await;
     assert!(result.is_ok());
 
@@ -483,8 +503,8 @@ async fn test_auto_generated_table_name() {
     // Verify query works with generated name
     let result = engine
         .execute_query(&format!(
-            "SELECT * FROM datasets.default.{}",
-            dataset.table_name
+            "SELECT * FROM datasets.{}.{}",
+            DEFAULT_SCHEMA, dataset.table_name
         ))
         .await;
     assert!(result.is_ok());
@@ -563,13 +583,14 @@ async fn test_multiple_datasets_join() {
 
     // Join the datasets
     let result = engine
-        .execute_query(
+        .execute_query(&format!(
             "SELECT c.name, SUM(o.amount) as total_spent
-             FROM datasets.default.customers c
-             JOIN datasets.default.orders o ON c.customer_id = o.customer_id
+             FROM datasets.{schema}.customers c
+             JOIN datasets.{schema}.orders o ON c.customer_id = o.customer_id
              GROUP BY c.name
              ORDER BY total_spent DESC",
-        )
+            schema = DEFAULT_SCHEMA
+        ))
         .await
         .unwrap();
 
@@ -613,7 +634,10 @@ async fn test_upload_format_auto_detection_csv() {
 
     // Query should work
     let result = engine
-        .execute_query("SELECT * FROM datasets.default.auto_csv")
+        .execute_query(&format!(
+            "SELECT * FROM datasets.{}.auto_csv",
+            DEFAULT_SCHEMA
+        ))
         .await
         .unwrap();
     assert_eq!(result.results[0].num_rows(), 1);
@@ -645,7 +669,10 @@ async fn test_upload_format_auto_detection_json() {
 
     // Query should work
     let result = engine
-        .execute_query("SELECT * FROM datasets.default.auto_json")
+        .execute_query(&format!(
+            "SELECT * FROM datasets.{}.auto_json",
+            DEFAULT_SCHEMA
+        ))
         .await
         .unwrap();
     assert_eq!(result.results[0].num_rows(), 1);
@@ -729,7 +756,10 @@ async fn test_format_case_insensitive_csv() {
     assert_eq!(dataset.table_name, "upper_csv");
 
     let result = engine
-        .execute_query("SELECT * FROM datasets.default.upper_csv")
+        .execute_query(&format!(
+            "SELECT * FROM datasets.{}.upper_csv",
+            DEFAULT_SCHEMA
+        ))
         .await;
     assert!(result.is_ok());
 }
@@ -756,7 +786,10 @@ async fn test_format_case_insensitive_json() {
     assert_eq!(dataset.table_name, "mixed_json");
 
     let result = engine
-        .execute_query("SELECT * FROM datasets.default.mixed_json")
+        .execute_query(&format!(
+            "SELECT * FROM datasets.{}.mixed_json",
+            DEFAULT_SCHEMA
+        ))
         .await;
     assert!(result.is_ok());
 }
@@ -808,7 +841,10 @@ async fn test_format_case_insensitive_parquet_upload() {
     assert_eq!(dataset.table_name, "upper_parquet");
 
     let result = engine
-        .execute_query("SELECT * FROM datasets.default.upper_parquet")
+        .execute_query(&format!(
+            "SELECT * FROM datasets.{}.upper_parquet",
+            DEFAULT_SCHEMA
+        ))
         .await;
     assert!(result.is_ok());
 }
@@ -1118,7 +1154,10 @@ async fn test_corrupted_schema_falls_back_to_parquet_inference() {
 
     // Verify the dataset works before corruption
     let result = engine
-        .execute_query("SELECT name, value FROM datasets.default.test_table ORDER BY name")
+        .execute_query(&format!(
+            "SELECT name, value FROM datasets.{}.test_table ORDER BY name",
+            DEFAULT_SCHEMA
+        ))
         .await
         .expect("Query should succeed before corruption");
 
@@ -1141,7 +1180,10 @@ async fn test_corrupted_schema_falls_back_to_parquet_inference() {
 
     // Query should still work due to fallback to parquet schema inference
     let result = engine
-        .execute_query("SELECT name, value FROM datasets.default.test_table ORDER BY name")
+        .execute_query(&format!(
+            "SELECT name, value FROM datasets.{}.test_table ORDER BY name",
+            DEFAULT_SCHEMA
+        ))
         .await
         .expect("Query should succeed with fallback schema inference");
 
@@ -1254,7 +1296,10 @@ async fn test_temp_download_cleanup_on_success() {
 
     // Verify dataset was created and is queryable
     let result = engine
-        .execute_query("SELECT COUNT(*) as cnt FROM datasets.default.test_table")
+        .execute_query(&format!(
+            "SELECT COUNT(*) as cnt FROM datasets.{}.test_table",
+            DEFAULT_SCHEMA
+        ))
         .await
         .unwrap();
     assert_eq!(result.results[0].num_rows(), 1);

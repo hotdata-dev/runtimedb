@@ -1746,7 +1746,7 @@ impl RuntimeEngine {
         use crate::datafusion::DatasetsSchemaProvider;
 
         if let Some(catalog) = self.df_ctx.catalog("datasets") {
-            if let Some(schema) = catalog.schema("default") {
+            if let Some(schema) = catalog.schema(crate::datasets::DEFAULT_SCHEMA) {
                 if let Some(provider) = schema.as_any().downcast_ref::<DatasetsSchemaProvider>() {
                     provider.invalidate_cache(table_name);
                 }
