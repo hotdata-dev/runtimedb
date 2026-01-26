@@ -1019,7 +1019,7 @@ pub async fn upload_file(
 
     tracing::Span::current()
         .record("runtimedb.upload_id", &upload.id)
-        .record("runtimedb.size_bytes", upload.size_bytes as i64)
+        .record("runtimedb.size_bytes", upload.size_bytes)
         .record(
             "runtimedb.content_type",
             upload.content_type.as_deref().unwrap_or(""),
