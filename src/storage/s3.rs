@@ -145,6 +145,35 @@ impl StorageManager for S3Storage {
         }
     }
 
+    async fn get_local_path(&self, url: &str) -> Result<(std::path::PathBuf, bool)> {
+        // For S3, download the file to a temp location
+        let path = self.url_to_path(url)?;
+        let result = self.store.get(&path).await?;
+
+        // Create unique temp file path
+        let temp_id = nanoid::nanoid!(12);
+        let temp_path = std::env::temp_dir()
+            .join("runtimedb_downloads")
+            .join(&temp_id);
+
+        // Ensure parent directory exists
+        if let Some(parent) = temp_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        // Stream S3 content to local temp file
+        let mut stream = result.into_stream();
+        let file = tokio::fs::File::create(&temp_path).await?;
+        let mut writer = tokio::io::BufWriter::new(file);
+
+        while let Some(chunk) = stream.try_next().await? {
+            tokio::io::AsyncWriteExt::write_all(&mut writer, &chunk).await?;
+        }
+        tokio::io::AsyncWriteExt::flush(&mut writer).await?;
+
+        Ok((temp_path, true)) // true = caller should delete after use
+    }
+
     fn register_with_datafusion(&self, ctx: &SessionContext) -> Result<()> {
         let url = Url::parse(&format!("s3://{}", self.bucket))?;
         ctx.runtime_env()

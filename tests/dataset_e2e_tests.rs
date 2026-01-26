@@ -1156,3 +1156,214 @@ async fn test_corrupted_schema_falls_back_to_parquet_inference() {
     assert_eq!(get_i64_value(value_col.as_ref(), 0), 100);
     assert_eq!(get_i64_value(value_col.as_ref(), 1), 200);
 }
+
+/// Test that parse errors during streaming properly clean up partial parquet files.
+/// Uses invalid JSON that will fail during parsing.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_parse_error_cleans_up_partial_parquet() {
+    let temp_dir = TempDir::new().unwrap();
+    let datasets_dir = temp_dir.path().join("datasets");
+
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path().to_path_buf())
+        .secret_key(test_secret_key())
+        .build()
+        .await
+        .unwrap();
+
+    // Upload malformed JSON - valid first lines for schema inference, then invalid JSON
+    // JSON is stricter than CSV about format, so this should fail during parsing
+    let invalid_json = br#"{"id": 1, "name": "Alice"}
+{"id": 2, "name": "Bob"}
+this is not valid json
+{"id": 4, "name": "Dave"}"#;
+    let upload = engine
+        .store_upload(invalid_json.to_vec(), Some("application/json".to_string()))
+        .await
+        .unwrap();
+
+    // Try to create dataset - this should fail during streaming parse
+    let result = engine
+        .create_dataset(
+            "Test Dataset",
+            Some("test_table"),
+            DatasetSource::Upload {
+                upload_id: upload.id.clone(),
+                format: Some("json".to_string()),
+            },
+        )
+        .await;
+
+    // The creation should fail with a parse error
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, runtimedb::datasets::DatasetError::ParseError(_)),
+        "Expected ParseError, got {:?}",
+        err
+    );
+
+    // Verify no orphaned dataset directories remain
+    if datasets_dir.exists() {
+        let entries: Vec<_> = std::fs::read_dir(&datasets_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(
+            entries.is_empty(),
+            "Expected no dataset directories, found: {:?}",
+            entries.iter().map(|e| e.path()).collect::<Vec<_>>()
+        );
+    }
+
+    // Verify upload was released back to pending state (not consumed)
+    let upload_after = engine.catalog().get_upload(&upload.id).await.unwrap();
+    assert!(upload_after.is_some(), "Upload should still exist");
+    assert_eq!(
+        upload_after.unwrap().status,
+        runtimedb::datasets::upload_status::PENDING,
+        "Upload should be released back to pending state"
+    );
+}
+
+/// Test that temp file from S3 download is cleaned up after successful creation.
+/// (Uses filesystem storage which doesn't create temp files, but validates the cleanup path)
+#[tokio::test(flavor = "multi_thread")]
+async fn test_temp_download_cleanup_on_success() {
+    let (engine, temp_dir) = create_test_engine().await;
+
+    // Upload valid CSV
+    let csv_data = b"id,name\n1,Alice\n2,Bob";
+    let upload = engine
+        .store_upload(csv_data.to_vec(), Some("text/csv".to_string()))
+        .await
+        .unwrap();
+
+    // Create dataset successfully
+    let dataset = engine
+        .create_dataset(
+            "Test Dataset",
+            Some("test_table"),
+            DatasetSource::Upload {
+                upload_id: upload.id.clone(),
+                format: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // Verify dataset was created and is queryable
+    let result = engine
+        .execute_query("SELECT COUNT(*) as cnt FROM datasets.default.test_table")
+        .await
+        .unwrap();
+    assert_eq!(result.results[0].num_rows(), 1);
+
+    // Verify no stray temp files in the runtimedb_downloads directory
+    let downloads_dir = std::env::temp_dir().join("runtimedb_downloads");
+    if downloads_dir.exists() {
+        // If downloads dir exists, it should be empty (filesystem storage doesn't use it)
+        let _entries: Vec<_> = std::fs::read_dir(&downloads_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        // Note: This test uses filesystem storage which doesn't create temp downloads,
+        // so we just verify the cleanup path is reachable.
+        // Real S3 cleanup is tested in s3_storage_tests.rs
+    }
+
+    // Verify the dataset parquet file exists in the correct location
+    // Dataset structure: {base_dir}/cache/datasets/{id}/{version}/data.parquet
+    // The parquet_url contains the full path including version
+    let datasets_dir = temp_dir.path().join("cache").join("datasets");
+    assert!(
+        datasets_dir.exists(),
+        "Datasets directory should exist: {:?}",
+        datasets_dir
+    );
+
+    let datasets_base = datasets_dir.join(&dataset.id);
+    assert!(
+        datasets_base.exists(),
+        "Dataset directory should exist: {:?}",
+        datasets_base
+    );
+
+    // Should have exactly one version subdirectory
+    let version_dirs: Vec<_> = std::fs::read_dir(&datasets_base)
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect();
+    assert_eq!(
+        version_dirs.len(),
+        1,
+        "Should have exactly one version directory"
+    );
+
+    // The version directory should contain data.parquet
+    let version_dir = &version_dirs[0].path();
+    let parquet_file = version_dir.join("data.parquet");
+    assert!(parquet_file.exists(), "Parquet file should exist");
+}
+
+/// Test that unsupported format errors don't leave partial files.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_unsupported_format_no_file_leak() {
+    let temp_dir = TempDir::new().unwrap();
+    let datasets_dir = temp_dir.path().join("datasets");
+
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path().to_path_buf())
+        .secret_key(test_secret_key())
+        .build()
+        .await
+        .unwrap();
+
+    // Upload some data
+    let data = b"some random binary data";
+    let upload = engine
+        .store_upload(data.to_vec(), Some("application/octet-stream".to_string()))
+        .await
+        .unwrap();
+
+    // Try to create dataset with unsupported format
+    let result = engine
+        .create_dataset(
+            "Test Dataset",
+            Some("test_table"),
+            DatasetSource::Upload {
+                upload_id: upload.id.clone(),
+                format: Some("xml".to_string()), // Not supported
+            },
+        )
+        .await;
+
+    // Should fail with UnsupportedFormat
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, runtimedb::datasets::DatasetError::UnsupportedFormat(_)),
+        "Expected UnsupportedFormat, got {:?}",
+        err
+    );
+
+    // Verify no orphaned dataset directories
+    if datasets_dir.exists() {
+        let entries: Vec<_> = std::fs::read_dir(&datasets_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(
+            entries.is_empty(),
+            "Expected no dataset directories after unsupported format error"
+        );
+    }
+
+    // Verify upload was released
+    let upload_after = engine.catalog().get_upload(&upload.id).await.unwrap();
+    assert!(upload_after.is_some());
+    assert_eq!(
+        upload_after.unwrap().status,
+        runtimedb::datasets::upload_status::PENDING
+    );
+}

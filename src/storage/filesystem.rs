@@ -103,6 +103,14 @@ impl StorageManager for FilesystemStorage {
         Ok(Path::new(path).exists())
     }
 
+    async fn get_local_path(&self, url: &str) -> Result<(PathBuf, bool)> {
+        let path = url
+            .strip_prefix("file://")
+            .ok_or_else(|| anyhow::anyhow!("Invalid file URL: {}", url))?;
+        // For filesystem, the file is already local - no temp copy needed
+        Ok((PathBuf::from(path), false))
+    }
+
     fn register_with_datafusion(&self, _ctx: &SessionContext) -> Result<()> {
         // No-op for filesystem - DataFusion handles file:// by default
         Ok(())

@@ -1068,7 +1068,8 @@ impl RuntimeEngine {
         use crate::datasets::DatasetError;
         use crate::http::models::DatasetSource;
         use datafusion::arrow::csv::{reader::Format, ReaderBuilder};
-        use std::io::{Seek, SeekFrom};
+        use std::fs::File;
+        use std::io::{BufReader, Seek, SeekFrom};
 
         // Validate label is not empty
         if label.trim().is_empty() {
@@ -1108,9 +1109,26 @@ impl RuntimeEngine {
 
         // Track claimed upload ID for rollback on failure
         let mut claimed_upload_id: Option<String> = None;
+        // Track temp file path for cleanup (used when downloading from S3)
+        let mut temp_file_path: Option<std::path::PathBuf> = None;
 
-        // Get data and format based on source
-        let (data, format, source_type, source_config) = match &source {
+        // Helper to cleanup temp file
+        let cleanup_temp = |path: &Option<std::path::PathBuf>| {
+            if let Some(ref p) = path {
+                let _ = std::fs::remove_file(p);
+            }
+        };
+
+        // Data source for streaming: either a file path (for uploads) or in-memory data (for inline)
+        enum DataSource {
+            FilePath(std::path::PathBuf),
+            InMemory(Vec<u8>),
+        }
+
+        // Get format and data source based on input
+        // For uploads, we use streaming from local file path to avoid loading entire file into memory
+        // For inline, we keep the data in memory (typically small)
+        let (data_source, format, source_type, source_config) = match &source {
             DatasetSource::Upload { upload_id, format } => {
                 // Atomically claim the upload to prevent concurrent dataset creation
                 // This must happen before reading data to avoid race conditions
@@ -1150,16 +1168,21 @@ impl RuntimeEngine {
                     .map_err(DatasetError::Catalog)?
                     .expect("Upload should exist after successful claim");
 
-                // Read data from storage
+                // Get local path for streaming read (downloads from S3 if needed)
                 let upload_url = self.storage.upload_url(upload_id);
-                let data = match self.storage.read(&upload_url).await {
-                    Ok(d) => d,
+                let (local_path, is_temp) = match self.storage.get_local_path(&upload_url).await {
+                    Ok(result) => result,
                     Err(e) => {
                         // Release the upload back to pending state
                         let _ = self.catalog.release_upload(upload_id).await;
                         return Err(DatasetError::Storage(e));
                     }
                 };
+
+                // Track temp file for cleanup (only for S3 downloads)
+                if is_temp {
+                    temp_file_path = Some(local_path.clone());
+                }
 
                 // Determine format
                 let format = format
@@ -1185,7 +1208,12 @@ impl RuntimeEngine {
                 })
                 .to_string();
 
-                (data, format, "upload", source_config)
+                (
+                    DataSource::FilePath(local_path),
+                    format,
+                    "upload",
+                    source_config,
+                )
             }
             DatasetSource::Inline { inline } => {
                 let source_config = serde_json::json!({
@@ -1193,7 +1221,7 @@ impl RuntimeEngine {
                 })
                 .to_string();
                 (
-                    inline.content.as_bytes().to_vec(),
+                    DataSource::InMemory(inline.content.as_bytes().to_vec()),
                     inline.format.clone(),
                     "inline",
                     source_config,
@@ -1204,7 +1232,18 @@ impl RuntimeEngine {
         // Normalize format to lowercase for case-insensitive matching
         let format = format.to_lowercase();
 
-        // Helper macro to release upload on error and return ParseError
+        // Prepare the parquet writer first so we can stream directly to it
+        let dataset_id = crate::id::generate_dataset_id();
+        let handle = self.storage.prepare_dataset_write(&dataset_id);
+
+        // Helper to cleanup partial parquet files on error
+        let cleanup_parquet = |handle: &crate::storage::DatasetWriteHandle| {
+            if let Some(parent) = handle.local_path.parent() {
+                let _ = std::fs::remove_dir_all(parent);
+            }
+        };
+
+        // Helper macro to release upload, cleanup temp/parquet, and return ParseError
         macro_rules! release_on_parse_error {
             ($result:expr) => {
                 match $result {
@@ -1213,79 +1252,15 @@ impl RuntimeEngine {
                         if let Some(ref upload_id) = claimed_upload_id {
                             let _ = self.catalog.release_upload(upload_id).await;
                         }
+                        cleanup_temp(&temp_file_path);
+                        cleanup_parquet(&handle);
                         return Err(DatasetError::ParseError(e.into()));
                     }
                 }
             };
         }
 
-        // Convert data to Arrow batches
-        let batches = match format.as_str() {
-            "csv" => {
-                // Infer schema from first 10000 rows
-                let mut cursor = std::io::Cursor::new(&data);
-                let (schema, _) = release_on_parse_error!(Format::default()
-                    .with_header(true)
-                    .infer_schema(&mut cursor, Some(10_000)));
-                release_on_parse_error!(cursor.seek(SeekFrom::Start(0)));
-
-                // Build reader with inferred schema
-                let reader = release_on_parse_error!(ReaderBuilder::new(Arc::new(schema))
-                    .with_header(true)
-                    .build(cursor));
-                release_on_parse_error!(reader.into_iter().collect::<Result<Vec<_>, _>>())
-            }
-            "json" => {
-                // Use arrow-json crate directly for JSON parsing
-                use arrow_json::reader::infer_json_schema_from_seekable;
-
-                let mut cursor = std::io::Cursor::new(&data);
-                let (schema, _) = release_on_parse_error!(infer_json_schema_from_seekable(
-                    &mut cursor,
-                    Some(10_000)
-                ));
-                release_on_parse_error!(cursor.seek(SeekFrom::Start(0)));
-
-                let reader =
-                    release_on_parse_error!(arrow_json::ReaderBuilder::new(Arc::new(schema))
-                        .with_batch_size(1024)
-                        .build(cursor));
-
-                release_on_parse_error!(reader.into_iter().collect::<Result<Vec<_>, _>>())
-            }
-            "parquet" => {
-                // Use DataFusion to read parquet from bytes
-                use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-                let cursor = axum::body::Bytes::from(data);
-                let reader = release_on_parse_error!(release_on_parse_error!(
-                    ParquetRecordBatchReaderBuilder::try_new(cursor)
-                )
-                .build());
-                release_on_parse_error!(reader.into_iter().collect::<Result<Vec<_>, _>>())
-            }
-            _ => {
-                if let Some(ref upload_id) = claimed_upload_id {
-                    let _ = self.catalog.release_upload(upload_id).await;
-                }
-                return Err(DatasetError::UnsupportedFormat(format));
-            }
-        };
-
-        if batches.is_empty() {
-            if let Some(ref upload_id) = claimed_upload_id {
-                let _ = self.catalog.release_upload(upload_id).await;
-            }
-            return Err(DatasetError::EmptyData);
-        }
-
-        let schema = batches[0].schema();
-        let schema_json = release_on_parse_error!(serde_json::to_string(&schema.as_ref()));
-
-        // Write to parquet storage
-        let dataset_id = crate::id::generate_dataset_id();
-        let handle = self.storage.prepare_dataset_write(&dataset_id);
-
-        // Helper macro to release upload on storage error
+        // Helper macro to release upload, cleanup temp/parquet, and return storage error
         macro_rules! release_on_storage_error {
             ($result:expr) => {
                 match $result {
@@ -1294,20 +1269,224 @@ impl RuntimeEngine {
                         if let Some(ref upload_id) = claimed_upload_id {
                             let _ = self.catalog.release_upload(upload_id).await;
                         }
+                        cleanup_temp(&temp_file_path);
+                        cleanup_parquet(&handle);
                         return Err(DatasetError::Storage(e.into()));
                     }
                 }
             };
         }
 
-        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
-            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
-        release_on_storage_error!(writer.init(&schema));
+        // Process data in streaming fashion based on format
+        // For file paths, we read from disk; for inline, from memory
+        // We stream batches directly to the parquet writer to minimize memory usage
+        let (schema, row_count) = match format.as_str() {
+            "csv" => {
+                match data_source {
+                    DataSource::FilePath(path) => {
+                        // Infer schema from file (reads only first 10000 rows)
+                        let file = release_on_parse_error!(File::open(&path));
+                        let mut reader = BufReader::new(file);
+                        let (schema, _) = release_on_parse_error!(Format::default()
+                            .with_header(true)
+                            .infer_schema(&mut reader, Some(10_000)));
+                        let schema = Arc::new(schema);
 
-        for batch in &batches {
-            release_on_storage_error!(writer.write_batch(batch));
+                        // Reopen file for streaming read
+                        let file = release_on_parse_error!(File::open(&path));
+                        let csv_reader =
+                            release_on_parse_error!(ReaderBuilder::new(schema.clone())
+                                .with_header(true)
+                                .with_batch_size(8192)
+                                .build(BufReader::new(file)));
+
+                        // Initialize writer with schema
+                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
+                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        release_on_storage_error!(writer.init(&schema));
+
+                        // Stream batches directly to writer
+                        let mut row_count = 0usize;
+                        for batch_result in csv_reader {
+                            let batch = release_on_parse_error!(batch_result);
+                            row_count += batch.num_rows();
+                            release_on_storage_error!(writer.write_batch(&batch));
+                        }
+
+                        release_on_storage_error!(writer.close());
+                        (schema, row_count)
+                    }
+                    DataSource::InMemory(data) => {
+                        // For inline data, use cursor (typically small)
+                        let mut cursor = std::io::Cursor::new(&data);
+                        let (schema, _) = release_on_parse_error!(Format::default()
+                            .with_header(true)
+                            .infer_schema(&mut cursor, Some(10_000)));
+                        release_on_parse_error!(cursor.seek(SeekFrom::Start(0)));
+                        let schema = Arc::new(schema);
+
+                        let csv_reader =
+                            release_on_parse_error!(ReaderBuilder::new(schema.clone())
+                                .with_header(true)
+                                .with_batch_size(8192)
+                                .build(cursor));
+
+                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
+                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        release_on_storage_error!(writer.init(&schema));
+
+                        let mut row_count = 0usize;
+                        for batch_result in csv_reader {
+                            let batch = release_on_parse_error!(batch_result);
+                            row_count += batch.num_rows();
+                            release_on_storage_error!(writer.write_batch(&batch));
+                        }
+
+                        release_on_storage_error!(writer.close());
+                        (schema, row_count)
+                    }
+                }
+            }
+            "json" => {
+                use arrow_json::reader::infer_json_schema_from_seekable;
+
+                match data_source {
+                    DataSource::FilePath(path) => {
+                        // Infer schema from file
+                        let file = release_on_parse_error!(File::open(&path));
+                        let mut reader = BufReader::new(file);
+                        let (schema, _) = release_on_parse_error!(infer_json_schema_from_seekable(
+                            &mut reader,
+                            Some(10_000)
+                        ));
+                        let schema = Arc::new(schema);
+
+                        // Reopen file for streaming read
+                        let file = release_on_parse_error!(File::open(&path));
+                        let json_reader =
+                            release_on_parse_error!(arrow_json::ReaderBuilder::new(schema.clone())
+                                .with_batch_size(8192)
+                                .build(BufReader::new(file)));
+
+                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
+                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        release_on_storage_error!(writer.init(&schema));
+
+                        let mut row_count = 0usize;
+                        for batch_result in json_reader {
+                            let batch = release_on_parse_error!(batch_result);
+                            row_count += batch.num_rows();
+                            release_on_storage_error!(writer.write_batch(&batch));
+                        }
+
+                        release_on_storage_error!(writer.close());
+                        (schema, row_count)
+                    }
+                    DataSource::InMemory(data) => {
+                        let mut cursor = std::io::Cursor::new(&data);
+                        let (schema, _) = release_on_parse_error!(infer_json_schema_from_seekable(
+                            &mut cursor,
+                            Some(10_000)
+                        ));
+                        release_on_parse_error!(cursor.seek(SeekFrom::Start(0)));
+                        let schema = Arc::new(schema);
+
+                        let json_reader =
+                            release_on_parse_error!(arrow_json::ReaderBuilder::new(schema.clone())
+                                .with_batch_size(8192)
+                                .build(cursor));
+
+                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
+                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        release_on_storage_error!(writer.init(&schema));
+
+                        let mut row_count = 0usize;
+                        for batch_result in json_reader {
+                            let batch = release_on_parse_error!(batch_result);
+                            row_count += batch.num_rows();
+                            release_on_storage_error!(writer.write_batch(&batch));
+                        }
+
+                        release_on_storage_error!(writer.close());
+                        (schema, row_count)
+                    }
+                }
+            }
+            "parquet" => {
+                use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+                match data_source {
+                    DataSource::FilePath(path) => {
+                        // Read parquet from file - streaming batch by batch
+                        let file = release_on_parse_error!(File::open(&path));
+                        let builder =
+                            release_on_parse_error!(ParquetRecordBatchReaderBuilder::try_new(file));
+                        let schema = builder.schema().clone();
+                        let parquet_reader =
+                            release_on_parse_error!(builder.with_batch_size(8192).build());
+
+                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
+                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        release_on_storage_error!(writer.init(&schema));
+
+                        let mut row_count = 0usize;
+                        for batch_result in parquet_reader {
+                            let batch = release_on_parse_error!(batch_result);
+                            row_count += batch.num_rows();
+                            release_on_storage_error!(writer.write_batch(&batch));
+                        }
+
+                        release_on_storage_error!(writer.close());
+                        (schema, row_count)
+                    }
+                    DataSource::InMemory(data) => {
+                        // For inline parquet (unusual but supported)
+                        let cursor = axum::body::Bytes::from(data);
+                        let builder = release_on_parse_error!(
+                            ParquetRecordBatchReaderBuilder::try_new(cursor)
+                        );
+                        let schema = builder.schema().clone();
+                        let parquet_reader =
+                            release_on_parse_error!(builder.with_batch_size(8192).build());
+
+                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
+                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        release_on_storage_error!(writer.init(&schema));
+
+                        let mut row_count = 0usize;
+                        for batch_result in parquet_reader {
+                            let batch = release_on_parse_error!(batch_result);
+                            row_count += batch.num_rows();
+                            release_on_storage_error!(writer.write_batch(&batch));
+                        }
+
+                        release_on_storage_error!(writer.close());
+                        (schema, row_count)
+                    }
+                }
+            }
+            _ => {
+                if let Some(ref upload_id) = claimed_upload_id {
+                    let _ = self.catalog.release_upload(upload_id).await;
+                }
+                cleanup_temp(&temp_file_path);
+                cleanup_parquet(&handle);
+                return Err(DatasetError::UnsupportedFormat(format));
+            }
+        };
+
+        // Cleanup temp file now that we're done reading
+        cleanup_temp(&temp_file_path);
+
+        if row_count == 0 {
+            cleanup_parquet(&handle);
+            if let Some(ref upload_id) = claimed_upload_id {
+                let _ = self.catalog.release_upload(upload_id).await;
+            }
+            return Err(DatasetError::EmptyData);
         }
-        release_on_storage_error!(writer.close());
+
+        let schema_json = release_on_parse_error!(serde_json::to_string(schema.as_ref()));
 
         // Finalize storage (upload to S3 if needed)
         // Note: finalize_dataset_write returns the full file URL including data.parquet

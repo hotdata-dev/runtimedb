@@ -403,6 +403,14 @@ mod tests {
             Ok(false)
         }
 
+        async fn get_local_path(&self, url: &str) -> Result<(PathBuf, bool)> {
+            // Mock storage uses file:// URLs that are already local
+            let path = url
+                .strip_prefix("file://")
+                .ok_or_else(|| anyhow::anyhow!("Invalid file URL: {}", url))?;
+            Ok((PathBuf::from(path), false))
+        }
+
         fn register_with_datafusion(&self, _ctx: &SessionContext) -> Result<()> {
             Ok(())
         }

@@ -106,6 +106,10 @@ impl StorageManager for FailingStorage {
         self.inner.exists(url).await
     }
 
+    async fn get_local_path(&self, url: &str) -> Result<(std::path::PathBuf, bool)> {
+        self.inner.get_local_path(url).await
+    }
+
     fn register_with_datafusion(&self, ctx: &SessionContext) -> Result<()> {
         self.inner.register_with_datafusion(ctx)
     }

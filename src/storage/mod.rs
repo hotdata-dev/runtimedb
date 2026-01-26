@@ -60,6 +60,15 @@ pub trait StorageManager: Debug + Send + Sync {
     async fn delete_prefix(&self, prefix: &str) -> Result<()>;
     async fn exists(&self, url: &str) -> Result<bool>;
 
+    /// Get a local file path for reading a storage URL.
+    ///
+    /// For filesystem storage, returns the existing local path directly.
+    /// For S3 storage, downloads the file to a temp location first.
+    ///
+    /// Returns the local path and a boolean indicating if the file is temporary
+    /// (should be deleted by the caller after use).
+    async fn get_local_path(&self, url: &str) -> Result<(std::path::PathBuf, bool)>;
+
     // DataFusion integration
     fn register_with_datafusion(&self, ctx: &SessionContext) -> Result<()>;
 
