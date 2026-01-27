@@ -261,7 +261,7 @@ mod tests {
         BatchWriter, ColumnMetadata, DataFetchError, DataFetcher, TableMetadata,
     };
     use crate::secrets::{SecretMetadata, SecretStatus};
-    use crate::storage::{CacheWriteHandle, StorageManager};
+    use crate::storage::{CacheWriteHandle, DatasetWriteHandle, StorageManager};
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use datafusion::arrow::datatypes::DataType as ArrowDataType;
@@ -403,6 +403,14 @@ mod tests {
             Ok(false)
         }
 
+        async fn get_local_path(&self, url: &str) -> Result<(PathBuf, bool)> {
+            // Mock storage uses file:// URLs that are already local
+            let path = url
+                .strip_prefix("file://")
+                .ok_or_else(|| anyhow::anyhow!("Invalid file URL: {}", url))?;
+            Ok((PathBuf::from(path), false))
+        }
+
         fn register_with_datafusion(&self, _ctx: &SessionContext) -> Result<()> {
             Ok(())
         }
@@ -439,6 +447,51 @@ mod tests {
                 .join(&handle.table)
                 .join(&handle.version);
             Ok(format!("file://{}", version_dir.display()))
+        }
+
+        fn upload_url(&self, upload_id: &str) -> String {
+            format!(
+                "file://{}/uploads/{}/raw",
+                self.base_path.display(),
+                upload_id
+            )
+        }
+
+        fn prepare_upload_write(&self, upload_id: &str) -> PathBuf {
+            self.base_path.join("uploads").join(upload_id).join("raw")
+        }
+
+        async fn finalize_upload_write(&self, upload_id: &str) -> Result<String> {
+            Ok(self.upload_url(upload_id))
+        }
+
+        fn dataset_url(&self, dataset_id: &str, version: &str) -> String {
+            format!(
+                "file://{}/datasets/{}/{}/data.parquet",
+                self.base_path.display(),
+                dataset_id,
+                version
+            )
+        }
+
+        fn prepare_dataset_write(&self, dataset_id: &str) -> DatasetWriteHandle {
+            let version = format!("v{}", self.version_counter.fetch_add(1, Ordering::SeqCst));
+            let local_path = self
+                .base_path
+                .join("datasets")
+                .join(dataset_id)
+                .join(&version)
+                .join("data.parquet");
+
+            DatasetWriteHandle {
+                local_path,
+                version,
+                dataset_id: dataset_id.to_string(),
+            }
+        }
+
+        async fn finalize_dataset_write(&self, handle: &DatasetWriteHandle) -> Result<String> {
+            Ok(self.dataset_url(&handle.dataset_id, &handle.version))
         }
     }
 
@@ -665,6 +718,73 @@ mod tests {
 
         async fn count_connections_by_secret_id(&self, _secret_id: &str) -> Result<i64> {
             Ok(0)
+        }
+
+        async fn create_upload(&self, _upload: &crate::catalog::UploadInfo) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get_upload(&self, _id: &str) -> Result<Option<crate::catalog::UploadInfo>> {
+            Ok(None)
+        }
+
+        async fn list_uploads(
+            &self,
+            _status: Option<&str>,
+        ) -> Result<Vec<crate::catalog::UploadInfo>> {
+            Ok(vec![])
+        }
+
+        async fn consume_upload(&self, _id: &str) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn claim_upload(&self, _id: &str) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn release_upload(&self, _id: &str) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn create_dataset(&self, _dataset: &crate::catalog::DatasetInfo) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get_dataset(&self, _id: &str) -> Result<Option<crate::catalog::DatasetInfo>> {
+            Ok(None)
+        }
+
+        async fn get_dataset_by_table_name(
+            &self,
+            _schema_name: &str,
+            _table_name: &str,
+        ) -> Result<Option<crate::catalog::DatasetInfo>> {
+            Ok(None)
+        }
+
+        async fn list_datasets(
+            &self,
+            _limit: usize,
+            _offset: usize,
+        ) -> Result<(Vec<crate::catalog::DatasetInfo>, bool)> {
+            Ok((vec![], false))
+        }
+
+        async fn list_all_datasets(&self) -> Result<Vec<crate::catalog::DatasetInfo>> {
+            Ok(vec![])
+        }
+
+        async fn list_dataset_table_names(&self, _schema_name: &str) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+
+        async fn update_dataset(&self, _id: &str, _label: &str, _table_name: &str) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn delete_dataset(&self, _id: &str) -> Result<Option<crate::catalog::DatasetInfo>> {
+            Ok(None)
         }
     }
 

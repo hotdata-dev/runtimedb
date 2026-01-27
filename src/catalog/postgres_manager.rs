@@ -1,6 +1,7 @@
 use crate::catalog::backend::CatalogBackend;
 use crate::catalog::manager::{
-    CatalogManager, ConnectionInfo, OptimisticLock, PendingDeletion, QueryResult, TableInfo,
+    CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
+    TableInfo, UploadInfo,
 };
 use crate::catalog::migrations::{
     run_migrations, wrap_migration_sql, CatalogMigrations, Migration, POSTGRES_MIGRATIONS,
@@ -38,6 +39,66 @@ impl SecretMetadataRow {
             provider: self.provider,
             provider_ref: self.provider_ref,
             status: SecretStatus::from_str(&self.status).unwrap_or(SecretStatus::Active),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+}
+
+/// Row type for upload queries (Postgres handles timestamps natively)
+#[derive(sqlx::FromRow)]
+struct UploadInfoRow {
+    id: String,
+    status: String,
+    storage_url: String,
+    content_type: Option<String>,
+    content_encoding: Option<String>,
+    size_bytes: i64,
+    created_at: DateTime<Utc>,
+    consumed_at: Option<DateTime<Utc>>,
+}
+
+impl UploadInfoRow {
+    fn into_upload_info(self) -> UploadInfo {
+        UploadInfo {
+            id: self.id,
+            status: self.status,
+            storage_url: self.storage_url,
+            content_type: self.content_type,
+            content_encoding: self.content_encoding,
+            size_bytes: self.size_bytes,
+            created_at: self.created_at,
+            consumed_at: self.consumed_at,
+        }
+    }
+}
+
+/// Row type for dataset queries (Postgres handles timestamps natively)
+#[derive(sqlx::FromRow)]
+struct DatasetInfoRow {
+    id: String,
+    label: String,
+    schema_name: String,
+    table_name: String,
+    parquet_url: String,
+    arrow_schema_json: String,
+    source_type: String,
+    source_config: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl DatasetInfoRow {
+    fn into_dataset_info(self) -> DatasetInfo {
+        DatasetInfo {
+            id: self.id,
+            label: self.label,
+            schema_name: self.schema_name,
+            table_name: self.table_name,
+            parquet_url: self.parquet_url,
+            arrow_schema_json: self.arrow_schema_json,
+            source_type: self.source_type,
+            source_config: self.source_config,
             created_at: self.created_at,
             updated_at: self.updated_at,
         }
@@ -385,6 +446,224 @@ impl CatalogManager for PostgresCatalogManager {
 
     async fn count_connections_by_secret_id(&self, secret_id: &str) -> Result<i64> {
         self.backend.count_connections_by_secret_id(secret_id).await
+    }
+
+    // Upload management methods
+
+    async fn create_upload(&self, upload: &UploadInfo) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO uploads (id, status, storage_url, content_type, content_encoding, size_bytes, created_at, consumed_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(&upload.id)
+        .bind(&upload.status)
+        .bind(&upload.storage_url)
+        .bind(&upload.content_type)
+        .bind(&upload.content_encoding)
+        .bind(upload.size_bytes)
+        .bind(upload.created_at)
+        .bind(upload.consumed_at)
+        .execute(self.backend.pool())
+        .await?;
+
+        Ok(())
+    }
+
+    async fn get_upload(&self, id: &str) -> Result<Option<UploadInfo>> {
+        let row: Option<UploadInfoRow> = sqlx::query_as(
+            "SELECT id, status, storage_url, content_type, content_encoding, size_bytes, created_at, consumed_at \
+             FROM uploads WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(self.backend.pool())
+        .await?;
+
+        Ok(row.map(UploadInfoRow::into_upload_info))
+    }
+
+    async fn list_uploads(&self, status: Option<&str>) -> Result<Vec<UploadInfo>> {
+        let rows: Vec<UploadInfoRow> = if let Some(status) = status {
+            sqlx::query_as(
+                "SELECT id, status, storage_url, content_type, content_encoding, size_bytes, created_at, consumed_at \
+                 FROM uploads WHERE status = $1 ORDER BY created_at DESC",
+            )
+            .bind(status)
+            .fetch_all(self.backend.pool())
+            .await?
+        } else {
+            sqlx::query_as(
+                "SELECT id, status, storage_url, content_type, content_encoding, size_bytes, created_at, consumed_at \
+                 FROM uploads ORDER BY created_at DESC",
+            )
+            .fetch_all(self.backend.pool())
+            .await?
+        };
+
+        Ok(rows
+            .into_iter()
+            .map(UploadInfoRow::into_upload_info)
+            .collect())
+    }
+
+    async fn consume_upload(&self, id: &str) -> Result<bool> {
+        // Accept both pending and processing states (processing is the expected state after claim)
+        let result = sqlx::query(
+            "UPDATE uploads SET status = 'consumed', consumed_at = NOW() WHERE id = $1 AND status IN ('pending', 'processing')",
+        )
+        .bind(id)
+        .execute(self.backend.pool())
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn claim_upload(&self, id: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE uploads SET status = 'processing' WHERE id = $1 AND status = 'pending'",
+        )
+        .bind(id)
+        .execute(self.backend.pool())
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn release_upload(&self, id: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE uploads SET status = 'pending' WHERE id = $1 AND status = 'processing'",
+        )
+        .bind(id)
+        .execute(self.backend.pool())
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    // Dataset management methods
+
+    async fn create_dataset(&self, dataset: &DatasetInfo) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO datasets (id, label, schema_name, table_name, parquet_url, arrow_schema_json, source_type, source_config, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(&dataset.id)
+        .bind(&dataset.label)
+        .bind(&dataset.schema_name)
+        .bind(&dataset.table_name)
+        .bind(&dataset.parquet_url)
+        .bind(&dataset.arrow_schema_json)
+        .bind(&dataset.source_type)
+        .bind(&dataset.source_config)
+        .bind(dataset.created_at)
+        .bind(dataset.updated_at)
+        .execute(self.backend.pool())
+        .await?;
+
+        Ok(())
+    }
+
+    async fn get_dataset(&self, id: &str) -> Result<Option<DatasetInfo>> {
+        let row: Option<DatasetInfoRow> = sqlx::query_as(
+            "SELECT id, label, schema_name, table_name, parquet_url, arrow_schema_json, source_type, source_config, created_at, updated_at \
+             FROM datasets WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(self.backend.pool())
+        .await?;
+
+        Ok(row.map(DatasetInfoRow::into_dataset_info))
+    }
+
+    async fn get_dataset_by_table_name(
+        &self,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<Option<DatasetInfo>> {
+        let row: Option<DatasetInfoRow> = sqlx::query_as(
+            "SELECT id, label, schema_name, table_name, parquet_url, arrow_schema_json, source_type, source_config, created_at, updated_at \
+             FROM datasets WHERE schema_name = $1 AND table_name = $2",
+        )
+        .bind(schema_name)
+        .bind(table_name)
+        .fetch_optional(self.backend.pool())
+        .await?;
+
+        Ok(row.map(DatasetInfoRow::into_dataset_info))
+    }
+
+    async fn list_datasets(&self, limit: usize, offset: usize) -> Result<(Vec<DatasetInfo>, bool)> {
+        // Fetch one extra to determine if there are more results
+        // Use saturating_add to prevent overflow when limit is very large
+        let fetch_limit = limit.saturating_add(1) as i64;
+        let rows: Vec<DatasetInfoRow> = sqlx::query_as(
+            "SELECT id, label, schema_name, table_name, parquet_url, arrow_schema_json, source_type, source_config, created_at, updated_at \
+             FROM datasets ORDER BY label LIMIT $1 OFFSET $2",
+        )
+        .bind(fetch_limit)
+        .bind(offset as i64)
+        .fetch_all(self.backend.pool())
+        .await?;
+
+        let has_more = rows.len() > limit;
+        let datasets: Vec<DatasetInfo> = rows
+            .into_iter()
+            .take(limit)
+            .map(DatasetInfoRow::into_dataset_info)
+            .collect();
+
+        Ok((datasets, has_more))
+    }
+
+    async fn list_all_datasets(&self) -> Result<Vec<DatasetInfo>> {
+        let rows: Vec<DatasetInfoRow> = sqlx::query_as(
+            "SELECT id, label, schema_name, table_name, parquet_url, arrow_schema_json, source_type, source_config, created_at, updated_at \
+             FROM datasets ORDER BY label",
+        )
+        .fetch_all(self.backend.pool())
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(DatasetInfoRow::into_dataset_info)
+            .collect())
+    }
+
+    async fn list_dataset_table_names(&self, schema_name: &str) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT table_name FROM datasets WHERE schema_name = $1 ORDER BY table_name",
+        )
+        .bind(schema_name)
+        .fetch_all(self.backend.pool())
+        .await?;
+
+        Ok(rows.into_iter().map(|(name,)| name).collect())
+    }
+
+    async fn update_dataset(&self, id: &str, label: &str, table_name: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE datasets SET label = $1, table_name = $2, updated_at = NOW() WHERE id = $3",
+        )
+        .bind(label)
+        .bind(table_name)
+        .bind(id)
+        .execute(self.backend.pool())
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn delete_dataset(&self, id: &str) -> Result<Option<DatasetInfo>> {
+        // First get the dataset so we can return it
+        let dataset = self.get_dataset(id).await?;
+
+        if dataset.is_some() {
+            sqlx::query("DELETE FROM datasets WHERE id = $1")
+                .bind(id)
+                .execute(self.backend.pool())
+                .await?;
+        }
+
+        Ok(dataset)
     }
 }
 

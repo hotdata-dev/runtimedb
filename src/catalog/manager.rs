@@ -59,6 +59,34 @@ pub struct QueryResult {
     pub created_at: DateTime<Utc>,
 }
 
+/// A pending file upload.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct UploadInfo {
+    pub id: String,
+    pub status: String,
+    pub storage_url: String,
+    pub content_type: Option<String>,
+    pub content_encoding: Option<String>,
+    pub size_bytes: i64,
+    pub created_at: DateTime<Utc>,
+    pub consumed_at: Option<DateTime<Utc>>,
+}
+
+/// A user-curated dataset.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct DatasetInfo {
+    pub id: String,
+    pub label: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub parquet_url: String,
+    pub arrow_schema_json: String,
+    pub source_type: String,
+    pub source_config: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Async interface for catalog operations.
 #[async_trait]
 pub trait CatalogManager: Debug + Send + Sync {
@@ -197,4 +225,62 @@ pub trait CatalogManager: Debug + Send + Sync {
     /// Results are ordered by created_at descending (newest first).
     /// Returns (results, has_more) where has_more indicates if there are more results after this page.
     async fn list_results(&self, limit: usize, offset: usize) -> Result<(Vec<QueryResult>, bool)>;
+
+    // Upload management methods
+
+    /// Create a new upload record.
+    async fn create_upload(&self, upload: &UploadInfo) -> Result<()>;
+
+    /// Get an upload by ID.
+    async fn get_upload(&self, id: &str) -> Result<Option<UploadInfo>>;
+
+    /// List uploads, optionally filtered by status.
+    async fn list_uploads(&self, status: Option<&str>) -> Result<Vec<UploadInfo>>;
+
+    /// Mark an upload as consumed. Returns true if the upload was pending/processing and is now consumed.
+    async fn consume_upload(&self, id: &str) -> Result<bool>;
+
+    /// Atomically claim an upload for processing. Returns true if the upload was pending
+    /// and is now in "processing" state. This prevents concurrent dataset creation.
+    async fn claim_upload(&self, id: &str) -> Result<bool>;
+
+    /// Release a claimed upload back to pending state. Used when dataset creation fails
+    /// after claiming but before consuming. Returns true if the upload was processing.
+    async fn release_upload(&self, id: &str) -> Result<bool>;
+
+    // Dataset management methods
+
+    /// Create a new dataset record.
+    async fn create_dataset(&self, dataset: &DatasetInfo) -> Result<()>;
+
+    /// Get a dataset by ID.
+    async fn get_dataset(&self, id: &str) -> Result<Option<DatasetInfo>>;
+
+    /// Get a dataset by schema and table name.
+    async fn get_dataset_by_table_name(
+        &self,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<Option<DatasetInfo>>;
+
+    /// List datasets with pagination.
+    /// Datasets are ordered by label ascending.
+    /// Returns (datasets, has_more) where has_more indicates if there are more datasets after this page.
+    async fn list_datasets(&self, limit: usize, offset: usize) -> Result<(Vec<DatasetInfo>, bool)>;
+
+    /// List all datasets without pagination.
+    /// Datasets are ordered by label ascending.
+    /// Use this when you need all dataset names (e.g., for schema introspection).
+    async fn list_all_datasets(&self) -> Result<Vec<DatasetInfo>>;
+
+    /// List table names for a specific schema.
+    /// Returns only the table_name column for efficiency (avoids loading large JSON fields).
+    /// Use this for schema introspection where only names are needed.
+    async fn list_dataset_table_names(&self, schema_name: &str) -> Result<Vec<String>>;
+
+    /// Update a dataset's label and table_name. Returns true if the dataset existed.
+    async fn update_dataset(&self, id: &str, label: &str, table_name: &str) -> Result<bool>;
+
+    /// Delete a dataset by ID. Returns the deleted dataset if it existed.
+    async fn delete_dataset(&self, id: &str) -> Result<Option<DatasetInfo>>;
 }
