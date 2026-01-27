@@ -14,6 +14,7 @@ use testcontainers_modules::minio::MinIO;
 const MINIO_ROOT_USER: &str = "minioadmin";
 const MINIO_ROOT_PASSWORD: &str = "minioadmin";
 const MINIO_BUCKET: &str = "test-bucket";
+const MINIO_REGION: &str = "us-east-1";
 
 /// Create a bucket in MinIO using the mc (MinIO Client) via Docker
 async fn create_minio_bucket(endpoint: &str, bucket: &str) {
@@ -72,11 +73,12 @@ impl MinioTestInfra {
         // Create the test bucket
         create_minio_bucket(&minio_endpoint, MINIO_BUCKET).await;
 
-        let storage = S3Storage::new_with_config(
+        let storage = S3Storage::new_with_endpoint(
             MINIO_BUCKET,
             &minio_endpoint,
             MINIO_ROOT_USER,
             MINIO_ROOT_PASSWORD,
+            MINIO_REGION,
             true,
         )
         .expect("Failed to create S3Storage");
