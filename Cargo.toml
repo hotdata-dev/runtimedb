@@ -8,8 +8,8 @@ name = "server"
 path = "src/bin/server.rs"
 
 [dependencies]
-datafusion = "50.2"
-duckdb = { version = "1.4", features = ["bundled"] }
+datafusion = "51.0"
+duckdb = { version = "1.4.4", features = ["bundled"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "sqlite", "mysql", "chrono", "tls-rustls", "bigdecimal"] }
 bigdecimal = "0.4"
 tokio = { version = "1.47", features = ["full"] }
@@ -23,8 +23,8 @@ tempfile = "3"
 futures = "0.3"
 log = "0.4"
 clap = { version = "4.5", features = ["derive"] }
-arrow-json = "56.2"
-arrow-schema = { version = "56.2", features = ["serde"] }
+arrow-json = "57"
+arrow-schema = { version = "57", features = ["serde"] }
 object_store = { version = "0.12", features = ["aws"] }
 url = "2.5"
 axum = "0.8.7"
@@ -47,12 +47,14 @@ iceberg = "0.7"
 iceberg-catalog-rest = "0.7"
 iceberg-catalog-glue = "0.7"
 snowflake-api = "0.11"
-# Arrow 55 for iceberg compatibility (iceberg uses arrow 55, datafusion uses arrow 56)
+# Arrow 55 for iceberg compatibility (iceberg uses arrow 55, datafusion uses arrow 57)
 arrow-array-55 = { package = "arrow-array", version = "55" }
 arrow-ipc-55 = { package = "arrow-ipc", version = "55" }
 # Arrow 54 for snowflake-api compatibility (snowflake-api uses arrow 54)
 arrow-array-54 = { package = "arrow-array", version = "54" }
 arrow-ipc-54 = { package = "arrow-ipc", version = "54" }
+# Arrow 56 for duckdb compatibility (duckdb uses arrow 56, datafusion uses arrow 57)
+arrow-ipc-56 = { package = "arrow-ipc", version = "56" }
 
 [build-dependencies]
 sha2 = "0.10"

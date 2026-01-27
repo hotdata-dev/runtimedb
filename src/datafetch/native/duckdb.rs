@@ -1,4 +1,7 @@
 //! DuckDB/MotherDuck native driver implementation
+//!
+//! Note: Due to arrow version mismatch between duckdb (arrow 56) and datafusion (arrow 57),
+//! we use IPC serialization to bridge the versions.
 
 use duckdb::Connection;
 use std::collections::HashMap;
@@ -8,6 +11,9 @@ use crate::datafetch::batch_writer::BatchWriter;
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::secrets::SecretManager;
 use crate::source::Source;
+
+// Arrow 56 IPC for duckdb compatibility (duckdb uses arrow 56)
+use arrow_ipc_56 as arrow56_ipc;
 
 /// Discover tables and columns from DuckDB/MotherDuck
 pub async fn discover_tables(
@@ -221,23 +227,72 @@ fn fetch_table_to_channel(
         .query_arrow([])
         .map_err(|e| DataFetchError::Query(e.to_string()))?;
 
-    // Send schema first
-    let arrow_schema = arrow_result.get_schema();
+    // Send schema first (convert from arrow 56 to arrow 57)
+    let duckdb_schema = arrow_result.get_schema();
+    let datafusion_schema = convert_arrow_schema(duckdb_schema)?;
     if tx
-        .blocking_send(FetchMessage::Schema((*arrow_schema).clone()))
+        .blocking_send(FetchMessage::Schema(datafusion_schema))
         .is_err()
     {
         return Ok(()); // Receiver dropped
     }
 
-    // Stream batches
+    // Stream batches (convert from arrow 56 to arrow 57)
     for batch in arrow_result {
-        if tx.blocking_send(FetchMessage::Batch(batch)).is_err() {
+        let converted_batch = convert_arrow_batch(&batch)?;
+        if tx
+            .blocking_send(FetchMessage::Batch(converted_batch))
+            .is_err()
+        {
             break; // Receiver dropped
         }
     }
 
     Ok(())
+}
+
+/// Convert an arrow 56 Schema (from duckdb) to datafusion arrow Schema (arrow 57)
+/// using IPC serialization as a bridge between arrow versions.
+fn convert_arrow_schema(
+    duckdb_schema: std::sync::Arc<duckdb::arrow::datatypes::Schema>,
+) -> Result<datafusion::arrow::datatypes::Schema, DataFetchError> {
+    // Create an empty batch with the schema to serialize, then convert
+    let empty_batch = duckdb::arrow::record_batch::RecordBatch::new_empty(duckdb_schema);
+    let converted = convert_arrow_batch(&empty_batch)?;
+    Ok((*converted.schema()).clone())
+}
+
+/// Convert an arrow 56 RecordBatch (from duckdb) to datafusion arrow RecordBatch (arrow 57)
+/// using IPC serialization as a bridge between arrow versions.
+fn convert_arrow_batch(
+    duckdb_batch: &duckdb::arrow::record_batch::RecordBatch,
+) -> Result<datafusion::arrow::record_batch::RecordBatch, DataFetchError> {
+    use arrow56_ipc::writer::StreamWriter as Arrow56StreamWriter;
+    use datafusion::arrow::ipc::reader::StreamReader as DatafusionStreamReader;
+
+    // Serialize with arrow 56
+    let mut buffer = Vec::new();
+    {
+        let mut stream_writer =
+            Arrow56StreamWriter::try_new(&mut buffer, duckdb_batch.schema().as_ref())
+                .map_err(|e| DataFetchError::Query(format!("IPC write error: {}", e)))?;
+        stream_writer
+            .write(duckdb_batch)
+            .map_err(|e| DataFetchError::Query(format!("IPC write error: {}", e)))?;
+        stream_writer
+            .finish()
+            .map_err(|e| DataFetchError::Query(format!("IPC finish error: {}", e)))?;
+    }
+
+    // Deserialize with datafusion's arrow (57)
+    let cursor = std::io::Cursor::new(buffer);
+    let mut stream_reader = DatafusionStreamReader::try_new(cursor, None)
+        .map_err(|e| DataFetchError::Query(format!("IPC read error: {}", e)))?;
+
+    stream_reader
+        .next()
+        .ok_or_else(|| DataFetchError::Query("Empty IPC stream".to_string()))?
+        .map_err(|e| DataFetchError::Query(format!("IPC read error: {}", e)))
 }
 
 /// Convert DuckDB type name to Arrow DataType.
