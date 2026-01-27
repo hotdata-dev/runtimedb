@@ -13,7 +13,7 @@ use tokio::io::AsyncWriteExt;
 use tracing::warn;
 use url::Url;
 
-use super::{CacheWriteHandle, DatasetWriteHandle, S3Credentials, StorageManager};
+use super::{CacheWriteHandle, DatasetWriteHandle, StorageManager};
 
 /// Explicit credentials for S3 access (used for MinIO or explicit AWS credentials)
 #[derive(Debug, Clone)]
@@ -237,22 +237,6 @@ impl StorageManager for S3Storage {
         ctx.runtime_env()
             .register_object_store(&url, self.store.clone());
         Ok(())
-    }
-
-    fn get_s3_credentials(&self) -> Option<S3Credentials> {
-        // Only return credentials if explicit credentials were provided
-        self.config.credentials.as_ref().map(|creds| {
-            let endpoint_url = self
-                .config
-                .endpoint
-                .clone()
-                .unwrap_or_else(|| format!("https://s3.{}.amazonaws.com", self.config.region));
-            S3Credentials {
-                aws_access_key_id: creds.access_key.clone(),
-                aws_secret_access_key: creds.secret_key.clone(),
-                endpoint_url,
-            }
-        })
     }
 
     fn get_object_store_config(&self) -> Option<(ObjectStoreUrl, HashMap<String, String>)> {
