@@ -240,7 +240,7 @@ impl StorageManager for S3Storage {
     }
 
     fn get_object_store_config(&self) -> Option<(ObjectStoreUrl, HashMap<String, String>)> {
-        let url = ObjectStoreUrl::parse(&format!("s3://{}", self.bucket)).ok()?;
+        let url = ObjectStoreUrl::parse(format!("s3://{}", self.bucket)).ok()?;
         let mut options = HashMap::new();
 
         // Always include region
