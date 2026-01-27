@@ -2842,6 +2842,9 @@ impl RuntimeEngineBuilder {
             build_instrumented_context(object_stores, liquid_cache_config)?
         };
 
+        // Register spatial functions from geodatafusion (st_area, st_distance, etc.)
+        geodatafusion::register(&df_ctx);
+
         // Step 6: Initialize secret manager
         let (secret_key, using_default_key) = match self.secret_key {
             Some(key) => (key, false),

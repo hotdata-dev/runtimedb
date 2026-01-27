@@ -168,6 +168,7 @@ pub async fn discover_tables(
                 table_name: table,
                 table_type,
                 columns: vec![column],
+                geometry_columns: std::collections::HashMap::new(),
             });
         }
     }
@@ -186,13 +187,6 @@ pub async fn fetch_table(
 ) -> Result<(), DataFetchError> {
     let options = resolve_connect_options(source, secrets).await?;
     let mut conn = connect_with_ssl_retry(options).await?;
-
-    // Build query - use backticks for MySQL identifier escaping
-    let query = format!(
-        "SELECT * FROM `{}`.`{}`",
-        schema.replace('`', "``"),
-        table.replace('`', "``")
-    );
 
     const BATCH_SIZE: usize = 10_000;
 
@@ -223,21 +217,42 @@ pub async fn fetch_table(
         )));
     }
 
-    let fields: Vec<Field> = schema_rows
-        .iter()
-        .map(|row| {
-            let col_name: String = row.get(0);
-            let data_type: String = row.get(1);
-            let is_nullable: String = row.get(2);
-            Field::new(
-                col_name,
-                mysql_type_to_arrow(&data_type),
-                is_nullable.to_uppercase() == "YES",
-            )
-        })
-        .collect();
+    // Build column list with ST_AsBinary for spatial columns
+    let mut fields: Vec<Field> = Vec::with_capacity(schema_rows.len());
+    let mut column_exprs: Vec<String> = Vec::with_capacity(schema_rows.len());
+
+    for row in &schema_rows {
+        let col_name: String = row.get(0);
+        let data_type: String = row.get(1);
+        let is_nullable: String = row.get(2);
+
+        let arrow_type = mysql_type_to_arrow(&data_type);
+        fields.push(Field::new(
+            &col_name,
+            arrow_type.clone(),
+            is_nullable.to_uppercase() == "YES",
+        ));
+
+        // Escape column name for SQL
+        let escaped_col = format!("`{}`", col_name.replace('`', "``"));
+
+        // Use ST_AsBinary for spatial columns to get WKB format
+        if is_spatial_type(&data_type) {
+            column_exprs.push(format!("ST_AsBinary({}) AS {}", escaped_col, escaped_col));
+        } else {
+            column_exprs.push(escaped_col);
+        }
+    }
 
     let arrow_schema = Schema::new(fields);
+
+    // Build query with explicit column list
+    let query = format!(
+        "SELECT {} FROM `{}`.`{}`",
+        column_exprs.join(", "),
+        schema.replace('`', "``"),
+        table.replace('`', "``")
+    );
 
     // Stream rows instead of loading all into memory
     let mut stream = sqlx::query(&query).fetch(&mut conn);
@@ -366,8 +381,29 @@ pub fn mysql_type_to_arrow(mysql_type: &str) -> DataType {
         "year" => DataType::Int32,
         "json" => DataType::Utf8,
         "bit" => DataType::Binary,
+        // MySQL spatial types - stored as Binary (WKB format)
+        "geometry" | "point" | "linestring" | "polygon" | "multipoint" | "multilinestring"
+        | "multipolygon" | "geometrycollection" | "geomcollection" => DataType::Binary,
         _ => DataType::Utf8, // Default fallback
     }
+}
+
+/// Check if a MySQL type is a spatial type
+pub fn is_spatial_type(mysql_type: &str) -> bool {
+    let type_lower = mysql_type.to_lowercase();
+    let base_type = type_lower.split('(').next().unwrap_or(&type_lower).trim();
+    matches!(
+        base_type,
+        "geometry"
+            | "point"
+            | "linestring"
+            | "polygon"
+            | "multipoint"
+            | "multilinestring"
+            | "multipolygon"
+            | "geometrycollection"
+            | "geomcollection"
+    )
 }
 
 /// Parse a decimal string to i128 with the given precision and scale.
@@ -1105,8 +1141,30 @@ mod tests {
             DataType::Utf8
         ));
         assert!(matches!(mysql_type_to_arrow("custom_type"), DataType::Utf8));
-        assert!(matches!(mysql_type_to_arrow("geometry"), DataType::Utf8));
-        assert!(matches!(mysql_type_to_arrow("point"), DataType::Utf8));
+        // MySQL spatial types map to Binary (WKB format)
+        assert!(matches!(mysql_type_to_arrow("geometry"), DataType::Binary));
+        assert!(matches!(mysql_type_to_arrow("point"), DataType::Binary));
+        assert!(matches!(
+            mysql_type_to_arrow("linestring"),
+            DataType::Binary
+        ));
+        assert!(matches!(mysql_type_to_arrow("polygon"), DataType::Binary));
+        assert!(matches!(
+            mysql_type_to_arrow("multipoint"),
+            DataType::Binary
+        ));
+        assert!(matches!(
+            mysql_type_to_arrow("multilinestring"),
+            DataType::Binary
+        ));
+        assert!(matches!(
+            mysql_type_to_arrow("multipolygon"),
+            DataType::Binary
+        ));
+        assert!(matches!(
+            mysql_type_to_arrow("geometrycollection"),
+            DataType::Binary
+        ));
     }
 
     // =========================================================================

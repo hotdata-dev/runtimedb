@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use super::batch_writer::BatchWriter;
 use super::native::StreamingParquetWriter;
-use super::{DataFetchError, DataFetcher, TableMetadata};
+use super::types::extract_geometry_columns;
+use super::{deserialize_arrow_schema, DataFetchError, DataFetcher, TableMetadata};
 use crate::catalog::CatalogManager;
 use crate::secrets::SecretManager;
 use crate::source::Source;
@@ -61,8 +62,26 @@ impl FetchOrchestrator {
             .prepare_cache_write(connection_id, schema_name, table_name);
 
         // Create writer
-        let mut writer: Box<dyn BatchWriter> =
-            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+        let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
+
+        // Try to get geometry column info from the catalog's stored schema
+        // This enables GeoParquet metadata in the output file
+        if let Ok(Some(table_info)) = self
+            .catalog
+            .get_table(connection_id, schema_name, table_name)
+            .await
+        {
+            if let Some(schema_json) = &table_info.arrow_schema_json {
+                if let Ok(schema) = deserialize_arrow_schema(schema_json) {
+                    let geometry_columns = extract_geometry_columns(&schema);
+                    if !geometry_columns.is_empty() {
+                        writer.set_geometry_columns(geometry_columns);
+                    }
+                }
+            }
+        }
+
+        let mut boxed_writer: Box<dyn BatchWriter> = Box::new(writer);
 
         // Fetch the table data into writer
         self.fetcher
@@ -72,13 +91,13 @@ impl FetchOrchestrator {
                 None, // catalog
                 schema_name,
                 table_name,
-                writer.as_mut(),
+                boxed_writer.as_mut(),
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to fetch table: {}", e))?;
 
         // Close writer and get row count
-        let result = writer
+        let result = boxed_writer
             .close()
             .map_err(|e| anyhow::anyhow!("Failed to close writer: {}", e))?;
         let row_count = result.rows;
@@ -304,6 +323,7 @@ mod tests {
                     nullable: false,
                     ordinal_position: 0,
                 }],
+                geometry_columns: std::collections::HashMap::new(),
             }])
         }
 

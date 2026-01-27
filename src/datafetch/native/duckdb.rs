@@ -141,6 +141,7 @@ fn discover_tables_sync(
                 table_name: table,
                 table_type,
                 columns: vec![column],
+                geometry_columns: std::collections::HashMap::new(),
             });
     }
 
@@ -344,8 +345,22 @@ pub fn duckdb_type_to_arrow(duckdb_type: &str) -> datafusion::arrow::datatypes::
         "UUID" => DataType::Utf8,
         "JSON" => DataType::Utf8,
         "INTERVAL" => DataType::Interval(datafusion::arrow::datatypes::IntervalUnit::MonthDayNano),
+        // DuckDB Spatial extension types - stored as Binary (WKB format)
+        "GEOMETRY" | "POINT_2D" | "LINESTRING_2D" | "POLYGON_2D" | "BOX_2D" | "WKB_BLOB" => {
+            DataType::Binary
+        }
         _ => DataType::Utf8, // Default fallback
     }
+}
+
+/// Check if a DuckDB type is a spatial type
+pub fn is_spatial_type(duckdb_type: &str) -> bool {
+    let type_upper = duckdb_type.to_uppercase();
+    let base_type = type_upper.split('(').next().unwrap_or(&type_upper).trim();
+    matches!(
+        base_type,
+        "GEOMETRY" | "POINT_2D" | "LINESTRING_2D" | "POLYGON_2D" | "BOX_2D" | "WKB_BLOB"
+    )
 }
 
 /// Parse DECIMAL(precision, scale) parameters from type string.

@@ -16,9 +16,11 @@ use tracing::warn;
 use urlencoding::encode;
 
 use crate::datafetch::batch_writer::BatchWriter;
+use crate::datafetch::types::GeometryColumnInfo;
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::secrets::SecretManager;
 use crate::source::Source;
+use std::collections::HashMap;
 
 /// Build a PostgreSQL connection string from source configuration and resolved password.
 fn build_connection_string(
@@ -111,6 +113,10 @@ pub async fn discover_tables(
     let connection_string = resolve_connection_string(source, secrets).await?;
     let mut conn = connect_with_ssl_retry(&connection_string).await?;
 
+    // Query geometry column metadata from PostGIS if available
+    // This includes SRID and geometry type information
+    let geometry_info = discover_geometry_columns(&mut conn).await;
+
     let rows = sqlx::query(
         r#"
         SELECT
@@ -119,7 +125,7 @@ pub async fn discover_tables(
             t.table_name,
             t.table_type,
             c.column_name,
-            c.data_type,
+            c.udt_name,
             c.is_nullable,
             c.ordinal_position::int
         FROM information_schema.tables t
@@ -142,13 +148,13 @@ pub async fn discover_tables(
         let table: String = row.get(2);
         let table_type: String = row.get(3);
         let col_name: String = row.get(4);
-        let data_type: String = row.get(5);
+        let udt_name: String = row.get(5);
         let is_nullable: String = row.get(6);
         let ordinal: i32 = row.get(7);
 
         let column = ColumnMetadata {
-            name: col_name,
-            data_type: pg_type_to_arrow(&data_type),
+            name: col_name.clone(),
+            data_type: pg_type_to_arrow(&udt_name),
             nullable: is_nullable.to_uppercase() == "YES",
             ordinal_position: ordinal,
         };
@@ -160,17 +166,77 @@ pub async fn discover_tables(
         {
             existing.columns.push(column);
         } else {
+            // Build geometry columns map for this table
+            let table_key = format!("{}.{}", schema, table);
+            let geometry_columns = geometry_info.get(&table_key).cloned().unwrap_or_default();
+
             tables.push(TableMetadata {
                 catalog_name: catalog,
                 schema_name: schema,
                 table_name: table,
                 table_type,
                 columns: vec![column],
+                geometry_columns,
             });
         }
     }
 
     Ok(tables)
+}
+
+/// Discover PostGIS geometry columns with SRID and type information.
+/// Returns a map of "schema.table" -> column_name -> GeometryColumnInfo
+async fn discover_geometry_columns(
+    conn: &mut PgConnection,
+) -> HashMap<String, HashMap<String, GeometryColumnInfo>> {
+    // Query the PostGIS geometry_columns view if it exists
+    // This view contains SRID and geometry type for all geometry/geography columns
+    let result = sqlx::query(
+        r#"
+        SELECT
+            f_table_schema,
+            f_table_name,
+            f_geometry_column,
+            srid,
+            type
+        FROM geometry_columns
+        UNION ALL
+        SELECT
+            f_table_schema,
+            f_table_name,
+            f_geography_column,
+            srid,
+            type
+        FROM geography_columns
+        "#,
+    )
+    .fetch_all(conn)
+    .await;
+
+    let mut geometry_info: HashMap<String, HashMap<String, GeometryColumnInfo>> = HashMap::new();
+
+    if let Ok(rows) = result {
+        for row in rows {
+            let schema: String = row.get(0);
+            let table: String = row.get(1);
+            let column: String = row.get(2);
+            let srid: i32 = row.get(3);
+            let geom_type: String = row.get(4);
+
+            let table_key = format!("{}.{}", schema, table);
+            geometry_info.entry(table_key).or_default().insert(
+                column,
+                GeometryColumnInfo {
+                    srid,
+                    geometry_type: Some(geom_type),
+                },
+            );
+        }
+    }
+    // If PostGIS is not installed or query fails, return empty map silently
+    // Geometry columns will still be detected by type name, just without SRID info
+
+    geometry_info
 }
 
 /// Fetch table data and write to Parquet using streaming to avoid OOM on large tables
@@ -193,15 +259,17 @@ pub async fn fetch_table(
     //
     // For NUMERIC/DECIMAL, we need to construct the full type spec with precision/scale
     // because information_schema.data_type just returns "numeric" without parameters.
+    // We use udt_name to detect PostGIS geometry/geography types correctly.
     let schema_rows = sqlx::query(
         r#"
         SELECT
             column_name,
+            udt_name,
             CASE
                 WHEN data_type IN ('numeric', 'decimal') AND numeric_precision IS NOT NULL
                 THEN data_type || '(' || numeric_precision || ',' || COALESCE(numeric_scale, 0) || ')'
                 ELSE data_type
-            END as data_type,
+            END as data_type_full,
             is_nullable
         FROM information_schema.columns
         WHERE table_schema = $1 AND table_name = $2
@@ -224,15 +292,23 @@ pub async fn fetch_table(
     // Unconstrained NUMERIC/DECIMAL (without precision/scale) must be cast to TEXT
     // because they can have arbitrary precision that exceeds i128/Decimal128.
     // Constrained NUMERIC(p,s) is decoded via BigDecimal and stored as Decimal128.
+    // Geometry/geography columns use ST_AsBinary to fetch as standard WKB.
     let mut fields: Vec<Field> = Vec::with_capacity(schema_rows.len());
     let mut column_exprs: Vec<String> = Vec::with_capacity(schema_rows.len());
 
     for row in &schema_rows {
         let col_name: String = row.get(0);
-        let data_type: String = row.get(1);
-        let is_nullable: String = row.get(2);
+        let udt_name: String = row.get(1);
+        let data_type_full: String = row.get(2);
+        let is_nullable: String = row.get(3);
 
-        let arrow_type = pg_type_to_arrow(&data_type);
+        // Use udt_name to detect geometry types, but fall back to data_type_full for numeric precision
+        let type_for_arrow = if is_geometry_type(&udt_name) {
+            &udt_name
+        } else {
+            &data_type_full
+        };
+        let arrow_type = pg_type_to_arrow(type_for_arrow);
         fields.push(Field::new(
             &col_name,
             arrow_type.clone(),
@@ -242,10 +318,13 @@ pub async fn fetch_table(
         // Escape column name for SQL
         let escaped_col = format!("\"{}\"", col_name.replace('"', "\"\""));
 
-        // Only cast unconstrained NUMERIC to TEXT (those mapped to Utf8)
-        // Constrained NUMERIC(p,s) is mapped to Decimal128 and decoded via BigDecimal
-        if matches!(arrow_type, DataType::Utf8) {
-            let type_lower = data_type.to_lowercase();
+        // Handle special column types that need SQL-level conversion
+        if is_geometry_type(&udt_name) {
+            // Use ST_AsBinary to convert geometry/geography to standard WKB
+            // This strips the SRID from EWKB, giving us portable WKB bytes
+            column_exprs.push(format!("ST_AsBinary({}) AS {}", escaped_col, escaped_col));
+        } else if matches!(arrow_type, DataType::Utf8) {
+            let type_lower = data_type_full.to_lowercase();
             let base_type = type_lower.split('(').next().unwrap_or(&type_lower);
             if base_type == "numeric" || base_type == "decimal" {
                 column_exprs.push(format!("{}::text AS {}", escaped_col, escaped_col));
@@ -349,7 +428,52 @@ pub fn pg_type_to_arrow(pg_type: &str) -> DataType {
         "uuid" => DataType::Utf8,
         "json" | "jsonb" => DataType::Utf8,
         "interval" => DataType::Utf8,
+        // PostGIS geometry types - stored as Binary (WKB format)
+        "geometry" | "geography" => DataType::Binary,
         _ => DataType::Utf8, // Default fallback
+    }
+}
+
+/// Check if a PostgreSQL type is a geometry or geography type
+pub fn is_geometry_type(pg_type: &str) -> bool {
+    let type_lower = pg_type.to_lowercase();
+    let base_type = type_lower.split('(').next().unwrap_or(&type_lower).trim();
+    matches!(base_type, "geometry" | "geography")
+}
+
+/// Parse SRID from a PostGIS type string like "geometry(Point,4326)" or "geography(Polygon,4326)"
+/// Returns (geometry_type, srid) tuple if parseable
+pub fn parse_geometry_type_params(pg_type: &str) -> Option<(String, i32)> {
+    let type_lower = pg_type.to_lowercase();
+
+    // Check if it's a geometry/geography type with parameters
+    if !type_lower.starts_with("geometry(") && !type_lower.starts_with("geography(") {
+        return None;
+    }
+
+    // Extract content between parentheses
+    let start = type_lower.find('(')?;
+    let end = type_lower.find(')')?;
+    let params = &type_lower[start + 1..end];
+
+    // Split by comma: "Point,4326" or just "Point" or "4326"
+    let parts: Vec<&str> = params.split(',').map(|s| s.trim()).collect();
+
+    match parts.len() {
+        1 => {
+            // Could be just type or just SRID
+            if let Ok(srid) = parts[0].parse::<i32>() {
+                Some(("geometry".to_string(), srid))
+            } else {
+                Some((parts[0].to_string(), 0))
+            }
+        }
+        2 => {
+            let geom_type = parts[0].to_string();
+            let srid = parts[1].parse::<i32>().unwrap_or(0);
+            Some((geom_type, srid))
+        }
+        _ => None,
     }
 }
 
@@ -825,12 +949,12 @@ mod tests {
     }
 
     // =========================================================================
-    // Geometric types (fall back to Utf8)
+    // Geometric types (PostgreSQL native - fall back to Utf8)
     // =========================================================================
 
     #[test]
-    fn test_pg_geometric_types() {
-        // Geometric types are not explicitly handled, fall back to Utf8
+    fn test_pg_native_geometric_types() {
+        // PostgreSQL native geometric types (not PostGIS) fall back to Utf8
         assert!(matches!(pg_type_to_arrow("point"), DataType::Utf8));
         assert!(matches!(pg_type_to_arrow("line"), DataType::Utf8));
         assert!(matches!(pg_type_to_arrow("lseg"), DataType::Utf8));
@@ -838,6 +962,97 @@ mod tests {
         assert!(matches!(pg_type_to_arrow("path"), DataType::Utf8));
         assert!(matches!(pg_type_to_arrow("polygon"), DataType::Utf8));
         assert!(matches!(pg_type_to_arrow("circle"), DataType::Utf8));
+    }
+
+    // =========================================================================
+    // PostGIS geometry types (map to Binary for WKB storage)
+    // =========================================================================
+
+    #[test]
+    fn test_postgis_geometry_types() {
+        // PostGIS geometry type maps to Binary (WKB format)
+        assert!(matches!(pg_type_to_arrow("geometry"), DataType::Binary));
+        assert!(matches!(pg_type_to_arrow("GEOMETRY"), DataType::Binary));
+        assert!(matches!(pg_type_to_arrow("Geometry"), DataType::Binary));
+    }
+
+    #[test]
+    fn test_postgis_geography_types() {
+        // PostGIS geography type maps to Binary (WKB format)
+        assert!(matches!(pg_type_to_arrow("geography"), DataType::Binary));
+        assert!(matches!(pg_type_to_arrow("GEOGRAPHY"), DataType::Binary));
+        assert!(matches!(pg_type_to_arrow("Geography"), DataType::Binary));
+    }
+
+    #[test]
+    fn test_postgis_parameterized_geometry_types() {
+        // Parameterized geometry types still map to Binary
+        assert!(matches!(
+            pg_type_to_arrow("geometry(Point)"),
+            DataType::Binary
+        ));
+        assert!(matches!(
+            pg_type_to_arrow("geometry(Point,4326)"),
+            DataType::Binary
+        ));
+        assert!(matches!(
+            pg_type_to_arrow("geometry(Polygon,4326)"),
+            DataType::Binary
+        ));
+        assert!(matches!(
+            pg_type_to_arrow("geometry(MultiPolygon,3857)"),
+            DataType::Binary
+        ));
+        assert!(matches!(
+            pg_type_to_arrow("geography(Point,4326)"),
+            DataType::Binary
+        ));
+    }
+
+    #[test]
+    fn test_is_geometry_type() {
+        // Positive cases
+        assert!(is_geometry_type("geometry"));
+        assert!(is_geometry_type("geography"));
+        assert!(is_geometry_type("GEOMETRY"));
+        assert!(is_geometry_type("GEOGRAPHY"));
+        assert!(is_geometry_type("geometry(Point,4326)"));
+        assert!(is_geometry_type("geography(Polygon,4326)"));
+
+        // Negative cases
+        assert!(!is_geometry_type("point")); // PostgreSQL native, not PostGIS
+        assert!(!is_geometry_type("polygon")); // PostgreSQL native, not PostGIS
+        assert!(!is_geometry_type("text"));
+        assert!(!is_geometry_type("integer"));
+        assert!(!is_geometry_type("bytea"));
+    }
+
+    #[test]
+    fn test_parse_geometry_type_params() {
+        // Full parameterized type
+        let result = parse_geometry_type_params("geometry(Point,4326)");
+        assert!(result.is_some());
+        let (geom_type, srid) = result.unwrap();
+        assert_eq!(geom_type, "point");
+        assert_eq!(srid, 4326);
+
+        // Type only, no SRID
+        let result = parse_geometry_type_params("geometry(Polygon)");
+        assert!(result.is_some());
+        let (geom_type, srid) = result.unwrap();
+        assert_eq!(geom_type, "polygon");
+        assert_eq!(srid, 0);
+
+        // Geography type
+        let result = parse_geometry_type_params("geography(MultiPolygon,3857)");
+        assert!(result.is_some());
+        let (geom_type, srid) = result.unwrap();
+        assert_eq!(geom_type, "multipolygon");
+        assert_eq!(srid, 3857);
+
+        // No parameters - returns None
+        assert!(parse_geometry_type_params("geometry").is_none());
+        assert!(parse_geometry_type_params("text").is_none());
     }
 
     // =========================================================================

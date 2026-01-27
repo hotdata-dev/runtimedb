@@ -235,6 +235,7 @@ pub async fn discover_tables(
                     table_name,
                     table_type,
                     columns: vec![column],
+                    geometry_columns: std::collections::HashMap::new(),
                 });
             }
         }
@@ -264,9 +265,61 @@ pub async fn fetch_table(
         }
     };
 
-    // Build SELECT query with properly quoted identifiers
+    // Query column info to detect spatial columns
+    let schema_query = format!(
+        r#"
+        SELECT column_name, data_type
+        FROM "{database}".information_schema.columns
+        WHERE table_schema = '{schema}' AND table_name = '{table}'
+        ORDER BY ordinal_position
+        "#,
+        database = database.replace('"', "\"\""),
+        schema = schema.replace('\'', "''"),
+        table = table.replace('\'', "''")
+    );
+
+    // Build column expressions with ST_AsBinary for spatial columns
+    let column_exprs: Vec<String> = {
+        let schema_result = client
+            .exec(&schema_query)
+            .await
+            .map_err(|e| DataFetchError::Query(format!("Schema query failed: {}", e)))?;
+
+        match schema_result {
+            QueryResult::Arrow(batches) => {
+                let mut exprs = Vec::new();
+                for batch in batches {
+                    let converted = convert_arrow_batch(&batch)?;
+                    for row in 0..converted.num_rows() {
+                        if let (Some(col_name), Some(data_type)) = (
+                            get_string_value(converted.column(0).as_ref(), row),
+                            get_string_value(converted.column(1).as_ref(), row),
+                        ) {
+                            let escaped_col = format!("\"{}\"", col_name.replace('"', "\"\""));
+                            if is_spatial_type(&data_type) {
+                                exprs.push(format!(
+                                    "ST_AsBinary({}) AS {}",
+                                    escaped_col, escaped_col
+                                ));
+                            } else {
+                                exprs.push(escaped_col);
+                            }
+                        }
+                    }
+                }
+                exprs
+            }
+            _ => {
+                // Fallback to SELECT * if schema query fails
+                vec!["*".to_string()]
+            }
+        }
+    };
+
+    // Build SELECT query with column expressions
     let query = format!(
-        r#"SELECT * FROM "{}"."{}"."{}"#,
+        r#"SELECT {} FROM "{}"."{}"."{}"#,
+        column_exprs.join(", "),
         database.replace('"', "\"\""),
         schema.replace('"', "\"\""),
         table.replace('"', "\"\"")
@@ -409,11 +462,18 @@ fn snowflake_type_to_arrow(sf_type: &str) -> DataType {
         // Semi-structured types - store as JSON strings
         "VARIANT" | "OBJECT" | "ARRAY" => DataType::LargeUtf8,
 
-        // Geography/Geometry - store as string
-        "GEOGRAPHY" | "GEOMETRY" => DataType::Utf8,
+        // Geography/Geometry - stored as Binary (WKB format)
+        "GEOGRAPHY" | "GEOMETRY" => DataType::Binary,
 
         _ => DataType::Utf8, // Default fallback
     }
+}
+
+/// Check if a Snowflake type is a spatial type
+pub fn is_spatial_type(sf_type: &str) -> bool {
+    let type_upper = sf_type.to_uppercase();
+    let base_type = type_upper.split('(').next().unwrap_or(&type_upper).trim();
+    matches!(base_type, "GEOGRAPHY" | "GEOMETRY")
 }
 
 /// Extract string value from Arrow array (supports both Utf8 and LargeUtf8)

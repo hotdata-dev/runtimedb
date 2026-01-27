@@ -10,4 +10,7 @@ pub use error::DataFetchError;
 pub use fetcher::DataFetcher;
 pub use native::{NativeFetcher, StreamingParquetWriter};
 pub use orchestrator::FetchOrchestrator;
-pub use types::{deserialize_arrow_schema, ColumnMetadata, TableMetadata};
+pub use types::{
+    deserialize_arrow_schema, extract_geometry_columns, ColumnMetadata, GeometryColumnInfo,
+    TableMetadata, GEOMETRY_COLUMNS_METADATA_KEY,
+};
