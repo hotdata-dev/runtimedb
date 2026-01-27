@@ -25,3 +25,7 @@ type = "filesystem"
 
 [paths]
 #cache_dir = "~/.hotdata/runtimedb/cache"
+
+[liquid_cache]
+enabled = false
+# server_address = "http://localhost:15214"
