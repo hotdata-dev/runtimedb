@@ -8,7 +8,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use datafusion::prelude::SessionContext;
 use rand::RngCore;
 use runtimedb::http::app_server::{AppServer, PATH_QUERY, PATH_RESULT, PATH_RESULTS};
-use runtimedb::storage::{CacheWriteHandle, FilesystemStorage, StorageManager};
+use runtimedb::storage::{CacheWriteHandle, DatasetWriteHandle, FilesystemStorage, StorageManager};
 use runtimedb::RuntimeEngine;
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -106,6 +106,10 @@ impl StorageManager for FailingStorage {
         self.inner.exists(url).await
     }
 
+    async fn get_local_path(&self, url: &str) -> Result<(std::path::PathBuf, bool)> {
+        self.inner.get_local_path(url).await
+    }
+
     fn register_with_datafusion(&self, ctx: &SessionContext) -> Result<()> {
         self.inner.register_with_datafusion(ctx)
     }
@@ -132,6 +136,30 @@ impl StorageManager for FailingStorage {
             anyhow::bail!("Injected storage failure at finalize")
         }
         self.inner.finalize_cache_write(handle).await
+    }
+
+    fn upload_url(&self, upload_id: &str) -> String {
+        self.inner.upload_url(upload_id)
+    }
+
+    fn prepare_upload_write(&self, upload_id: &str) -> std::path::PathBuf {
+        self.inner.prepare_upload_write(upload_id)
+    }
+
+    async fn finalize_upload_write(&self, upload_id: &str) -> Result<String> {
+        self.inner.finalize_upload_write(upload_id).await
+    }
+
+    fn dataset_url(&self, dataset_id: &str, version: &str) -> String {
+        self.inner.dataset_url(dataset_id, version)
+    }
+
+    fn prepare_dataset_write(&self, dataset_id: &str) -> DatasetWriteHandle {
+        self.inner.prepare_dataset_write(dataset_id)
+    }
+
+    async fn finalize_dataset_write(&self, handle: &DatasetWriteHandle) -> Result<String> {
+        self.inner.finalize_dataset_write(handle).await
     }
 }
 

@@ -1,10 +1,12 @@
 use crate::catalog::{
-    CatalogManager, ConnectionInfo, QueryResult, SqliteCatalogManager, TableInfo,
+    is_dataset_table_name_conflict, CatalogManager, ConnectionInfo, QueryResult,
+    SqliteCatalogManager, TableInfo,
 };
 use crate::datafetch::native::StreamingParquetWriter;
 use crate::datafetch::{BatchWriter, FetchOrchestrator, NativeFetcher};
 use crate::datafusion::{
-    block_on, InformationSchemaProvider, RuntimeCatalogProvider, RuntimeDbCatalogProvider,
+    block_on, DatasetsCatalogProvider, InformationSchemaProvider, RuntimeCatalogProvider,
+    RuntimeDbCatalogProvider,
 };
 use crate::http::models::{
     ConnectionRefreshResult, ConnectionSchemaError, RefreshWarning, SchemaRefreshResult,
@@ -1012,6 +1014,559 @@ impl RuntimeEngine {
         Ok(result)
     }
 
+    /// Store an uploaded file and create an upload record.
+    pub async fn store_upload(
+        &self,
+        data: Vec<u8>,
+        content_type: Option<String>,
+    ) -> Result<crate::catalog::UploadInfo> {
+        let upload_id = crate::id::generate_upload_id();
+        let size_bytes = data.len() as i64;
+
+        // Write to storage
+        let local_path = self.storage.prepare_upload_write(&upload_id);
+        if let Some(parent) = local_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(&local_path, &data).await?;
+        let storage_url = self.storage.finalize_upload_write(&upload_id).await?;
+
+        // Create catalog record
+        let now = Utc::now();
+        let upload = crate::catalog::UploadInfo {
+            id: upload_id,
+            status: crate::datasets::upload_status::PENDING.to_string(),
+            storage_url,
+            content_type,
+            content_encoding: None,
+            size_bytes,
+            created_at: now,
+            consumed_at: None,
+        };
+        self.catalog.create_upload(&upload).await?;
+
+        Ok(upload)
+    }
+
+    /// Create a dataset from an upload or inline data.
+    #[tracing::instrument(
+        name = "create_dataset",
+        skip(self, source),
+        fields(
+            runtimedb.dataset_id = tracing::field::Empty,
+            runtimedb.table_name = tracing::field::Empty,
+            runtimedb.source_type = tracing::field::Empty,
+        )
+    )]
+    pub async fn create_dataset(
+        &self,
+        label: &str,
+        table_name: Option<&str>,
+        source: crate::http::models::DatasetSource,
+    ) -> Result<crate::catalog::DatasetInfo, crate::datasets::DatasetError> {
+        use crate::datafetch::native::StreamingParquetWriter;
+        use crate::datasets::DatasetError;
+        use crate::http::models::DatasetSource;
+        use datafusion::arrow::csv::{reader::Format, ReaderBuilder};
+        use std::fs::File;
+        use std::io::{BufReader, Seek, SeekFrom};
+
+        // Validate label is not empty
+        if label.trim().is_empty() {
+            return Err(DatasetError::InvalidLabel);
+        }
+
+        // Generate or validate table_name
+        let table_name = match table_name {
+            Some(name) => {
+                crate::datasets::validate_table_name(name)
+                    .map_err(DatasetError::InvalidTableName)?;
+                name.to_string()
+            }
+            None => {
+                let generated = crate::datasets::table_name_from_label(label);
+                // Validate the auto-generated name (labels like "select" can produce invalid names)
+                crate::datasets::validate_table_name(&generated).map_err(|e| {
+                    DatasetError::InvalidGeneratedTableName {
+                        label: label.to_string(),
+                        error: e,
+                    }
+                })?;
+                generated
+            }
+        };
+
+        // Check if table_name is already used
+        if self
+            .catalog
+            .get_dataset_by_table_name(crate::datasets::DEFAULT_SCHEMA, &table_name)
+            .await
+            .map_err(DatasetError::Catalog)?
+            .is_some()
+        {
+            return Err(DatasetError::TableNameInUse(table_name));
+        }
+
+        // Track claimed upload ID for rollback on failure
+        let mut claimed_upload_id: Option<String> = None;
+        // Track temp file path for cleanup (used when downloading from S3)
+        let mut temp_file_path: Option<std::path::PathBuf> = None;
+
+        // Helper to cleanup temp file
+        let cleanup_temp = |path: &Option<std::path::PathBuf>| {
+            if let Some(ref p) = path {
+                let _ = std::fs::remove_file(p);
+            }
+        };
+
+        // Data source for streaming: either a file path (for uploads) or in-memory data (for inline)
+        enum DataSource {
+            FilePath(std::path::PathBuf),
+            InMemory(Vec<u8>),
+        }
+
+        // Get format and data source based on input
+        // For uploads, we use streaming from local file path to avoid loading entire file into memory
+        // For inline, we keep the data in memory (typically small)
+        let (data_source, format, source_type, source_config) = match &source {
+            DatasetSource::Upload { upload_id, format } => {
+                // Atomically claim the upload to prevent concurrent dataset creation
+                // This must happen before reading data to avoid race conditions
+                let claimed = self
+                    .catalog
+                    .claim_upload(upload_id)
+                    .await
+                    .map_err(DatasetError::Catalog)?;
+                if !claimed {
+                    // Either upload doesn't exist, was already claimed, or consumed
+                    let upload = self
+                        .catalog
+                        .get_upload(upload_id)
+                        .await
+                        .map_err(DatasetError::Catalog)?;
+                    use crate::datasets::upload_status;
+                    return Err(match upload {
+                        None => DatasetError::UploadNotFound(upload_id.clone()),
+                        Some(u) if u.status == upload_status::CONSUMED => {
+                            DatasetError::UploadConsumed(upload_id.clone())
+                        }
+                        Some(u) if u.status == upload_status::PROCESSING => {
+                            DatasetError::UploadProcessing(upload_id.clone())
+                        }
+                        Some(_) => DatasetError::UploadNotAvailable(upload_id.clone()),
+                    });
+                }
+
+                // Track that we claimed this upload for potential rollback
+                claimed_upload_id = Some(upload_id.clone());
+
+                // Get upload info for format detection (we know it exists since claim succeeded)
+                let upload = self
+                    .catalog
+                    .get_upload(upload_id)
+                    .await
+                    .map_err(DatasetError::Catalog)?
+                    .expect("Upload should exist after successful claim");
+
+                // Get local path for streaming read (downloads from S3 if needed)
+                let upload_url = self.storage.upload_url(upload_id);
+                let (local_path, is_temp) = match self.storage.get_local_path(&upload_url).await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        // Release the upload back to pending state
+                        let _ = self.catalog.release_upload(upload_id).await;
+                        return Err(DatasetError::Storage(e));
+                    }
+                };
+
+                // Track temp file for cleanup (only for S3 downloads)
+                if is_temp {
+                    temp_file_path = Some(local_path.clone());
+                }
+
+                // Determine format
+                let format = format
+                    .clone()
+                    .or_else(|| {
+                        upload.content_type.as_ref().and_then(|ct| {
+                            if ct.contains("csv") {
+                                Some("csv".to_string())
+                            } else if ct.contains("json") {
+                                Some("json".to_string())
+                            } else if ct.contains("parquet") {
+                                Some("parquet".to_string())
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .unwrap_or_else(|| "csv".to_string());
+
+                let source_config = serde_json::json!({
+                    "upload_id": upload_id,
+                    "format": format
+                })
+                .to_string();
+
+                (
+                    DataSource::FilePath(local_path),
+                    format,
+                    "upload",
+                    source_config,
+                )
+            }
+            DatasetSource::Inline { inline } => {
+                let source_config = serde_json::json!({
+                    "format": inline.format
+                })
+                .to_string();
+                (
+                    DataSource::InMemory(inline.content.as_bytes().to_vec()),
+                    inline.format.clone(),
+                    "inline",
+                    source_config,
+                )
+            }
+        };
+
+        // Normalize format to lowercase for case-insensitive matching
+        let format = format.to_lowercase();
+
+        // Prepare the parquet writer first so we can stream directly to it
+        let dataset_id = crate::id::generate_dataset_id();
+        let handle = self.storage.prepare_dataset_write(&dataset_id);
+
+        // Helper to cleanup partial parquet files on error
+        let cleanup_parquet = |handle: &crate::storage::DatasetWriteHandle| {
+            if let Some(parent) = handle.local_path.parent() {
+                let _ = std::fs::remove_dir_all(parent);
+            }
+        };
+
+        // Helper macro to release upload, cleanup temp/parquet, and return ParseError
+        macro_rules! release_on_parse_error {
+            ($result:expr) => {
+                match $result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        if let Some(ref upload_id) = claimed_upload_id {
+                            let _ = self.catalog.release_upload(upload_id).await;
+                        }
+                        cleanup_temp(&temp_file_path);
+                        cleanup_parquet(&handle);
+                        return Err(DatasetError::ParseError(e.into()));
+                    }
+                }
+            };
+        }
+
+        // Helper macro to release upload, cleanup temp/parquet, and return storage error
+        macro_rules! release_on_storage_error {
+            ($result:expr) => {
+                match $result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        if let Some(ref upload_id) = claimed_upload_id {
+                            let _ = self.catalog.release_upload(upload_id).await;
+                        }
+                        cleanup_temp(&temp_file_path);
+                        cleanup_parquet(&handle);
+                        return Err(DatasetError::Storage(e.into()));
+                    }
+                }
+            };
+        }
+
+        // Process data in streaming fashion based on format
+        // For file paths, we read from disk; for inline, from memory
+        // We stream batches directly to the parquet writer to minimize memory usage
+        let (schema, row_count) = match format.as_str() {
+            "csv" => {
+                match data_source {
+                    DataSource::FilePath(path) => {
+                        // Infer schema from file (reads only first 10000 rows)
+                        let file = release_on_parse_error!(File::open(&path));
+                        let mut reader = BufReader::new(file);
+                        let (schema, _) = release_on_parse_error!(Format::default()
+                            .with_header(true)
+                            .infer_schema(&mut reader, Some(10_000)));
+                        let schema = Arc::new(schema);
+
+                        // Reopen file for streaming read
+                        let file = release_on_parse_error!(File::open(&path));
+                        let csv_reader =
+                            release_on_parse_error!(ReaderBuilder::new(schema.clone())
+                                .with_header(true)
+                                .with_batch_size(8192)
+                                .build(BufReader::new(file)));
+
+                        // Initialize writer with schema
+                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
+                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        release_on_storage_error!(writer.init(&schema));
+
+                        // Stream batches directly to writer
+                        let mut row_count = 0usize;
+                        for batch_result in csv_reader {
+                            let batch = release_on_parse_error!(batch_result);
+                            row_count += batch.num_rows();
+                            release_on_storage_error!(writer.write_batch(&batch));
+                        }
+
+                        release_on_storage_error!(writer.close());
+                        (schema, row_count)
+                    }
+                    DataSource::InMemory(data) => {
+                        // For inline data, use cursor (typically small)
+                        let mut cursor = std::io::Cursor::new(&data);
+                        let (schema, _) = release_on_parse_error!(Format::default()
+                            .with_header(true)
+                            .infer_schema(&mut cursor, Some(10_000)));
+                        release_on_parse_error!(cursor.seek(SeekFrom::Start(0)));
+                        let schema = Arc::new(schema);
+
+                        let csv_reader =
+                            release_on_parse_error!(ReaderBuilder::new(schema.clone())
+                                .with_header(true)
+                                .with_batch_size(8192)
+                                .build(cursor));
+
+                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
+                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        release_on_storage_error!(writer.init(&schema));
+
+                        let mut row_count = 0usize;
+                        for batch_result in csv_reader {
+                            let batch = release_on_parse_error!(batch_result);
+                            row_count += batch.num_rows();
+                            release_on_storage_error!(writer.write_batch(&batch));
+                        }
+
+                        release_on_storage_error!(writer.close());
+                        (schema, row_count)
+                    }
+                }
+            }
+            "json" => {
+                use arrow_json::reader::infer_json_schema_from_seekable;
+
+                match data_source {
+                    DataSource::FilePath(path) => {
+                        // Infer schema from file
+                        let file = release_on_parse_error!(File::open(&path));
+                        let mut reader = BufReader::new(file);
+                        let (schema, _) = release_on_parse_error!(infer_json_schema_from_seekable(
+                            &mut reader,
+                            Some(10_000)
+                        ));
+                        let schema = Arc::new(schema);
+
+                        // Reopen file for streaming read
+                        let file = release_on_parse_error!(File::open(&path));
+                        let json_reader =
+                            release_on_parse_error!(arrow_json::ReaderBuilder::new(schema.clone())
+                                .with_batch_size(8192)
+                                .build(BufReader::new(file)));
+
+                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
+                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        release_on_storage_error!(writer.init(&schema));
+
+                        let mut row_count = 0usize;
+                        for batch_result in json_reader {
+                            let batch = release_on_parse_error!(batch_result);
+                            row_count += batch.num_rows();
+                            release_on_storage_error!(writer.write_batch(&batch));
+                        }
+
+                        release_on_storage_error!(writer.close());
+                        (schema, row_count)
+                    }
+                    DataSource::InMemory(data) => {
+                        let mut cursor = std::io::Cursor::new(&data);
+                        let (schema, _) = release_on_parse_error!(infer_json_schema_from_seekable(
+                            &mut cursor,
+                            Some(10_000)
+                        ));
+                        release_on_parse_error!(cursor.seek(SeekFrom::Start(0)));
+                        let schema = Arc::new(schema);
+
+                        let json_reader =
+                            release_on_parse_error!(arrow_json::ReaderBuilder::new(schema.clone())
+                                .with_batch_size(8192)
+                                .build(cursor));
+
+                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
+                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        release_on_storage_error!(writer.init(&schema));
+
+                        let mut row_count = 0usize;
+                        for batch_result in json_reader {
+                            let batch = release_on_parse_error!(batch_result);
+                            row_count += batch.num_rows();
+                            release_on_storage_error!(writer.write_batch(&batch));
+                        }
+
+                        release_on_storage_error!(writer.close());
+                        (schema, row_count)
+                    }
+                }
+            }
+            "parquet" => {
+                use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+                match data_source {
+                    DataSource::FilePath(path) => {
+                        // Read parquet from file - streaming batch by batch
+                        let file = release_on_parse_error!(File::open(&path));
+                        let builder =
+                            release_on_parse_error!(ParquetRecordBatchReaderBuilder::try_new(file));
+                        let schema = builder.schema().clone();
+                        let parquet_reader =
+                            release_on_parse_error!(builder.with_batch_size(8192).build());
+
+                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
+                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        release_on_storage_error!(writer.init(&schema));
+
+                        let mut row_count = 0usize;
+                        for batch_result in parquet_reader {
+                            let batch = release_on_parse_error!(batch_result);
+                            row_count += batch.num_rows();
+                            release_on_storage_error!(writer.write_batch(&batch));
+                        }
+
+                        release_on_storage_error!(writer.close());
+                        (schema, row_count)
+                    }
+                    DataSource::InMemory(data) => {
+                        // For inline parquet (unusual but supported)
+                        let cursor = axum::body::Bytes::from(data);
+                        let builder = release_on_parse_error!(
+                            ParquetRecordBatchReaderBuilder::try_new(cursor)
+                        );
+                        let schema = builder.schema().clone();
+                        let parquet_reader =
+                            release_on_parse_error!(builder.with_batch_size(8192).build());
+
+                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
+                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        release_on_storage_error!(writer.init(&schema));
+
+                        let mut row_count = 0usize;
+                        for batch_result in parquet_reader {
+                            let batch = release_on_parse_error!(batch_result);
+                            row_count += batch.num_rows();
+                            release_on_storage_error!(writer.write_batch(&batch));
+                        }
+
+                        release_on_storage_error!(writer.close());
+                        (schema, row_count)
+                    }
+                }
+            }
+            _ => {
+                if let Some(ref upload_id) = claimed_upload_id {
+                    let _ = self.catalog.release_upload(upload_id).await;
+                }
+                cleanup_temp(&temp_file_path);
+                cleanup_parquet(&handle);
+                return Err(DatasetError::UnsupportedFormat(format));
+            }
+        };
+
+        // Cleanup temp file now that we're done reading
+        cleanup_temp(&temp_file_path);
+
+        if row_count == 0 {
+            cleanup_parquet(&handle);
+            if let Some(ref upload_id) = claimed_upload_id {
+                let _ = self.catalog.release_upload(upload_id).await;
+            }
+            return Err(DatasetError::EmptyData);
+        }
+
+        let schema_json = release_on_parse_error!(serde_json::to_string(schema.as_ref()));
+
+        // Finalize storage (upload to S3 if needed)
+        // Note: finalize_dataset_write returns the full file URL including data.parquet
+        let parquet_url =
+            release_on_storage_error!(self.storage.finalize_dataset_write(&handle).await);
+
+        // From this point on, if we fail we need to clean up the parquet file too
+        // Extract the directory URL from the file URL (remove /data.parquet)
+        let parquet_dir_url = parquet_url
+            .strip_suffix("/data.parquet")
+            .unwrap_or(&parquet_url)
+            .to_string();
+
+        // Create catalog record
+        let now = Utc::now();
+        let table_name_for_error = table_name.clone();
+        let dataset = crate::catalog::DatasetInfo {
+            id: dataset_id,
+            label: label.to_string(),
+            schema_name: crate::datasets::DEFAULT_SCHEMA.to_string(),
+            table_name,
+            parquet_url,
+            arrow_schema_json: schema_json,
+            source_type: source_type.to_string(),
+            source_config,
+            created_at: now,
+            updated_at: now,
+        };
+
+        if let Err(e) = self.catalog.create_dataset(&dataset).await {
+            // Clean up the parquet file we wrote
+            if let Err(cleanup_err) = self.storage.delete_prefix(&parquet_dir_url).await {
+                tracing::warn!(
+                    dataset_id = %dataset.id,
+                    path = %parquet_dir_url,
+                    error = %cleanup_err,
+                    "Failed to clean up orphaned parquet directory after catalog insert failure"
+                );
+            }
+            // Release the upload back to pending state
+            if let Some(ref upload_id) = claimed_upload_id {
+                let _ = self.catalog.release_upload(upload_id).await;
+            }
+            // Check if this is a unique constraint violation on table_name (race condition)
+            if is_dataset_table_name_conflict(
+                self.catalog.as_ref(),
+                &e,
+                crate::datasets::DEFAULT_SCHEMA,
+                &table_name_for_error,
+                None, // creating new dataset
+            )
+            .await
+            {
+                return Err(DatasetError::TableNameInUse(table_name_for_error));
+            }
+            return Err(DatasetError::Catalog(e));
+        }
+
+        // Only consume the upload after everything succeeded
+        if let Some(ref upload_id) = claimed_upload_id {
+            if let Err(e) = self.catalog.consume_upload(upload_id).await {
+                // Dataset was created successfully, but we couldn't mark upload as consumed.
+                // This is not fatal - the upload will remain in "processing" state but the
+                // dataset is valid. Log a warning but don't fail.
+                tracing::warn!(
+                    upload_id = %upload_id,
+                    error = %e,
+                    "Failed to mark upload as consumed after successful dataset creation"
+                );
+            }
+        }
+
+        tracing::Span::current()
+            .record("runtimedb.dataset_id", &dataset.id)
+            .record("runtimedb.table_name", &dataset.table_name)
+            .record("runtimedb.source_type", &dataset.source_type);
+
+        Ok(dataset)
+    }
+
     /// Process any pending directory deletions that are due.
     #[tracing::instrument(
         name = "process_pending_deletions",
@@ -1036,6 +1591,167 @@ impl RuntimeEngine {
 
         tracing::Span::current().record("runtimedb.deletions_processed", deleted);
         Ok(deleted)
+    }
+
+    /// Schedule deletion of a dataset's parquet file after the grace period.
+    /// Get a dataset by ID.
+    #[tracing::instrument(
+        name = "get_dataset",
+        skip(self),
+        fields(runtimedb.dataset_id = %id)
+    )]
+    pub async fn get_dataset(
+        &self,
+        id: &str,
+    ) -> Result<crate::catalog::DatasetInfo, crate::datasets::DatasetError> {
+        use crate::datasets::DatasetError;
+
+        self.catalog
+            .get_dataset(id)
+            .await
+            .map_err(DatasetError::Catalog)?
+            .ok_or_else(|| DatasetError::NotFound(id.to_string()))
+    }
+
+    /// Delete a dataset by ID.
+    /// Handles cache invalidation and schedules parquet file cleanup.
+    #[tracing::instrument(
+        name = "delete_dataset",
+        skip(self),
+        fields(runtimedb.dataset_id = %id)
+    )]
+    pub async fn delete_dataset(&self, id: &str) -> Result<(), crate::datasets::DatasetError> {
+        use crate::datasets::DatasetError;
+
+        let deleted = self
+            .catalog
+            .delete_dataset(id)
+            .await
+            .map_err(DatasetError::Catalog)?
+            .ok_or_else(|| DatasetError::NotFound(id.to_string()))?;
+
+        // Schedule parquet directory deletion after grace period
+        // parquet_url is the full file path (e.g., .../version/data.parquet)
+        // but delete_prefix expects the directory, so strip the filename
+        let dir_url = deleted
+            .parquet_url
+            .strip_suffix("/data.parquet")
+            .unwrap_or(&deleted.parquet_url);
+
+        if let Err(e) = self.schedule_file_deletion(dir_url).await {
+            tracing::warn!(
+                dataset_id = %id,
+                dir_url = %dir_url,
+                error = %e,
+                "Failed to schedule parquet directory deletion"
+            );
+        }
+
+        // Invalidate the cached table provider
+        self.invalidate_dataset_cache(&deleted.table_name);
+
+        Ok(())
+    }
+
+    /// Update a dataset's label and/or table name.
+    #[tracing::instrument(
+        name = "update_dataset",
+        skip(self),
+        fields(runtimedb.dataset_id = %id)
+    )]
+    pub async fn update_dataset(
+        &self,
+        id: &str,
+        new_label: Option<&str>,
+        new_table_name: Option<&str>,
+    ) -> Result<crate::catalog::DatasetInfo, crate::datasets::DatasetError> {
+        use crate::datasets::DatasetError;
+
+        // Get existing dataset
+        let existing = self
+            .catalog
+            .get_dataset(id)
+            .await
+            .map_err(DatasetError::Catalog)?
+            .ok_or_else(|| DatasetError::NotFound(id.to_string()))?;
+
+        // Use existing values if not provided
+        let old_table_name = existing.table_name.clone();
+        let label = new_label.unwrap_or(&existing.label);
+        let table_name = new_table_name.unwrap_or(&existing.table_name);
+
+        // Validate label is not empty
+        if label.trim().is_empty() {
+            return Err(DatasetError::InvalidLabel);
+        }
+
+        // Validate table_name
+        crate::datasets::validate_table_name(table_name).map_err(DatasetError::InvalidTableName)?;
+
+        // Check table_name uniqueness if it's changing
+        if table_name != old_table_name {
+            if let Some(existing_dataset) = self
+                .catalog
+                .get_dataset_by_table_name(crate::datasets::DEFAULT_SCHEMA, table_name)
+                .await
+                .map_err(DatasetError::Catalog)?
+            {
+                // Another dataset already uses this table_name
+                if existing_dataset.id != id {
+                    return Err(DatasetError::TableNameInUse(table_name.to_string()));
+                }
+            }
+        }
+
+        // Update in catalog
+        let updated = match self.catalog.update_dataset(id, label, table_name).await {
+            Ok(updated) => updated,
+            Err(e) => {
+                // Check if this is a unique constraint violation on table_name (race condition)
+                if is_dataset_table_name_conflict(
+                    self.catalog.as_ref(),
+                    &e,
+                    crate::datasets::DEFAULT_SCHEMA,
+                    table_name,
+                    Some(id), // exclude current dataset from conflict check
+                )
+                .await
+                {
+                    return Err(DatasetError::TableNameInUse(table_name.to_string()));
+                }
+                return Err(DatasetError::Catalog(e));
+            }
+        };
+
+        if !updated {
+            return Err(DatasetError::NotFound(id.to_string()));
+        }
+
+        // Invalidate cache for the old table name if it changed
+        if table_name != old_table_name {
+            self.invalidate_dataset_cache(&old_table_name);
+        }
+
+        // Fetch and return updated dataset
+        self.catalog
+            .get_dataset(id)
+            .await
+            .map_err(DatasetError::Catalog)?
+            .ok_or_else(|| DatasetError::NotFound(id.to_string()))
+    }
+
+    /// Invalidate the cached table provider for a dataset.
+    /// This should be called when a dataset is deleted or its table_name is changed.
+    pub fn invalidate_dataset_cache(&self, table_name: &str) {
+        use crate::datafusion::DatasetsSchemaProvider;
+
+        if let Some(catalog) = self.df_ctx.catalog("datasets") {
+            if let Some(schema) = catalog.schema(crate::datasets::DEFAULT_SCHEMA) {
+                if let Some(provider) = schema.as_any().downcast_ref::<DatasetsSchemaProvider>() {
+                    provider.invalidate_cache(table_name);
+                }
+            }
+        }
     }
 
     /// Start background task that processes pending deletions periodically.
@@ -1383,6 +2099,13 @@ impl RuntimeEngineBuilder {
         engine
             .df_ctx
             .register_catalog("runtimedb", runtimedb_catalog);
+
+        // Register the datasets catalog for user-uploaded datasets
+        let datasets_catalog = Arc::new(DatasetsCatalogProvider::with_runtime_env(
+            engine.catalog.clone(),
+            &engine.df_ctx,
+        ));
+        engine.df_ctx.register_catalog("datasets", datasets_catalog);
 
         // Process any pending deletions from previous runs
         if let Err(e) = engine.process_pending_deletions().await {

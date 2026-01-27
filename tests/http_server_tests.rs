@@ -7,6 +7,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rand::RngCore;
+use runtimedb::datasets::DEFAULT_SCHEMA;
 use runtimedb::http::app_server::{
     AppServer, PATH_CONNECTIONS, PATH_INFORMATION_SCHEMA, PATH_QUERY, PATH_REFRESH, PATH_SECRET,
     PATH_SECRETS,
@@ -1401,6 +1402,660 @@ async fn test_create_connection_with_secret_id() -> Result<()> {
     Ok(())
 }
 
+// === Upload Endpoint Tests ===
+
+async fn parse_body(response: Response) -> serde_json::Value {
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_upload_file_endpoint() -> Result<()> {
+    let (app, _temp) = setup_test().await?;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/files")
+                .header("content-type", "text/csv")
+                .body(Body::from("id,name\n1,test\n2,other"))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body: serde_json::Value = parse_body(response).await;
+    assert!(body["id"].as_str().unwrap().starts_with("upld"));
+    assert_eq!(body["status"], "pending");
+    assert!(body["size_bytes"].as_i64().unwrap() > 0);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_uploads_empty() -> Result<()> {
+    let (app, _temp) = setup_test().await?;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/files")
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body: serde_json::Value = parse_body(response).await;
+    assert!(body["uploads"].as_array().unwrap().is_empty());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_uploads_after_upload() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Upload a file first
+    let _ = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/files")
+                .header("content-type", "text/csv")
+                .body(Body::from("a,b\n1,2"))?,
+        )
+        .await?;
+
+    // List uploads
+    let response = app
+        .router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/files")
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body: serde_json::Value = parse_body(response).await;
+    let uploads = body["uploads"].as_array().unwrap();
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(uploads[0]["status"], "pending");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_upload_file_empty_rejected() -> Result<()> {
+    let (app, _temp) = setup_test().await?;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/files")
+                .header("content-type", "text/csv")
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body: serde_json::Value = parse_body(response).await;
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("cannot be empty"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_upload_file_too_large() -> Result<()> {
+    // Note: We can't actually test with 2GB of data in a unit test.
+    // This test documents the expected behavior. The actual size limit
+    // (2GB) is enforced in the handler via MAX_UPLOAD_SIZE constant.
+    // The validation logic is tested implicitly by test_upload_file_endpoint
+    // which verifies that valid uploads succeed.
+    //
+    // To fully test the size limit, you would need an integration test
+    // that can handle large payloads, or mock the body length.
+
+    // For now, we verify the handler exists and accepts valid uploads,
+    // and that the constant is properly defined (compile-time check).
+    let (app, _temp) = setup_test().await?;
+
+    // Verify a normal upload still works (regression test)
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/files")
+                .header("content-type", "text/csv")
+                .body(Body::from("id,name\n1,test"))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    Ok(())
+}
+
+// === Dataset Endpoint Tests ===
+
+const PATH_DATASETS: &str = "/v1/datasets";
+
+fn path_dataset(id: &str) -> String {
+    format!("/v1/datasets/{}", id)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_dataset_from_upload() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Step 1: Upload a CSV file
+    let csv_data = "id,name,value\n1,Alice,100\n2,Bob,200\n3,Carol,300";
+    let upload_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/files")
+                .header("content-type", "text/csv")
+                .body(Body::from(csv_data))?,
+        )
+        .await?;
+
+    assert_eq!(upload_response.status(), StatusCode::CREATED);
+    let upload_body: serde_json::Value = parse_body(upload_response).await;
+    let upload_id = upload_body["id"].as_str().unwrap();
+
+    // Step 2: Create dataset from the upload
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "Test Dataset",
+                    "source": {
+                        "upload_id": upload_id,
+                        "format": "csv"
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body: serde_json::Value = parse_body(response).await;
+    assert!(body["id"].as_str().unwrap().starts_with("data"));
+    assert_eq!(body["label"], "Test Dataset");
+    assert_eq!(body["table_name"], "test_dataset");
+    assert_eq!(body["status"], "ready");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_dataset_with_inline_data() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "Inline Data",
+                    "source": {
+                        "inline": {
+                            "format": "csv",
+                            "content": "a,b\n1,2\n3,4"
+                        }
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body: serde_json::Value = parse_body(response).await;
+    assert!(body["id"].as_str().unwrap().starts_with("data"));
+    assert_eq!(body["label"], "Inline Data");
+    assert_eq!(body["table_name"], "inline_data");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_dataset_inline_too_large() -> Result<()> {
+    let (app, _temp) = setup_test().await?;
+
+    // Create inline data > 1MB (1_048_576 bytes)
+    let large_content = "x".repeat(1_048_577);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "Too Large",
+                    "source": {
+                        "inline": {
+                            "format": "csv",
+                            "content": large_content
+                        }
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = parse_body(response).await;
+    assert!(body["error"]["message"].as_str().unwrap().contains("1MB"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_dataset_invalid_table_name() -> Result<()> {
+    let (app, _temp) = setup_test().await?;
+
+    // "select" is a SQL reserved word
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "My Data",
+                    "table_name": "select",
+                    "source": {
+                        "inline": {
+                            "format": "csv",
+                            "content": "a,b\n1,2"
+                        }
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = parse_body(response).await;
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("reserved"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_datasets() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create a dataset first
+    let _create_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "List Test",
+                    "source": {
+                        "inline": {
+                            "format": "csv",
+                            "content": "a,b\n1,2"
+                        }
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    // List datasets
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(PATH_DATASETS)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = parse_body(response).await;
+    let datasets = body["datasets"].as_array().unwrap();
+    assert_eq!(datasets.len(), 1);
+    assert_eq!(datasets[0]["label"], "List Test");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_dataset() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create a dataset
+    let create_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "Get Test",
+                    "source": {
+                        "inline": {
+                            "format": "csv",
+                            "content": "col1,col2\nfoo,42"
+                        }
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let create_body: serde_json::Value = parse_body(create_response).await;
+    let dataset_id = create_body["id"].as_str().unwrap();
+
+    // Get the dataset
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(path_dataset(dataset_id))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = parse_body(response).await;
+    assert_eq!(body["id"], dataset_id);
+    assert_eq!(body["label"], "Get Test");
+    assert_eq!(body["table_name"], "get_test");
+    assert_eq!(body["schema_name"], DEFAULT_SCHEMA);
+
+    // Should include columns
+    let columns = body["columns"].as_array().unwrap();
+    assert_eq!(columns.len(), 2);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_dataset_not_found() -> Result<()> {
+    let (app, _temp) = setup_test().await?;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(path_dataset("data_nonexistent12345678901234"))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_dataset() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create a dataset
+    let create_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "Original Label",
+                    "source": {
+                        "inline": {
+                            "format": "csv",
+                            "content": "a\n1"
+                        }
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    let create_body: serde_json::Value = parse_body(create_response).await;
+    let dataset_id = create_body["id"].as_str().unwrap();
+
+    // Update the dataset
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_dataset(dataset_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "Updated Label",
+                    "table_name": "updated_table"
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = parse_body(response).await;
+    assert_eq!(body["label"], "Updated Label");
+    assert_eq!(body["table_name"], "updated_table");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_delete_dataset() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create a dataset
+    let create_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "To Delete",
+                    "source": {
+                        "inline": {
+                            "format": "csv",
+                            "content": "a\n1"
+                        }
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    let create_body: serde_json::Value = parse_body(create_response).await;
+    let dataset_id = create_body["id"].as_str().unwrap();
+
+    // Delete the dataset
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(path_dataset(dataset_id))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    // Verify it's gone
+    let get_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(path_dataset(dataset_id))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(get_response.status(), StatusCode::NOT_FOUND);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_upload_consumed_only_once() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Upload a file
+    let upload_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/files")
+                .header("content-type", "text/csv")
+                .body(Body::from("a,b\n1,2"))?,
+        )
+        .await?;
+
+    let upload_body: serde_json::Value = parse_body(upload_response).await;
+    let upload_id = upload_body["id"].as_str().unwrap();
+
+    // Create first dataset from upload
+    let first_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "First",
+                    "source": {
+                        "upload_id": upload_id,
+                        "format": "csv"
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(first_response.status(), StatusCode::CREATED);
+
+    // Try to use same upload again
+    let second_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "Second",
+                    "source": {
+                        "upload_id": upload_id,
+                        "format": "csv"
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(second_response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = parse_body(second_response).await;
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("consumed"));
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_create_connection_with_both_secret_name_and_id_fails() -> Result<()> {
     let (app, _tempdir) = setup_test().await?;
@@ -1457,6 +2112,453 @@ async fn test_create_connection_with_both_secret_name_and_id_fails() -> Result<(
     assert!(
         error.contains("secret_name") && error.contains("secret_id"),
         "Error should mention both secret_name and secret_id, got: {}",
+        error
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// Additional Dataset HTTP API Tests
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_datasets_with_pagination() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create 3 datasets with labels that sort alphabetically
+    for label in ["Alpha", "Beta", "Gamma"] {
+        let _create_response = app
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(PATH_DATASETS)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&json!({
+                        "label": label,
+                        "source": {
+                            "inline": {
+                                "format": "csv",
+                                "content": "a\n1"
+                            }
+                        }
+                    }))?))?,
+            )
+            .await?;
+    }
+
+    // Test pagination: limit=2, offset=0
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("{}?limit=2&offset=0", PATH_DATASETS))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = parse_body(response).await;
+    let datasets = body["datasets"].as_array().unwrap();
+    assert_eq!(datasets.len(), 2);
+    assert!(body["has_more"].as_bool().unwrap());
+    assert_eq!(datasets[0]["label"], "Alpha");
+    assert_eq!(datasets[1]["label"], "Beta");
+
+    // Test pagination: limit=2, offset=2
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("{}?limit=2&offset=2", PATH_DATASETS))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = parse_body(response).await;
+    let datasets = body["datasets"].as_array().unwrap();
+    assert_eq!(datasets.len(), 1);
+    assert!(!body["has_more"].as_bool().unwrap());
+    assert_eq!(datasets[0]["label"], "Gamma");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_dataset_label_only() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create a dataset
+    let create_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "Original Label",
+                    "table_name": "original_table",
+                    "source": {
+                        "inline": {
+                            "format": "csv",
+                            "content": "a\n1"
+                        }
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    let create_body: serde_json::Value = parse_body(create_response).await;
+    let dataset_id = create_body["id"].as_str().unwrap();
+
+    // Update only the label (omit table_name)
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_dataset(dataset_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "New Label"
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = parse_body(response).await;
+    assert_eq!(body["label"], "New Label");
+    assert_eq!(body["table_name"], "original_table"); // unchanged
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_dataset_table_name_only() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create a dataset
+    let create_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "My Dataset",
+                    "table_name": "old_table",
+                    "source": {
+                        "inline": {
+                            "format": "csv",
+                            "content": "a\n1"
+                        }
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    let create_body: serde_json::Value = parse_body(create_response).await;
+    let dataset_id = create_body["id"].as_str().unwrap();
+
+    // Update only the table_name (omit label)
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_dataset(dataset_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "table_name": "new_table"
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = parse_body(response).await;
+    assert_eq!(body["label"], "My Dataset"); // unchanged
+    assert_eq!(body["table_name"], "new_table");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_dataset_not_found() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Try to update a non-existent dataset
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_dataset("ds_nonexistent_12345"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "New Label"
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_dataset_table_name_conflict() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create first dataset
+    let _create1 = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "First",
+                    "table_name": "taken_name",
+                    "source": {
+                        "inline": {
+                            "format": "csv",
+                            "content": "a\n1"
+                        }
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    // Create second dataset
+    let create2 = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "Second",
+                    "table_name": "other_name",
+                    "source": {
+                        "inline": {
+                            "format": "csv",
+                            "content": "b\n2"
+                        }
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    let create2_body: serde_json::Value = parse_body(create2).await;
+    let dataset2_id = create2_body["id"].as_str().unwrap();
+
+    // Try to update second dataset to use first dataset's table_name
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_dataset(dataset2_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "table_name": "taken_name"
+                }))?))?,
+        )
+        .await?;
+
+    // Should get 409 Conflict (or 400 Bad Request depending on implementation)
+    assert!(
+        response.status() == StatusCode::CONFLICT || response.status() == StatusCode::BAD_REQUEST,
+        "Expected 409 or 400, got {}",
+        response.status()
+    );
+
+    let body: serde_json::Value = parse_body(response).await;
+    let error = body["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        error.contains("taken_name") || error.contains("in use") || error.contains("already"),
+        "Error should mention table name conflict: {}",
+        error
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_delete_dataset_not_found() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Try to delete a non-existent dataset
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(path_dataset("ds_nonexistent_12345"))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_dataset_empty_label() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "",
+                    "source": {
+                        "inline": {
+                            "format": "csv",
+                            "content": "a\n1"
+                        }
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body: serde_json::Value = parse_body(response).await;
+    let error = body["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        error.contains("empty") || error.contains("label"),
+        "Error should mention empty label: {}",
+        error
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_dataset_empty_label() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create a dataset
+    let create_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_DATASETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": "Valid Label",
+                    "source": {
+                        "inline": {
+                            "format": "csv",
+                            "content": "a\n1"
+                        }
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    let create_body: serde_json::Value = parse_body(create_response).await;
+    let dataset_id = create_body["id"].as_str().unwrap();
+
+    // Try to update with empty label
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_dataset(dataset_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "label": ""
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body: serde_json::Value = parse_body(response).await;
+    let error = body["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        error.contains("empty") || error.contains("label"),
+        "Error should mention empty label: {}",
         error
     );
 

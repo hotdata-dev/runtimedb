@@ -36,6 +36,17 @@ pub struct CacheWriteHandle {
     pub table: String,
 }
 
+/// Handle for a pending dataset write operation.
+#[derive(Debug, Clone)]
+pub struct DatasetWriteHandle {
+    /// Local path where parquet file should be written
+    pub local_path: std::path::PathBuf,
+    /// Unique version identifier for this write
+    pub version: String,
+    /// Dataset ID
+    pub dataset_id: String,
+}
+
 #[async_trait]
 pub trait StorageManager: Debug + Send + Sync {
     // Path construction
@@ -48,6 +59,15 @@ pub trait StorageManager: Debug + Send + Sync {
     async fn delete(&self, url: &str) -> Result<()>;
     async fn delete_prefix(&self, prefix: &str) -> Result<()>;
     async fn exists(&self, url: &str) -> Result<bool>;
+
+    /// Get a local file path for reading a storage URL.
+    ///
+    /// For filesystem storage, returns the existing local path directly.
+    /// For S3 storage, downloads the file to a temp location first.
+    ///
+    /// Returns the local path and a boolean indicating if the file is temporary
+    /// (should be deleted by the caller after use).
+    async fn get_local_path(&self, url: &str) -> Result<(std::path::PathBuf, bool)>;
 
     // DataFusion integration
     fn register_with_datafusion(&self, ctx: &SessionContext) -> Result<()>;
@@ -80,4 +100,26 @@ pub trait StorageManager: Debug + Send + Sync {
     /// For local storage: no-op (file already in place), returns URL.
     /// For remote storage: uploads temp file to storage, cleans up temp, returns URL.
     async fn finalize_cache_write(&self, handle: &CacheWriteHandle) -> Result<String>;
+
+    // Upload operations
+
+    /// Get the URL for storing an upload's raw file.
+    fn upload_url(&self, upload_id: &str) -> String;
+
+    /// Prepare an upload write (returns local path for writing).
+    fn prepare_upload_write(&self, upload_id: &str) -> std::path::PathBuf;
+
+    /// Finalize an upload write (upload to remote if needed).
+    async fn finalize_upload_write(&self, upload_id: &str) -> Result<String>;
+
+    // Dataset operations
+
+    /// Get the URL for storing a dataset version.
+    fn dataset_url(&self, dataset_id: &str, version: &str) -> String;
+
+    /// Prepare a dataset write.
+    fn prepare_dataset_write(&self, dataset_id: &str) -> DatasetWriteHandle;
+
+    /// Finalize dataset write and return URL.
+    async fn finalize_dataset_write(&self, handle: &DatasetWriteHandle) -> Result<String>;
 }

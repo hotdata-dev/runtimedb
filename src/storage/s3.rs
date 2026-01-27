@@ -11,7 +11,7 @@ use tokio::io::AsyncWriteExt;
 use tracing::warn;
 use url::Url;
 
-use super::{CacheWriteHandle, S3Credentials, StorageManager};
+use super::{CacheWriteHandle, DatasetWriteHandle, S3Credentials, StorageManager};
 
 #[derive(Debug, Clone)]
 struct S3Config {
@@ -145,6 +145,35 @@ impl StorageManager for S3Storage {
         }
     }
 
+    async fn get_local_path(&self, url: &str) -> Result<(std::path::PathBuf, bool)> {
+        // For S3, download the file to a temp location
+        let path = self.url_to_path(url)?;
+        let result = self.store.get(&path).await?;
+
+        // Create unique temp file path
+        let temp_id = nanoid::nanoid!(12);
+        let temp_path = std::env::temp_dir()
+            .join("runtimedb_downloads")
+            .join(&temp_id);
+
+        // Ensure parent directory exists
+        if let Some(parent) = temp_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        // Stream S3 content to local temp file
+        let mut stream = result.into_stream();
+        let file = tokio::fs::File::create(&temp_path).await?;
+        let mut writer = tokio::io::BufWriter::new(file);
+
+        while let Some(chunk) = stream.try_next().await? {
+            tokio::io::AsyncWriteExt::write_all(&mut writer, &chunk).await?;
+        }
+        tokio::io::AsyncWriteExt::flush(&mut writer).await?;
+
+        Ok((temp_path, true)) // true = caller should delete after use
+    }
+
     fn register_with_datafusion(&self, ctx: &SessionContext) -> Result<()> {
         let url = Url::parse(&format!("s3://{}", self.bucket))?;
         ctx.runtime_env()
@@ -244,6 +273,93 @@ impl StorageManager for S3Storage {
         }
 
         Ok(versioned_dir_url)
+    }
+
+    // Upload operations
+
+    fn upload_url(&self, upload_id: &str) -> String {
+        format!("s3://{}/uploads/{}/raw", self.bucket, upload_id)
+    }
+
+    fn prepare_upload_write(&self, upload_id: &str) -> std::path::PathBuf {
+        std::env::temp_dir()
+            .join("uploads")
+            .join(upload_id)
+            .join("raw")
+    }
+
+    async fn finalize_upload_write(&self, upload_id: &str) -> Result<String> {
+        let local_path = self.prepare_upload_write(upload_id);
+        let s3_path = ObjectPath::from(format!("uploads/{}/raw", upload_id));
+
+        // Stream file to S3
+        let file = tokio::fs::File::open(&local_path).await?;
+        let mut reader = tokio::io::BufReader::new(file);
+        let mut writer = BufWriter::new(self.store.clone(), s3_path);
+
+        tokio::io::copy(&mut reader, &mut writer).await?;
+        writer.shutdown().await?;
+
+        // Clean up local temp file
+        if let Err(e) = tokio::fs::remove_file(&local_path).await {
+            warn!(
+                path = %local_path.display(),
+                error = %e,
+                "Failed to remove local temp file after S3 upload; file may be orphaned"
+            );
+        }
+
+        Ok(self.upload_url(upload_id))
+    }
+
+    // Dataset operations
+
+    fn dataset_url(&self, dataset_id: &str, version: &str) -> String {
+        format!(
+            "s3://{}/datasets/{}/{}/data.parquet",
+            self.bucket, dataset_id, version
+        )
+    }
+
+    fn prepare_dataset_write(&self, dataset_id: &str) -> DatasetWriteHandle {
+        let version = nanoid::nanoid!(8);
+        let local_path = std::env::temp_dir()
+            .join("datasets")
+            .join(dataset_id)
+            .join(&version)
+            .join("data.parquet");
+
+        DatasetWriteHandle {
+            local_path,
+            version,
+            dataset_id: dataset_id.to_string(),
+        }
+    }
+
+    async fn finalize_dataset_write(&self, handle: &DatasetWriteHandle) -> Result<String> {
+        let s3_path = ObjectPath::from(format!(
+            "datasets/{}/{}/data.parquet",
+            handle.dataset_id, handle.version
+        ));
+
+        // Stream file to S3
+        let file = tokio::fs::File::open(&handle.local_path).await?;
+        let mut reader = tokio::io::BufReader::new(file);
+        let mut writer = BufWriter::new(self.store.clone(), s3_path);
+
+        tokio::io::copy(&mut reader, &mut writer).await?;
+        writer.shutdown().await?;
+
+        // Clean up local temp file
+        if let Err(e) = tokio::fs::remove_file(&handle.local_path).await {
+            warn!(
+                path = %handle.local_path.display(),
+                error = %e,
+                "Failed to remove local temp file after S3 upload; file may be orphaned"
+            );
+        }
+
+        Ok(self.dataset_url(&handle.dataset_id, &handle.version))
     }
 }
 

@@ -1,4 +1,5 @@
 use runtimedb::catalog::{CatalogManager, PostgresCatalogManager, SqliteCatalogManager};
+use runtimedb::datasets::DEFAULT_SCHEMA;
 use sqlx::{PgPool, SqlitePool};
 use tempfile::TempDir;
 use testcontainers::{runners::AsyncRunner, ImageExt};
@@ -502,6 +503,176 @@ macro_rules! catalog_manager_tests {
                 let result = catalog.create_secret_metadata(&metadata).await;
 
                 assert!(result.is_err());
+            }
+
+            #[tokio::test]
+            async fn dataset_create_duplicate_table_name_detected() {
+                use runtimedb::catalog::{is_dataset_table_name_conflict, DatasetInfo};
+
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+                let now = chrono::Utc::now();
+
+                let ds1 = DatasetInfo {
+                    id: "ds_first".to_string(),
+                    label: "First Dataset".to_string(),
+                    schema_name: DEFAULT_SCHEMA.to_string(),
+                    table_name: "my_table".to_string(),
+                    parquet_url: "s3://bucket/ds1.parquet".to_string(),
+                    arrow_schema_json: "{}".to_string(),
+                    source_type: "upload".to_string(),
+                    source_config: "{}".to_string(),
+                    created_at: now,
+                    updated_at: now,
+                };
+
+                // First create should succeed
+                catalog.create_dataset(&ds1).await.unwrap();
+
+                // Second create with same table_name should fail
+                let ds2 = DatasetInfo {
+                    id: "ds_second".to_string(),
+                    label: "Second Dataset".to_string(),
+                    schema_name: DEFAULT_SCHEMA.to_string(),
+                    table_name: "my_table".to_string(), // same table_name
+                    parquet_url: "s3://bucket/ds2.parquet".to_string(),
+                    arrow_schema_json: "{}".to_string(),
+                    source_type: "upload".to_string(),
+                    source_config: "{}".to_string(),
+                    created_at: now,
+                    updated_at: now,
+                };
+
+                let result = catalog.create_dataset(&ds2).await;
+                assert!(result.is_err());
+
+                // Verify structured error detection works
+                let err = result.unwrap_err();
+                let is_conflict = is_dataset_table_name_conflict(
+                    catalog,
+                    &err,
+                    DEFAULT_SCHEMA,
+                    "my_table",
+                    None, // creating new dataset
+                )
+                .await;
+                assert!(
+                    is_conflict,
+                    "Expected is_dataset_table_name_conflict to return true for: {:?}",
+                    err
+                );
+            }
+
+            #[tokio::test]
+            async fn dataset_update_duplicate_table_name_detected() {
+                use runtimedb::catalog::{is_dataset_table_name_conflict, DatasetInfo};
+
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+                let now = chrono::Utc::now();
+
+                // Create two datasets with different table names
+                let ds1 = DatasetInfo {
+                    id: "ds_first".to_string(),
+                    label: "First Dataset".to_string(),
+                    schema_name: DEFAULT_SCHEMA.to_string(),
+                    table_name: "table_one".to_string(),
+                    parquet_url: "s3://bucket/ds1.parquet".to_string(),
+                    arrow_schema_json: "{}".to_string(),
+                    source_type: "upload".to_string(),
+                    source_config: "{}".to_string(),
+                    created_at: now,
+                    updated_at: now,
+                };
+
+                let ds2 = DatasetInfo {
+                    id: "ds_second".to_string(),
+                    label: "Second Dataset".to_string(),
+                    schema_name: DEFAULT_SCHEMA.to_string(),
+                    table_name: "table_two".to_string(),
+                    parquet_url: "s3://bucket/ds2.parquet".to_string(),
+                    arrow_schema_json: "{}".to_string(),
+                    source_type: "upload".to_string(),
+                    source_config: "{}".to_string(),
+                    created_at: now,
+                    updated_at: now,
+                };
+
+                catalog.create_dataset(&ds1).await.unwrap();
+                catalog.create_dataset(&ds2).await.unwrap();
+
+                // Try to update ds2's table_name to conflict with ds1
+                let result = catalog
+                    .update_dataset("ds_second", "Second Dataset", "table_one")
+                    .await;
+                assert!(result.is_err());
+
+                // Verify structured error detection works
+                let err = result.unwrap_err();
+                let is_conflict = is_dataset_table_name_conflict(
+                    catalog,
+                    &err,
+                    DEFAULT_SCHEMA,
+                    "table_one",
+                    Some("ds_second"), // exclude current dataset from conflict check
+                )
+                .await;
+                assert!(
+                    is_conflict,
+                    "Expected is_dataset_table_name_conflict to return true for: {:?}",
+                    err
+                );
+            }
+
+            #[tokio::test]
+            async fn dataset_other_errors_not_misclassified() {
+                use runtimedb::catalog::is_dataset_table_name_conflict;
+
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                // Try to update a non-existent dataset - this returns Ok(false)
+                // rather than an error, so verify it doesn't panic
+                let _result = catalog
+                    .update_dataset("ds_nonexistent", "Some Label", "some_table")
+                    .await;
+
+                // Test get_dataset with a non-existent ID
+                let result = catalog.get_dataset("ds_nonexistent").await;
+
+                // This should succeed with None, not error
+                assert!(result.is_ok());
+                assert!(result.unwrap().is_none());
+
+                // Create a generic anyhow error and verify it's not misclassified
+                let generic_err = anyhow::anyhow!("some random error with unique word in it");
+                let is_conflict = is_dataset_table_name_conflict(
+                    catalog,
+                    &generic_err,
+                    DEFAULT_SCHEMA,
+                    "some_table",
+                    None,
+                )
+                .await;
+                assert!(
+                    !is_conflict,
+                    "Generic error should not be classified as table_name conflict"
+                );
+
+                // Create an error with "duplicate" in the message but not from sqlx
+                let misleading_err = anyhow::anyhow!("duplicate key violation somewhere");
+                let is_conflict = is_dataset_table_name_conflict(
+                    catalog,
+                    &misleading_err,
+                    DEFAULT_SCHEMA,
+                    "some_table",
+                    None,
+                )
+                .await;
+                assert!(
+                    !is_conflict,
+                    "Non-sqlx error with 'duplicate' should not be classified as table_name conflict"
+                );
             }
         }
     };
