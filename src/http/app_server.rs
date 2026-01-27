@@ -1,4 +1,4 @@
-use crate::http::handlers::{
+use crate::http::controllers::{
     create_connection_handler, create_dataset, create_secret_handler, delete_connection_handler,
     delete_dataset, delete_secret_handler, get_connection_handler, get_dataset, get_result_handler,
     get_secret_handler, health_handler, information_schema_handler, list_connections_handler,
