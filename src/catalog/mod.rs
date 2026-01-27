@@ -5,6 +5,11 @@ mod sqlite_manager;
 
 mod manager;
 
+#[cfg(test)]
+mod mock_catalog;
+#[cfg(test)]
+pub use mock_catalog::MockCatalog;
+
 pub use manager::{
     CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
     TableInfo, UploadInfo,
