@@ -383,7 +383,7 @@ impl RuntimeEngine {
             error!("Error executing query: {}", e);
             e
         })?;
-        let schema = Arc::new(Schema::from(df.schema()));
+        let schema: Arc<Schema> = Arc::clone(df.schema().inner());
         let results = df.collect().await.map_err(|e| {
             error!("Error getting query result: {}", e);
             e
@@ -465,7 +465,7 @@ impl RuntimeEngine {
             )
             .await?;
 
-        let schema = Arc::new(Schema::from(df.schema()));
+        let schema: Arc<Schema> = Arc::clone(df.schema().inner());
         let batches = df.collect().await?;
 
         Ok(Some((schema, batches)))
