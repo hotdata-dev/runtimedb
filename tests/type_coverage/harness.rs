@@ -68,7 +68,6 @@ pub enum SemanticType {
     #[allow(dead_code)] // Not yet supported by production fetch code
     Network,
     /// Geometric types (point, line, polygon) - backend-specific.
-    #[allow(dead_code)] // Not yet supported by production fetch code
     Geometric,
     /// Range types - backend-specific.
     #[allow(dead_code)] // Not yet supported by production fetch code
@@ -204,6 +203,8 @@ pub struct TypeTestCase {
     /// Shape of the test data.
     #[allow(dead_code)] // Reserved for future non-scalar test shapes
     pub shape: TestShape,
+    /// Optional SQL to execute before table creation (e.g., loading extensions).
+    pub setup_sql: Option<String>,
 }
 
 // ============================================================================
