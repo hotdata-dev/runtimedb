@@ -18,7 +18,7 @@ use std::sync::Mutex;
 /// Mock catalog that can be configured to fail for testing error handling.
 #[derive(Debug)]
 pub struct MockCatalog {
-    tables: Mutex<HashMap<(i32, String, String), TableInfo>>,
+    tables: Mutex<HashMap<(String, String, String), TableInfo>>,
     fail_update: AtomicBool,
     next_id: AtomicUsize,
 }
@@ -33,13 +33,17 @@ impl MockCatalog {
     }
 
     /// Add a table entry to the mock catalog.
-    pub fn add_table(&self, connection_id: i32, schema: &str, table: &str) {
+    pub fn add_table_entry(&self, connection_id: &str, schema: &str, table: &str) {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst) as i32;
         self.tables.lock().unwrap().insert(
-            (connection_id, schema.to_string(), table.to_string()),
+            (
+                connection_id.to_string(),
+                schema.to_string(),
+                table.to_string(),
+            ),
             TableInfo {
                 id,
-                connection_id,
+                connection_id: connection_id.to_string(),
                 schema_name: schema.to_string(),
                 table_name: table.to_string(),
                 parquet_path: None,
@@ -81,35 +85,32 @@ impl CatalogManager for MockCatalog {
         Ok("conn_mock123".to_string())
     }
 
-    async fn get_connection(&self, _name: &str) -> Result<Option<ConnectionInfo>> {
+    async fn get_connection(&self, _id: &str) -> Result<Option<ConnectionInfo>> {
         Ok(None)
     }
 
-    async fn get_connection_by_external_id(
-        &self,
-        _external_id: &str,
-    ) -> Result<Option<ConnectionInfo>> {
+    async fn get_connection_by_name(&self, _name: &str) -> Result<Option<ConnectionInfo>> {
         Ok(None)
     }
 
     async fn add_table(
         &self,
-        connection_id: i32,
+        connection_id: &str,
         schema_name: &str,
         table_name: &str,
         _arrow_schema_json: &str,
     ) -> Result<i32> {
-        self.add_table(connection_id, schema_name, table_name);
+        self.add_table_entry(connection_id, schema_name, table_name);
         Ok(self.next_id.load(Ordering::SeqCst) as i32 - 1)
     }
 
-    async fn list_tables(&self, _connection_id: Option<i32>) -> Result<Vec<TableInfo>> {
+    async fn list_tables(&self, _connection_id: Option<&str>) -> Result<Vec<TableInfo>> {
         Ok(self.tables.lock().unwrap().values().cloned().collect())
     }
 
     async fn get_table(
         &self,
-        connection_id: i32,
+        connection_id: &str,
         schema_name: &str,
         table_name: &str,
     ) -> Result<Option<TableInfo>> {
@@ -118,7 +119,7 @@ impl CatalogManager for MockCatalog {
             .lock()
             .unwrap()
             .get(&(
-                connection_id,
+                connection_id.to_string(),
                 schema_name.to_string(),
                 table_name.to_string(),
             ))
@@ -134,23 +135,19 @@ impl CatalogManager for MockCatalog {
 
     async fn clear_table_cache_metadata(
         &self,
-        _connection_id: i32,
+        _connection_id: &str,
         _schema_name: &str,
         _table_name: &str,
     ) -> Result<TableInfo> {
         Err(anyhow::anyhow!("Not implemented"))
     }
 
-    async fn clear_connection_cache_metadata(&self, _name: &str) -> Result<()> {
+    async fn clear_connection_cache_metadata(&self, _connection_id: &str) -> Result<()> {
         Ok(())
     }
 
-    async fn delete_connection(&self, _name: &str) -> Result<()> {
+    async fn delete_connection(&self, _connection_id: &str) -> Result<()> {
         Ok(())
-    }
-
-    async fn get_connection_by_id(&self, _id: i32) -> Result<Option<ConnectionInfo>> {
-        Ok(None)
     }
 
     async fn schedule_file_deletion(

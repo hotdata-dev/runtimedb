@@ -91,7 +91,7 @@ where
 {
     pub async fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
         query_as::<DB, ConnectionInfo>(
-            "SELECT id, external_id, name, source_type, config_json, secret_id FROM connections ORDER BY name",
+            "SELECT external_id as id, name, source_type, config_json, secret_id FROM connections ORDER BY name",
         )
         .fetch_all(&self.pool)
         .await
@@ -179,9 +179,22 @@ where
         ))
     }
 
-    pub async fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>> {
+    pub async fn get_connection(&self, id: &str) -> Result<Option<ConnectionInfo>> {
         let sql = format!(
-            "SELECT id, external_id, name, source_type, config_json, secret_id FROM connections WHERE name = {}",
+            "SELECT external_id as id, name, source_type, config_json, secret_id FROM connections WHERE external_id = {}",
+            DB::bind_param(1)
+        );
+
+        query_as::<DB, ConnectionInfo>(&sql)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn get_connection_by_name(&self, name: &str) -> Result<Option<ConnectionInfo>> {
+        let sql = format!(
+            "SELECT external_id as id, name, source_type, config_json, secret_id FROM connections WHERE name = {}",
             DB::bind_param(1)
         );
 
@@ -192,34 +205,18 @@ where
             .map_err(Into::into)
     }
 
-    pub async fn get_connection_by_external_id(
-        &self,
-        external_id: &str,
-    ) -> Result<Option<ConnectionInfo>> {
-        let sql = format!(
-            "SELECT id, external_id, name, source_type, config_json, secret_id FROM connections WHERE external_id = {}",
-            DB::bind_param(1)
-        );
-
-        query_as::<DB, ConnectionInfo>(&sql)
-            .bind(external_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(Into::into)
-    }
-
     #[tracing::instrument(
         name = "catalog_add_table",
         skip(self, arrow_schema_json),
         fields(
-            runtimedb.connection_id = connection_id,
+            runtimedb.connection_id = %connection_id,
             runtimedb.schema = %schema_name,
             runtimedb.table = %table_name,
         )
     )]
     pub async fn add_table(
         &self,
-        connection_id: i32,
+        connection_id: &str,
         schema_name: &str,
         table_name: &str,
         arrow_schema_json: &str,
@@ -259,7 +256,7 @@ where
             .map_err(Into::into)
     }
 
-    pub async fn list_tables(&self, connection_id: Option<i32>) -> Result<Vec<TableInfo>> {
+    pub async fn list_tables(&self, connection_id: Option<&str>) -> Result<Vec<TableInfo>> {
         let mut sql = String::from(
             "SELECT id, connection_id, schema_name, table_name, parquet_path, \
              CAST(last_sync AS TEXT) as last_sync, arrow_schema_json \
@@ -275,7 +272,7 @@ where
 
         let mut stmt = query_as::<DB, TableInfo>(&sql);
         if let Some(conn_id) = connection_id {
-            stmt = stmt.bind(conn_id);
+            stmt = stmt.bind(conn_id.to_string());
         }
 
         stmt.fetch_all(&self.pool).await.map_err(Into::into)
@@ -283,7 +280,7 @@ where
 
     pub async fn get_table(
         &self,
-        connection_id: i32,
+        connection_id: &str,
         schema_name: &str,
         table_name: &str,
     ) -> Result<Option<TableInfo>> {
@@ -326,14 +323,14 @@ where
         name = "catalog_clear_table_cache",
         skip(self),
         fields(
-            runtimedb.connection_id = connection_id,
+            runtimedb.connection_id = %connection_id,
             runtimedb.schema = %schema_name,
             runtimedb.table = %table_name,
         )
     )]
     pub async fn clear_table_cache_metadata(
         &self,
-        connection_id: i32,
+        connection_id: &str,
         schema_name: &str,
         table_name: &str,
     ) -> Result<TableInfo> {
@@ -355,21 +352,16 @@ where
     #[tracing::instrument(
         name = "catalog_clear_connection_cache",
         skip(self),
-        fields(runtimedb.connection_name = %name)
+        fields(runtimedb.connection_id = %connection_id)
     )]
-    pub async fn clear_connection_cache_metadata(&self, name: &str) -> Result<()> {
-        let connection = self
-            .get_connection(name)
-            .await?
-            .ok_or_else(|| anyhow!("Connection '{}' not found", name))?;
-
+    pub async fn clear_connection_cache_metadata(&self, connection_id: &str) -> Result<()> {
         let sql = format!(
             "UPDATE tables SET parquet_path = NULL, last_sync = NULL \
              WHERE connection_id = {}",
             DB::bind_param(1)
         );
 
-        query(&sql).bind(connection.id).execute(&self.pool).await?;
+        query(&sql).bind(connection_id).execute(&self.pool).await?;
 
         Ok(())
     }
@@ -377,45 +369,30 @@ where
     #[tracing::instrument(
         name = "catalog_delete_connection",
         skip(self),
-        fields(runtimedb.connection_name = %name)
+        fields(runtimedb.connection_id = %connection_id)
     )]
-    pub async fn delete_connection(&self, name: &str) -> Result<()> {
-        let connection = self
-            .get_connection(name)
-            .await?
-            .ok_or_else(|| anyhow!("Connection '{}' not found", name))?;
-
+    pub async fn delete_connection(&self, connection_id: &str) -> Result<()> {
         let delete_tables_sql = format!(
             "DELETE FROM tables WHERE connection_id = {}",
             DB::bind_param(1)
         );
 
         query(&delete_tables_sql)
-            .bind(connection.id)
+            .bind(connection_id)
             .execute(&self.pool)
             .await?;
 
-        let delete_connection_sql =
-            format!("DELETE FROM connections WHERE id = {}", DB::bind_param(1));
+        let delete_connection_sql = format!(
+            "DELETE FROM connections WHERE external_id = {}",
+            DB::bind_param(1)
+        );
 
         query(&delete_connection_sql)
-            .bind(connection.id)
+            .bind(connection_id)
             .execute(&self.pool)
             .await?;
 
         Ok(())
-    }
-
-    pub async fn get_connection_by_id(&self, id: i32) -> Result<Option<ConnectionInfo>> {
-        let sql = format!(
-            "SELECT id, external_id, name, source_type, config_json, secret_id FROM connections WHERE id = {}",
-            DB::bind_param(1)
-        );
-        query_as::<DB, ConnectionInfo>(&sql)
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(Into::into)
     }
 
     pub async fn remove_pending_deletion(&self, id: i32) -> Result<()> {
