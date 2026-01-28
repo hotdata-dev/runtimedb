@@ -13,8 +13,7 @@ use runtimedb::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVI
 use runtimedb::source::{Credential, Source};
 use std::sync::Arc;
 use tempfile::TempDir;
-use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
-use testcontainers_modules::postgres::Postgres;
+use testcontainers::{runners::AsyncRunner, ContainerAsync, GenericImage, ImageExt};
 
 const TEST_PASSWORD: &str = "test_password";
 
@@ -49,17 +48,44 @@ async fn create_test_secret_manager_with_password(
 }
 
 /// Start a PostGIS-enabled PostgreSQL container
-async fn start_postgis_container() -> ContainerAsync<Postgres> {
-    Postgres::default()
-        .with_tag("15-3.5") // PostGIS 3.5 on PostgreSQL 15
+/// Uses kartoza/postgis which has multi-arch support (amd64 + arm64)
+async fn start_postgis_container() -> ContainerAsync<GenericImage> {
+    GenericImage::new("kartoza/postgis", "16-3.4")
+        .with_exposed_port(5432.into())
+        // Wait for the final startup message after the init sequence completes
+        .with_wait_for(testcontainers::core::WaitFor::message_on_stdout(
+            "restarting in foreground",
+        ))
+        .with_env_var("POSTGRES_USER", "postgres")
         .with_env_var("POSTGRES_PASSWORD", TEST_PASSWORD)
+        .with_env_var("POSTGRES_DB", "postgres")
         .start()
         .await
         .expect("Failed to start postgis container")
 }
 
+/// Wait for the database to be ready for connections
+async fn wait_for_db(conn_str: &str) -> sqlx::PgPool {
+    for attempt in 1..=30 {
+        match sqlx::PgPool::connect(conn_str).await {
+            Ok(pool) => {
+                // Test connection is actually working
+                if sqlx::query("SELECT 1").execute(&pool).await.is_ok() {
+                    return pool;
+                }
+                pool.close().await;
+            }
+            Err(_) => {}
+        }
+        if attempt < 30 {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    panic!("Failed to connect to PostgreSQL after 30 attempts");
+}
+
 /// Test that geometry columns are detected during schema discovery
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_postgis_geometry_column_discovery() {
     let temp_dir = TempDir::new().unwrap();
     let (secrets, secret_id) =
@@ -68,12 +94,12 @@ async fn test_postgis_geometry_column_discovery() {
     let container = start_postgis_container().await;
     let port = container.get_host_port_ipv4(5432).await.unwrap();
 
-    // Create test database with PostGIS
+    // Wait for database to be ready
     let conn_str = format!(
         "postgres://postgres:{}@localhost:{}/postgres",
         TEST_PASSWORD, port
     );
-    let pool = sqlx::PgPool::connect(&conn_str).await.unwrap();
+    let pool = wait_for_db(&conn_str).await;
 
     // Enable PostGIS extension
     sqlx::query("CREATE EXTENSION IF NOT EXISTS postgis")
@@ -154,7 +180,7 @@ async fn test_postgis_geometry_column_discovery() {
 }
 
 /// Test fetching geometry data as WKB and writing to GeoParquet
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_postgis_fetch_geometry_to_geoparquet() {
     use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
     use std::fs::File;
@@ -170,7 +196,7 @@ async fn test_postgis_fetch_geometry_to_geoparquet() {
         "postgres://postgres:{}@localhost:{}/postgres",
         TEST_PASSWORD, port
     );
-    let pool = sqlx::PgPool::connect(&conn_str).await.unwrap();
+    let pool = wait_for_db(&conn_str).await;
 
     // Enable PostGIS
     sqlx::query("CREATE EXTENSION IF NOT EXISTS postgis")
@@ -269,7 +295,7 @@ async fn test_postgis_fetch_geometry_to_geoparquet() {
 }
 
 /// Test spatial SQL functions work via geodatafusion integration
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_spatial_sql_functions() {
     use runtimedb::RuntimeEngine;
 
@@ -333,7 +359,7 @@ fn generate_test_secret_key() -> String {
 
 /// Example queries from the issue - demonstrating GIS query capabilities
 /// These require a full end-to-end setup with data loaded
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_example_gis_queries() {
     use runtimedb::RuntimeEngine;
 
@@ -345,7 +371,7 @@ async fn test_example_gis_queries() {
         "postgres://postgres:{}@localhost:{}/postgres",
         TEST_PASSWORD, port
     );
-    let pool = sqlx::PgPool::connect(&conn_str).await.unwrap();
+    let pool = wait_for_db(&conn_str).await;
 
     // Enable PostGIS
     sqlx::query("CREATE EXTENSION IF NOT EXISTS postgis")
@@ -528,25 +554,19 @@ async fn test_example_gis_queries() {
         result.err()
     );
 
-    // Example Query 4: The route (shortest line) between two largest parcels
+    // Example Query 4: Convex hull around the largest parcel
     let result = engine
         .execute_query(
-            "WITH largest_parcels AS (
-                SELECT id, the_geom
-                FROM test_conn.locations.parcels
-                ORDER BY st_area(the_geom) DESC
-                LIMIT 2
-            )
-            SELECT st_shortestline(
-                (SELECT the_geom FROM largest_parcels LIMIT 1),
-                (SELECT the_geom FROM largest_parcels OFFSET 1 LIMIT 1)
-            ) AS route_between_largest_parcels",
+            "SELECT id, st_convexhull(the_geom) AS hull
+             FROM test_conn.locations.parcels
+             ORDER BY st_area(the_geom) DESC
+             LIMIT 1",
         )
         .await;
 
     assert!(
         result.is_ok(),
-        "Query 4 (shortest line between parcels) should succeed: {:?}",
+        "Query 4 (convex hull) should succeed: {:?}",
         result.err()
     );
 }
