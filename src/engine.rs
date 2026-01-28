@@ -263,6 +263,22 @@ fn hex_decode_geometry_columns(
     Ok(RecordBatch::try_new(target_schema.clone(), columns)?)
 }
 
+/// Extract GeoParquet geometry column metadata from Parquet file-level metadata.
+///
+/// Looks for the "geo" key in Parquet key-value metadata and parses it
+/// according to the GeoParquet spec to extract geometry column info.
+fn extract_parquet_geometry_columns(
+    metadata: &datafusion::parquet::file::metadata::ParquetMetaData,
+) -> HashMap<String, GeometryColumnInfo> {
+    metadata
+        .file_metadata()
+        .key_value_metadata()
+        .and_then(|kv| kv.iter().find(|item| item.key == "geo"))
+        .and_then(|item| item.value.as_ref())
+        .map(|geo_json| crate::datafetch::parse_geoparquet_metadata(geo_json))
+        .unwrap_or_default()
+}
+
 impl RuntimeEngine {
     // =========================================================================
     // Constructors
@@ -2287,14 +2303,7 @@ impl RuntimeEngine {
                         let schema = builder.schema().clone();
 
                         // Extract GeoParquet metadata if present
-                        let geometry_columns = builder
-                            .metadata()
-                            .file_metadata()
-                            .key_value_metadata()
-                            .and_then(|kv| kv.iter().find(|item| item.key == "geo"))
-                            .and_then(|item| item.value.as_ref())
-                            .map(|geo_json| crate::datafetch::parse_geoparquet_metadata(geo_json))
-                            .unwrap_or_default();
+                        let geometry_columns = extract_parquet_geometry_columns(builder.metadata());
 
                         let parquet_reader =
                             release_on_parse_error!(builder.with_batch_size(8192).build());
@@ -2325,14 +2334,7 @@ impl RuntimeEngine {
                         let schema = builder.schema().clone();
 
                         // Extract GeoParquet metadata if present
-                        let geometry_columns = builder
-                            .metadata()
-                            .file_metadata()
-                            .key_value_metadata()
-                            .and_then(|kv| kv.iter().find(|item| item.key == "geo"))
-                            .and_then(|item| item.value.as_ref())
-                            .map(|geo_json| crate::datafetch::parse_geoparquet_metadata(geo_json))
-                            .unwrap_or_default();
+                        let geometry_columns = extract_parquet_geometry_columns(builder.metadata());
 
                         let parquet_reader =
                             release_on_parse_error!(builder.with_batch_size(8192).build());
