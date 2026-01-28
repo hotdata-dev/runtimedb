@@ -2140,3 +2140,88 @@ async fn test_geometry_csv_hex_decode() {
         "Beta y should be 4.0"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_geometry_json_hex_decode() {
+    let (engine, _temp) = create_test_engine().await;
+
+    // Same WKB hex values as the CSV test
+    let point_1_wkb_hex = "0101000000000000000000F03F0000000000000040";
+    let point_2_wkb_hex = "010100000000000000000008400000000000001040";
+
+    let json_content = format!(
+        r#"{{"name": "Alpha", "geom": "{}"}}{}{{"name": "Beta", "geom": "{}"}}"#,
+        point_1_wkb_hex, "\n", point_2_wkb_hex
+    );
+
+    let mut columns = HashMap::new();
+    columns.insert(
+        "name".to_string(),
+        ColumnDefinition::Simple("VARCHAR".to_string()),
+    );
+    columns.insert(
+        "geom".to_string(),
+        ColumnDefinition::Simple("GEOMETRY".to_string()),
+    );
+
+    let dataset = engine
+        .create_dataset(
+            "Geo JSON Test",
+            Some("geo_json_test"),
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "json".to_string(),
+                    content: json_content,
+                    columns: Some(columns),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(dataset.table_name, "geo_json_test");
+
+    // Verify spatial functions work exactly as with CSV
+    let result = engine
+        .execute_query(&format!(
+            "SELECT name, \
+                    st_x(st_geomfromwkb(geom)) AS x, \
+                    st_y(st_geomfromwkb(geom)) AS y \
+             FROM datasets.{}.geo_json_test ORDER BY name",
+            DEFAULT_SCHEMA
+        ))
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "Spatial query on JSON geometry should succeed: {:?}",
+        result.err()
+    );
+
+    let response = result.unwrap();
+    let batch = &response.results[0];
+    assert_eq!(batch.num_rows(), 2);
+
+    let name_col = batch.column_by_name("name").unwrap();
+    assert_eq!(get_string_value(name_col, 0), "Alpha");
+    assert_eq!(get_string_value(name_col, 1), "Beta");
+
+    let x_col = batch.column_by_name("x").unwrap();
+    let y_col = batch.column_by_name("y").unwrap();
+    assert!(
+        (get_f64_value(x_col, 0) - 1.0).abs() < 1e-10,
+        "Alpha x should be 1.0"
+    );
+    assert!(
+        (get_f64_value(y_col, 0) - 2.0).abs() < 1e-10,
+        "Alpha y should be 2.0"
+    );
+    assert!(
+        (get_f64_value(x_col, 1) - 3.0).abs() < 1e-10,
+        "Beta x should be 3.0"
+    );
+    assert!(
+        (get_f64_value(y_col, 1) - 4.0).abs() < 1e-10,
+        "Beta y should be 4.0"
+    );
+}
