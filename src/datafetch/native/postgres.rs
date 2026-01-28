@@ -117,6 +117,9 @@ pub async fn discover_tables(
     // This includes SRID and geometry type information
     let geometry_info = discover_geometry_columns(&mut conn).await;
 
+    // Select both udt_name and data_type:
+    // - udt_name detects PostGIS types (geometry/geography) that data_type misses
+    // - data_type provides standard SQL type names for pg_type_to_arrow mapping
     let rows = sqlx::query(
         r#"
         SELECT
@@ -126,6 +129,7 @@ pub async fn discover_tables(
             t.table_type,
             c.column_name,
             c.udt_name,
+            c.data_type,
             c.is_nullable,
             c.ordinal_position::int
         FROM information_schema.tables t
@@ -149,12 +153,19 @@ pub async fn discover_tables(
         let table_type: String = row.get(3);
         let col_name: String = row.get(4);
         let udt_name: String = row.get(5);
-        let is_nullable: String = row.get(6);
-        let ordinal: i32 = row.get(7);
+        let data_type: String = row.get(6);
+        let is_nullable: String = row.get(7);
+        let ordinal: i32 = row.get(8);
 
+        // Use udt_name for geometry detection, data_type for everything else
+        let type_for_arrow = if is_geometry_type(&udt_name) {
+            &udt_name
+        } else {
+            &data_type
+        };
         let column = ColumnMetadata {
             name: col_name.clone(),
-            data_type: pg_type_to_arrow(&udt_name),
+            data_type: pg_type_to_arrow(type_for_arrow),
             nullable: is_nullable.to_uppercase() == "YES",
             ordinal_position: ordinal,
         };
@@ -439,42 +450,6 @@ pub fn is_geometry_type(pg_type: &str) -> bool {
     let type_lower = pg_type.to_lowercase();
     let base_type = type_lower.split('(').next().unwrap_or(&type_lower).trim();
     matches!(base_type, "geometry" | "geography")
-}
-
-/// Parse SRID from a PostGIS type string like "geometry(Point,4326)" or "geography(Polygon,4326)"
-/// Returns (geometry_type, srid) tuple if parseable
-pub fn parse_geometry_type_params(pg_type: &str) -> Option<(String, i32)> {
-    let type_lower = pg_type.to_lowercase();
-
-    // Check if it's a geometry/geography type with parameters
-    if !type_lower.starts_with("geometry(") && !type_lower.starts_with("geography(") {
-        return None;
-    }
-
-    // Extract content between parentheses
-    let start = type_lower.find('(')?;
-    let end = type_lower.find(')')?;
-    let params = &type_lower[start + 1..end];
-
-    // Split by comma: "Point,4326" or just "Point" or "4326"
-    let parts: Vec<&str> = params.split(',').map(|s| s.trim()).collect();
-
-    match parts.len() {
-        1 => {
-            // Could be just type or just SRID
-            if let Ok(srid) = parts[0].parse::<i32>() {
-                Some(("geometry".to_string(), srid))
-            } else {
-                Some((parts[0].to_string(), 0))
-            }
-        }
-        2 => {
-            let geom_type = parts[0].to_string();
-            let srid = parts[1].parse::<i32>().unwrap_or(0);
-            Some((geom_type, srid))
-        }
-        _ => None,
-    }
 }
 
 /// Parse PostgreSQL NUMERIC(precision, scale) parameters.
@@ -1025,34 +1000,6 @@ mod tests {
         assert!(!is_geometry_type("text"));
         assert!(!is_geometry_type("integer"));
         assert!(!is_geometry_type("bytea"));
-    }
-
-    #[test]
-    fn test_parse_geometry_type_params() {
-        // Full parameterized type
-        let result = parse_geometry_type_params("geometry(Point,4326)");
-        assert!(result.is_some());
-        let (geom_type, srid) = result.unwrap();
-        assert_eq!(geom_type, "point");
-        assert_eq!(srid, 4326);
-
-        // Type only, no SRID
-        let result = parse_geometry_type_params("geometry(Polygon)");
-        assert!(result.is_some());
-        let (geom_type, srid) = result.unwrap();
-        assert_eq!(geom_type, "polygon");
-        assert_eq!(srid, 0);
-
-        // Geography type
-        let result = parse_geometry_type_params("geography(MultiPolygon,3857)");
-        assert!(result.is_some());
-        let (geom_type, srid) = result.unwrap();
-        assert_eq!(geom_type, "multipolygon");
-        assert_eq!(srid, 3857);
-
-        // No parameters - returns None
-        assert!(parse_geometry_type_params("geometry").is_none());
-        assert!(parse_geometry_type_params("text").is_none());
     }
 
     // =========================================================================
