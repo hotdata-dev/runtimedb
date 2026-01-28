@@ -17,8 +17,8 @@ pub struct BatchWriteResult {
 /// A trait for writing Arrow RecordBatches to storage.
 ///
 /// Implementors must follow this lifecycle:
-/// 1. `init(schema)` - Initialize with the Arrow schema (must be called first)
-/// 2. Optionally call `set_geometry_columns()` to enable GeoParquet metadata
+/// 1. Optionally call `set_geometry_columns()` to enable GeoParquet metadata
+/// 2. `init(schema)` - Initialize with the Arrow schema
 /// 3. `write_batch(batch)` - Write batches (can be called zero or more times)
 /// 4. `close()` - Finalize and return metadata (consumes the writer)
 ///
