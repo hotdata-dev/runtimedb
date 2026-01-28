@@ -4,7 +4,7 @@ use crate::catalog::{
     SavedQuery, SavedQueryVersion, SqliteCatalogManager, TableInfo,
 };
 use crate::datafetch::native::StreamingParquetWriter;
-use crate::datafetch::{BatchWriter, FetchOrchestrator, NativeFetcher};
+use crate::datafetch::{BatchWriter, FetchOrchestrator, GeometryColumnInfo, NativeFetcher};
 use crate::datafusion::UnifiedCatalogList;
 use crate::http::models::{
     ConnectionRefreshResult, ConnectionSchemaError, RefreshWarning, SchemaRefreshResult,
@@ -173,6 +173,94 @@ pub struct RuntimeEngine {
     persistence_tasks: Mutex<JoinSet<()>>,
     /// Handle for the stale result cleanup worker task.
     stale_result_cleanup_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+/// Build a reader-compatible schema where geometry (Binary) columns are replaced with Utf8.
+///
+/// Arrow's CSV/JSON readers don't support `DataType::Binary` directly, so geometry
+/// columns must be read as strings first, then hex-decoded to binary afterwards.
+fn build_reader_schema(
+    schema: &Schema,
+    geometry_columns: &HashMap<String, GeometryColumnInfo>,
+) -> Arc<Schema> {
+    use datafusion::arrow::datatypes::{DataType, Field};
+
+    if geometry_columns.is_empty() {
+        return Arc::new(schema.clone());
+    }
+
+    let fields: Vec<Field> = schema
+        .fields()
+        .iter()
+        .map(|f| {
+            if geometry_columns.contains_key(f.name()) {
+                Field::new(f.name(), DataType::Utf8, f.is_nullable())
+            } else {
+                f.as_ref().clone()
+            }
+        })
+        .collect();
+
+    Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
+}
+
+/// Hex-decode geometry columns in a RecordBatch.
+///
+/// When CSV/JSON data contains geometry values as hex-encoded WKB strings,
+/// the reader stores them as Utf8 strings. This function converts those hex
+/// strings into actual WKB binary bytes that spatial functions can process,
+/// and rebuilds the batch with the target schema (Binary columns).
+fn hex_decode_geometry_columns(
+    batch: &RecordBatch,
+    target_schema: &Arc<Schema>,
+    geometry_columns: &HashMap<String, GeometryColumnInfo>,
+) -> Result<RecordBatch> {
+    use datafusion::arrow::array::{BinaryArray, StringArray};
+
+    if geometry_columns.is_empty() {
+        return Ok(batch.clone());
+    }
+
+    let mut columns: Vec<Arc<dyn datafusion::arrow::array::Array>> =
+        Vec::with_capacity(batch.num_columns());
+
+    for (i, field) in batch.schema().fields().iter().enumerate() {
+        if geometry_columns.contains_key(field.name()) {
+            // This column is a geometry column read as Utf8 - hex-decode to Binary
+            let col = batch.column(i);
+            let string_array = col.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Geometry column '{}' expected Utf8 type, got {:?}",
+                    field.name(),
+                    col.data_type()
+                )
+            })?;
+
+            let decoded: Vec<Option<Vec<u8>>> = string_array
+                .iter()
+                .map(|opt_val| {
+                    opt_val
+                        .map(|hex_str| {
+                            hex::decode(hex_str).map_err(|e| {
+                                anyhow::anyhow!(
+                                    "Geometry column '{}' contains invalid hex: {}",
+                                    field.name(),
+                                    e
+                                )
+                            })
+                        })
+                        .transpose()
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            let decoded_refs: Vec<Option<&[u8]>> = decoded.iter().map(|v| v.as_deref()).collect();
+            columns.push(Arc::new(BinaryArray::from(decoded_refs)));
+        } else {
+            columns.push(batch.column(i).clone());
+        }
+    }
+
+    Ok(RecordBatch::try_new(target_schema.clone(), columns)?)
 }
 
 impl RuntimeEngine {
@@ -1962,18 +2050,20 @@ impl RuntimeEngine {
                             (Arc::new(schema), std::collections::HashMap::new())
                         };
 
+                        // Build reader schema (geometry columns as Utf8 for CSV parsing)
+                        let reader_schema = build_reader_schema(&schema, &geometry_columns);
+
                         // Reopen file for streaming read
                         let file = release_on_parse_error!(File::open(&path));
-                        let csv_reader =
-                            release_on_parse_error!(ReaderBuilder::new(schema.clone())
-                                .with_header(true)
-                                .with_batch_size(8192)
-                                .build(BufReader::new(file)));
+                        let csv_reader = release_on_parse_error!(ReaderBuilder::new(reader_schema)
+                            .with_header(true)
+                            .with_batch_size(8192)
+                            .build(BufReader::new(file)));
 
-                        // Initialize writer with schema and geometry metadata
+                        // Initialize writer with target schema and geometry metadata
                         let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
                         if !geometry_columns.is_empty() {
-                            writer.set_geometry_columns(geometry_columns);
+                            writer.set_geometry_columns(geometry_columns.clone());
                         }
                         release_on_storage_error!(writer.init(&schema));
 
@@ -1981,6 +2071,12 @@ impl RuntimeEngine {
                         let mut row_count = 0usize;
                         for batch_result in csv_reader {
                             let batch = release_on_parse_error!(batch_result);
+                            // Hex-decode geometry columns from CSV text to WKB binary
+                            let batch = release_on_parse_error!(hex_decode_geometry_columns(
+                                &batch,
+                                &schema,
+                                &geometry_columns
+                            ));
                             row_count += batch.num_rows();
                             release_on_storage_error!(writer.write_batch(&batch));
                         }
@@ -2015,23 +2111,31 @@ impl RuntimeEngine {
                             (Arc::new(schema), std::collections::HashMap::new())
                         };
 
+                        // Build reader schema (geometry columns as Utf8 for CSV parsing)
+                        let reader_schema = build_reader_schema(&schema, &geometry_columns);
+
                         // Reset cursor for reading
                         let cursor = std::io::Cursor::new(&data);
-                        let csv_reader =
-                            release_on_parse_error!(ReaderBuilder::new(schema.clone())
-                                .with_header(true)
-                                .with_batch_size(8192)
-                                .build(cursor));
+                        let csv_reader = release_on_parse_error!(ReaderBuilder::new(reader_schema)
+                            .with_header(true)
+                            .with_batch_size(8192)
+                            .build(cursor));
 
                         let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
                         if !geometry_columns.is_empty() {
-                            writer.set_geometry_columns(geometry_columns);
+                            writer.set_geometry_columns(geometry_columns.clone());
                         }
                         release_on_storage_error!(writer.init(&schema));
 
                         let mut row_count = 0usize;
                         for batch_result in csv_reader {
                             let batch = release_on_parse_error!(batch_result);
+                            // Hex-decode geometry columns from CSV text to WKB binary
+                            let batch = release_on_parse_error!(hex_decode_geometry_columns(
+                                &batch,
+                                &schema,
+                                &geometry_columns
+                            ));
                             row_count += batch.num_rows();
                             release_on_storage_error!(writer.write_batch(&batch));
                         }
@@ -2073,22 +2177,31 @@ impl RuntimeEngine {
                             (Arc::new(inferred_schema), std::collections::HashMap::new())
                         };
 
+                        // Build reader schema (geometry columns as Utf8 for JSON parsing)
+                        let reader_schema = build_reader_schema(&schema, &geometry_columns);
+
                         // Open file for streaming read
                         let file = release_on_parse_error!(File::open(&path));
                         let json_reader =
-                            release_on_parse_error!(arrow_json::ReaderBuilder::new(schema.clone())
+                            release_on_parse_error!(arrow_json::ReaderBuilder::new(reader_schema)
                                 .with_batch_size(8192)
                                 .build(BufReader::new(file)));
 
                         let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
                         if !geometry_columns.is_empty() {
-                            writer.set_geometry_columns(geometry_columns);
+                            writer.set_geometry_columns(geometry_columns.clone());
                         }
                         release_on_storage_error!(writer.init(&schema));
 
                         let mut row_count = 0usize;
                         for batch_result in json_reader {
                             let batch = release_on_parse_error!(batch_result);
+                            // Hex-decode geometry columns from JSON text to WKB binary
+                            let batch = release_on_parse_error!(hex_decode_geometry_columns(
+                                &batch,
+                                &schema,
+                                &geometry_columns
+                            ));
                             row_count += batch.num_rows();
                             release_on_storage_error!(writer.write_batch(&batch));
                         }
@@ -2123,22 +2236,31 @@ impl RuntimeEngine {
                             (Arc::new(inferred_schema), std::collections::HashMap::new())
                         };
 
+                        // Build reader schema (geometry columns as Utf8 for JSON parsing)
+                        let reader_schema = build_reader_schema(&schema, &geometry_columns);
+
                         // Open cursor for reading
                         let cursor = std::io::Cursor::new(&data);
                         let json_reader =
-                            release_on_parse_error!(arrow_json::ReaderBuilder::new(schema.clone())
+                            release_on_parse_error!(arrow_json::ReaderBuilder::new(reader_schema)
                                 .with_batch_size(8192)
                                 .build(cursor));
 
                         let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
                         if !geometry_columns.is_empty() {
-                            writer.set_geometry_columns(geometry_columns);
+                            writer.set_geometry_columns(geometry_columns.clone());
                         }
                         release_on_storage_error!(writer.init(&schema));
 
                         let mut row_count = 0usize;
                         for batch_result in json_reader {
                             let batch = release_on_parse_error!(batch_result);
+                            // Hex-decode geometry columns from JSON text to WKB binary
+                            let batch = release_on_parse_error!(hex_decode_geometry_columns(
+                                &batch,
+                                &schema,
+                                &geometry_columns
+                            ));
                             row_count += batch.num_rows();
                             release_on_storage_error!(writer.write_batch(&batch));
                         }

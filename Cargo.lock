@@ -6706,6 +6706,7 @@ dependencies = [
  "gcp-bigquery-client",
  "geodatafusion",
  "geozero",
+ "hex",
  "http 1.4.0",
  "iceberg",
  "iceberg-catalog-glue",
