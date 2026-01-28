@@ -5,6 +5,7 @@
 
 use duckdb::Connection;
 use std::collections::HashMap;
+use tracing::debug;
 use urlencoding::encode;
 
 use crate::datafetch::batch_writer::BatchWriter;
@@ -80,7 +81,9 @@ fn discover_tables_sync(
         .map_err(|e| DataFetchError::Connection(e.to_string()))?;
 
     // Load spatial extension if available — needed for spatial type detection
-    let _ = conn.execute_batch("LOAD spatial;");
+    if let Err(e) = conn.execute_batch("LOAD spatial;") {
+        debug!("DuckDB spatial extension not available: {}", e);
+    }
 
     let query = r#"
         SELECT
@@ -240,7 +243,9 @@ fn fetch_table_to_channel(
         .map_err(|e| DataFetchError::Connection(e.to_string()))?;
 
     // Load spatial extension if available — needed for ST_AsBinary() wrapping
-    let _ = conn.execute_batch("LOAD spatial;");
+    if let Err(e) = conn.execute_batch("LOAD spatial;") {
+        debug!("DuckDB spatial extension not available: {}", e);
+    }
 
     // Query column types to detect spatial columns for ST_AsBinary wrapping
     let query = build_fetch_query(&conn, schema, table)?;
