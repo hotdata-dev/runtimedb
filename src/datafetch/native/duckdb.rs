@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use urlencoding::encode;
 
 use crate::datafetch::batch_writer::BatchWriter;
+use crate::datafetch::types::GeometryColumnInfo;
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::secrets::SecretManager;
 use crate::source::Source;
@@ -123,8 +124,10 @@ fn discover_tables_sync(
         let (catalog, schema, table, table_type, col_name, data_type, is_nullable, ordinal) =
             row_result.map_err(|e| DataFetchError::Discovery(e.to_string()))?;
 
+        let is_spatial = is_spatial_type(&data_type);
+
         let column = ColumnMetadata {
-            name: col_name,
+            name: col_name.clone(),
             data_type: duckdb_type_to_arrow(&data_type),
             nullable: is_nullable.eq_ignore_ascii_case("YES"),
             ordinal_position: ordinal,
@@ -132,7 +135,7 @@ fn discover_tables_sync(
 
         let key = (catalog.clone(), schema.clone(), table.clone());
 
-        table_map
+        let table_meta = table_map
             .entry(key)
             .and_modify(|t| t.columns.push(column.clone()))
             .or_insert_with(|| TableMetadata {
@@ -143,6 +146,11 @@ fn discover_tables_sync(
                 columns: vec![column],
                 geometry_columns: std::collections::HashMap::new(),
             });
+
+        if is_spatial {
+            let geo_info = parse_duckdb_geometry_info(&data_type);
+            table_meta.geometry_columns.insert(col_name, geo_info);
+        }
     }
 
     let tables: Vec<TableMetadata> = table_map.into_values().collect();
@@ -228,11 +236,8 @@ fn fetch_table_to_channel(
     let conn = Connection::open(connection_string)
         .map_err(|e| DataFetchError::Connection(e.to_string()))?;
 
-    let query = format!(
-        "SELECT * FROM \"{}\".\"{}\"",
-        schema.replace('"', "\"\""),
-        table.replace('"', "\"\"")
-    );
+    // Query column types to detect spatial columns for ST_AsBinary wrapping
+    let query = build_fetch_query(&conn, schema, table)?;
 
     let mut stmt = conn
         .prepare(&query)
@@ -264,6 +269,89 @@ fn fetch_table_to_channel(
     }
 
     Ok(())
+}
+
+/// Build a SELECT query for fetching table data, wrapping spatial columns with ST_AsBinary().
+///
+/// DuckDB's Spatial extension stores geometry in an internal format. ST_AsBinary() converts
+/// it to standard WKB, matching the approach used by the PostgreSQL and MySQL adapters.
+fn build_fetch_query(
+    conn: &Connection,
+    schema: &str,
+    table: &str,
+) -> Result<String, DataFetchError> {
+    let escaped_schema = schema.replace('"', "\"\"");
+    let escaped_table = table.replace('"', "\"\"");
+
+    // Query column types to detect spatial columns
+    let col_query = format!(
+        "SELECT column_name, data_type FROM information_schema.columns \
+         WHERE table_schema = '{}' AND table_name = '{}' ORDER BY ordinal_position",
+        schema.replace('\'', "''"),
+        table.replace('\'', "''")
+    );
+
+    let mut stmt = conn
+        .prepare(&col_query)
+        .map_err(|e| DataFetchError::Discovery(e.to_string()))?;
+
+    let col_rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| DataFetchError::Discovery(e.to_string()))?;
+
+    let mut has_spatial = false;
+    let mut column_exprs = Vec::new();
+
+    for row_result in col_rows {
+        let (col_name, data_type) =
+            row_result.map_err(|e| DataFetchError::Discovery(e.to_string()))?;
+        let escaped_col = format!("\"{}\"", col_name.replace('"', "\"\""));
+
+        if is_spatial_type(&data_type) {
+            has_spatial = true;
+            column_exprs.push(format!("ST_AsBinary({}) AS {}", escaped_col, escaped_col));
+        } else {
+            column_exprs.push(escaped_col);
+        }
+    }
+
+    if has_spatial {
+        Ok(format!(
+            "SELECT {} FROM \"{}\".\"{}\"",
+            column_exprs.join(", "),
+            escaped_schema,
+            escaped_table
+        ))
+    } else {
+        Ok(format!(
+            "SELECT * FROM \"{}\".\"{}\"",
+            escaped_schema, escaped_table
+        ))
+    }
+}
+
+/// Parse DuckDB spatial type into GeometryColumnInfo.
+///
+/// DuckDB spatial types (GEOMETRY, POINT_2D, etc.) don't carry SRID information
+/// in the type system, so we default to SRID 0 (unspecified) and map the type name.
+fn parse_duckdb_geometry_info(data_type: &str) -> GeometryColumnInfo {
+    let type_upper = data_type.to_uppercase();
+    let base_type = type_upper.split('(').next().unwrap_or(&type_upper).trim();
+
+    let geometry_type = match base_type {
+        "POINT_2D" => Some("Point".to_string()),
+        "LINESTRING_2D" => Some("LineString".to_string()),
+        "POLYGON_2D" => Some("Polygon".to_string()),
+        "BOX_2D" => Some("Polygon".to_string()), // Box is a rectangular polygon
+        _ => None,                               // GEOMETRY, WKB_BLOB: unknown sub-type
+    };
+
+    GeometryColumnInfo {
+        srid: 0, // DuckDB spatial doesn't expose SRID in column type
+        geometry_type,
+    }
 }
 
 /// Convert an arrow 56 Schema (from duckdb) to datafusion arrow Schema (arrow 57)
@@ -675,5 +763,131 @@ mod tests {
             DataType::Decimal128(_, _) => {}
             other => panic!("Expected Decimal128, got {:?}", other),
         }
+    }
+
+    // =========================================================================
+    // Spatial types
+    // =========================================================================
+
+    #[test]
+    fn test_duckdb_spatial_types_map_to_binary() {
+        assert!(matches!(duckdb_type_to_arrow("GEOMETRY"), DataType::Binary));
+        assert!(matches!(duckdb_type_to_arrow("POINT_2D"), DataType::Binary));
+        assert!(matches!(
+            duckdb_type_to_arrow("LINESTRING_2D"),
+            DataType::Binary
+        ));
+        assert!(matches!(
+            duckdb_type_to_arrow("POLYGON_2D"),
+            DataType::Binary
+        ));
+        assert!(matches!(duckdb_type_to_arrow("BOX_2D"), DataType::Binary));
+        assert!(matches!(duckdb_type_to_arrow("WKB_BLOB"), DataType::Binary));
+    }
+
+    #[test]
+    fn test_is_spatial_type() {
+        assert!(is_spatial_type("GEOMETRY"));
+        assert!(is_spatial_type("POINT_2D"));
+        assert!(is_spatial_type("LINESTRING_2D"));
+        assert!(is_spatial_type("POLYGON_2D"));
+        assert!(is_spatial_type("BOX_2D"));
+        assert!(is_spatial_type("WKB_BLOB"));
+        // Case insensitive
+        assert!(is_spatial_type("geometry"));
+        assert!(is_spatial_type("point_2d"));
+
+        // Non-spatial types
+        assert!(!is_spatial_type("INTEGER"));
+        assert!(!is_spatial_type("VARCHAR"));
+        assert!(!is_spatial_type("BLOB"));
+        assert!(!is_spatial_type("BINARY"));
+    }
+
+    #[test]
+    fn test_parse_duckdb_geometry_info_generic() {
+        let info = parse_duckdb_geometry_info("GEOMETRY");
+        assert_eq!(info.srid, 0); // DuckDB doesn't expose SRID
+        assert!(info.geometry_type.is_none());
+    }
+
+    #[test]
+    fn test_parse_duckdb_geometry_info_typed() {
+        let info = parse_duckdb_geometry_info("POINT_2D");
+        assert_eq!(info.srid, 0);
+        assert_eq!(info.geometry_type, Some("Point".to_string()));
+
+        let info = parse_duckdb_geometry_info("LINESTRING_2D");
+        assert_eq!(info.geometry_type, Some("LineString".to_string()));
+
+        let info = parse_duckdb_geometry_info("POLYGON_2D");
+        assert_eq!(info.geometry_type, Some("Polygon".to_string()));
+
+        let info = parse_duckdb_geometry_info("BOX_2D");
+        assert_eq!(info.geometry_type, Some("Polygon".to_string()));
+    }
+
+    #[test]
+    fn test_parse_duckdb_geometry_info_case_insensitive() {
+        let info = parse_duckdb_geometry_info("point_2d");
+        assert_eq!(info.geometry_type, Some("Point".to_string()));
+    }
+
+    #[test]
+    fn test_parse_duckdb_geometry_info_wkb_blob() {
+        let info = parse_duckdb_geometry_info("WKB_BLOB");
+        assert_eq!(info.srid, 0);
+        assert!(info.geometry_type.is_none()); // WKB_BLOB is opaque
+    }
+
+    #[test]
+    fn test_build_fetch_query_no_spatial() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE SCHEMA test_schema; \
+             CREATE TABLE test_schema.test_table (id INTEGER, name VARCHAR);",
+        )
+        .unwrap();
+
+        let query = build_fetch_query(&conn, "test_schema", "test_table").unwrap();
+        // No spatial columns, should be a plain SELECT *
+        assert_eq!(query, "SELECT * FROM \"test_schema\".\"test_table\"");
+    }
+
+    #[test]
+    fn test_build_fetch_query_with_spatial() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Load spatial extension and create table with geometry column
+        let has_spatial = conn.execute_batch("INSTALL spatial; LOAD spatial;").is_ok();
+
+        if !has_spatial {
+            // Skip test if spatial extension not available
+            return;
+        }
+
+        conn.execute_batch(
+            "CREATE SCHEMA geo_schema; \
+             CREATE TABLE geo_schema.geo_table (id INTEGER, geom GEOMETRY, name VARCHAR);",
+        )
+        .unwrap();
+
+        let query = build_fetch_query(&conn, "geo_schema", "geo_table").unwrap();
+        // Spatial column should be wrapped with ST_AsBinary
+        assert!(
+            query.contains("ST_AsBinary(\"geom\") AS \"geom\""),
+            "Expected ST_AsBinary wrapping, got: {}",
+            query
+        );
+        // Non-spatial columns should be plain
+        assert!(
+            query.contains("\"id\""),
+            "Expected plain id column, got: {}",
+            query
+        );
+        assert!(
+            query.contains("\"name\""),
+            "Expected plain name column, got: {}",
+            query
+        );
     }
 }
