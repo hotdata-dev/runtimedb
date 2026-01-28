@@ -85,6 +85,25 @@ pub fn extract_geometry_columns(schema: &Schema) -> HashMap<String, GeometryColu
         .unwrap_or_default()
 }
 
+/// Normalize geometry type names to GeoParquet standard capitalization.
+///
+/// Converts case-insensitive input ("polygon", "MULTIPOINT") to the standard
+/// mixed-case form ("Polygon", "MultiPoint"). Unknown types are passed through as-is.
+pub fn normalize_geometry_type(geom_type: &str) -> String {
+    match geom_type.to_uppercase().as_str() {
+        "POINT" => "Point",
+        "LINESTRING" => "LineString",
+        "POLYGON" => "Polygon",
+        "MULTIPOINT" => "MultiPoint",
+        "MULTILINESTRING" => "MultiLineString",
+        "MULTIPOLYGON" => "MultiPolygon",
+        "GEOMETRYCOLLECTION" => "GeometryCollection",
+        "GEOMETRY" => "Geometry",
+        _ => geom_type,
+    }
+    .to_string()
+}
+
 /// Deserialize an Arrow Schema from JSON string
 pub fn deserialize_arrow_schema(json: &str) -> Result<Arc<Schema>> {
     let schema: Schema = serde_json::from_str(json)?;

@@ -181,21 +181,7 @@ pub fn parse_geoparquet_metadata(geo_json: &str) -> HashMap<String, GeometryColu
         .collect()
 }
 
-/// Normalize geometry type names to GeoParquet standard format
-fn normalize_geometry_type(geom_type: &str) -> String {
-    match geom_type.to_uppercase().as_str() {
-        "POINT" => "Point",
-        "LINESTRING" => "LineString",
-        "POLYGON" => "Polygon",
-        "MULTIPOINT" => "MultiPoint",
-        "MULTILINESTRING" => "MultiLineString",
-        "MULTIPOLYGON" => "MultiPolygon",
-        "GEOMETRYCOLLECTION" => "GeometryCollection",
-        "GEOMETRY" => "Geometry",
-        _ => geom_type,
-    }
-    .to_string()
-}
+use super::super::types::normalize_geometry_type;
 
 impl BatchWriter for StreamingParquetWriter {
     fn set_geometry_columns(&mut self, columns: HashMap<String, GeometryColumnInfo>) {
