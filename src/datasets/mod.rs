@@ -1,9 +1,14 @@
 //! Dataset management and utilities.
 
 pub mod error;
+pub mod schema;
 pub mod validation;
 
 pub use error::DatasetError;
+pub use schema::{
+    build_schema_from_columns, build_schema_from_columns_for_json,
+    build_schema_from_columns_unchecked, parse_column_type, ColumnTypeError, SchemaError,
+};
 pub use validation::*;
 
 /// The default schema name for datasets.

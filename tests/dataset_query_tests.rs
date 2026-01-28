@@ -53,6 +53,7 @@ async fn test_query_dataset_after_inline_creation() {
             DatasetSource::Inline {
                 inline: InlineData {
                     format: "csv".to_string(),
+                    columns: None,
                     content: "id,value\n1,one\n2,two\n3,three".to_string(),
                 },
             },
@@ -85,6 +86,7 @@ async fn test_query_dataset_with_aggregation() {
             DatasetSource::Inline {
                 inline: InlineData {
                     format: "csv".to_string(),
+                    columns: None,
                     content: "product,amount\napple,10\nbanana,20\napple,30\nbanana,40".to_string(),
                 },
             },
@@ -155,6 +157,7 @@ async fn test_query_multiple_datasets() {
             DatasetSource::Inline {
                 inline: InlineData {
                     format: "csv".to_string(),
+                    columns: None,
                     content: "id,name\n1,Alice\n2,Bob".to_string(),
                 },
             },
@@ -170,6 +173,7 @@ async fn test_query_multiple_datasets() {
             DatasetSource::Inline {
                 inline: InlineData {
                     format: "csv".to_string(),
+                    columns: None,
                     content: "id,user_id,amount\n100,1,50\n101,2,75\n102,1,25".to_string(),
                 },
             },
@@ -219,6 +223,7 @@ async fn test_dataset_columns_queryable() {
             DatasetSource::Inline {
                 inline: InlineData {
                     format: "csv".to_string(),
+                    columns: None,
                     content: "col1,col2\na,1\nb,2".to_string(),
                 },
             },
@@ -268,6 +273,7 @@ async fn test_query_dataset_with_json_data() {
 {"id": 2, "name": "beta"}
 {"id": 3, "name": "gamma"}"#
                         .to_string(),
+                    columns: None,
                 },
             },
         )

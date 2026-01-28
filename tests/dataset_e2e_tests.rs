@@ -7,11 +7,13 @@
 //! 4. Verify catalog state changes (upload consumed, dataset listed)
 //! 5. Test update and delete effects on queries
 
+use std::collections::HashMap;
+
 use datafusion::arrow::array::{Array, Float64Array, Int64Array, StringArray};
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::DataType;
 use runtimedb::datasets::DEFAULT_SCHEMA;
-use runtimedb::http::models::{DatasetSource, InlineData};
+use runtimedb::http::models::{ColumnDefinition, ColumnTypeSpec, DatasetSource, InlineData};
 use runtimedb::RuntimeEngine;
 use tempfile::TempDir;
 
@@ -94,6 +96,7 @@ async fn test_full_upload_to_query_flow() {
             DatasetSource::Upload {
                 upload_id: upload.id.clone(),
                 format: Some("csv".to_string()),
+                columns: None,
             },
         )
         .await
@@ -167,6 +170,7 @@ async fn test_json_upload_and_query() {
             DatasetSource::Upload {
                 upload_id: upload.id,
                 format: Some("json".to_string()),
+                columns: None,
             },
         )
         .await
@@ -206,6 +210,7 @@ async fn test_inline_creation_and_query() {
                     format: "csv".to_string(),
                     content: "region,amount\nNorth,1000\nSouth,1500\nEast,800\nWest,1200"
                         .to_string(),
+                    columns: None,
                 },
             },
         )
@@ -253,6 +258,7 @@ async fn test_inline_json_creation() {
 {"metric": "memory", "value": 82.3}
 {"metric": "disk", "value": 45.0}"#
                         .to_string(),
+                    columns: None,
                 },
             },
         )
@@ -292,6 +298,7 @@ async fn test_dataset_update_affects_queries() {
                 inline: InlineData {
                     format: "csv".to_string(),
                     content: "id,value\n1,100\n2,200".to_string(),
+                    columns: None,
                 },
             },
         )
@@ -344,6 +351,7 @@ async fn test_dataset_deletion_removes_from_catalog() {
                 inline: InlineData {
                     format: "csv".to_string(),
                     content: "col1,col2\na,1\nb,2".to_string(),
+                    columns: None,
                 },
             },
         )
@@ -406,6 +414,7 @@ async fn test_cannot_consume_upload_twice() {
             DatasetSource::Upload {
                 upload_id: upload.id.clone(),
                 format: Some("csv".to_string()),
+                columns: None,
             },
         )
         .await
@@ -419,6 +428,7 @@ async fn test_cannot_consume_upload_twice() {
             DatasetSource::Upload {
                 upload_id: upload.id.clone(),
                 format: Some("csv".to_string()),
+                columns: None,
             },
         )
         .await;
@@ -445,6 +455,7 @@ async fn test_table_name_uniqueness() {
                 inline: InlineData {
                     format: "csv".to_string(),
                     content: "a,b\n1,2".to_string(),
+                    columns: None,
                 },
             },
         )
@@ -460,6 +471,7 @@ async fn test_table_name_uniqueness() {
                 inline: InlineData {
                     format: "csv".to_string(),
                     content: "c,d\n3,4".to_string(),
+                    columns: None,
                 },
             },
         )
@@ -487,6 +499,7 @@ async fn test_auto_generated_table_name() {
                 inline: InlineData {
                     format: "csv".to_string(),
                     content: "month,revenue\nJan,1000\nFeb,1200".to_string(),
+                    columns: None,
                 },
             },
         )
@@ -526,6 +539,7 @@ async fn test_reserved_word_label_rejected() {
                     inline: InlineData {
                         format: "csv".to_string(),
                         content: "a,b\n1,2".to_string(),
+                        columns: None,
                     },
                 },
             )
@@ -559,6 +573,7 @@ async fn test_multiple_datasets_join() {
                 inline: InlineData {
                     format: "csv".to_string(),
                     content: "customer_id,name\n1,Alice\n2,Bob\n3,Charlie".to_string(),
+                    columns: None,
                 },
             },
         )
@@ -575,6 +590,7 @@ async fn test_multiple_datasets_join() {
                     format: "csv".to_string(),
                     content: "order_id,customer_id,amount\n100,1,50\n101,1,75\n102,2,100"
                         .to_string(),
+                    columns: None,
                 },
             },
         )
@@ -627,6 +643,7 @@ async fn test_upload_format_auto_detection_csv() {
             DatasetSource::Upload {
                 upload_id: upload.id,
                 format: None, // auto-detect
+                columns: None,
             },
         )
         .await
@@ -662,6 +679,7 @@ async fn test_upload_format_auto_detection_json() {
             DatasetSource::Upload {
                 upload_id: upload.id,
                 format: None, // auto-detect
+                columns: None,
             },
         )
         .await
@@ -690,6 +708,7 @@ async fn test_nonexistent_upload_fails() {
             DatasetSource::Upload {
                 upload_id: "upld_nonexistent_12345".to_string(),
                 format: Some("csv".to_string()),
+                columns: None,
             },
         )
         .await;
@@ -716,6 +735,7 @@ async fn test_empty_data_fails() {
                 inline: InlineData {
                     format: "csv".to_string(),
                     content: "col1,col2".to_string(), // header only, no data rows
+                    columns: None,
                 },
             },
         )
@@ -747,6 +767,7 @@ async fn test_format_case_insensitive_csv() {
                 inline: InlineData {
                     format: "CSV".to_string(), // uppercase
                     content: "a,b\n1,2".to_string(),
+                    columns: None,
                 },
             },
         )
@@ -777,6 +798,7 @@ async fn test_format_case_insensitive_json() {
                 inline: InlineData {
                     format: "Json".to_string(), // mixed case
                     content: r#"{"x": 1}"#.to_string(),
+                    columns: None,
                 },
             },
         )
@@ -833,6 +855,7 @@ async fn test_format_case_insensitive_parquet_upload() {
             DatasetSource::Upload {
                 upload_id: upload.id,
                 format: Some("PARQUET".to_string()), // uppercase
+                columns: None,
             },
         )
         .await
@@ -865,6 +888,7 @@ async fn test_empty_label_rejected() {
                 inline: InlineData {
                     format: "csv".to_string(),
                     content: "a,b\n1,2".to_string(),
+                    columns: None,
                 },
             },
         )
@@ -891,6 +915,7 @@ async fn test_whitespace_only_label_rejected() {
                 inline: InlineData {
                     format: "csv".to_string(),
                     content: "a,b\n1,2".to_string(),
+                    columns: None,
                 },
             },
         )
@@ -918,6 +943,7 @@ async fn test_update_with_empty_label_rejected() {
                 inline: InlineData {
                     format: "csv".to_string(),
                     content: "a,b\n1,2".to_string(),
+                    columns: None,
                 },
             },
         )
@@ -948,6 +974,7 @@ async fn test_update_with_whitespace_label_rejected() {
                 inline: InlineData {
                     format: "csv".to_string(),
                     content: "a,b\n1,2".to_string(),
+                    columns: None,
                 },
             },
         )
@@ -994,6 +1021,7 @@ async fn test_concurrent_create_same_table_name() {
                     inline: InlineData {
                         format: "csv".to_string(),
                         content: "x,y\n1,2".to_string(),
+                        columns: None,
                     },
                 },
             )
@@ -1012,6 +1040,7 @@ async fn test_concurrent_create_same_table_name() {
                     inline: InlineData {
                         format: "csv".to_string(),
                         content: "a,b\n3,4".to_string(),
+                        columns: None,
                     },
                 },
             )
@@ -1055,6 +1084,7 @@ async fn test_concurrent_update_to_same_table_name() {
                 inline: InlineData {
                     format: "csv".to_string(),
                     content: "x\n1".to_string(),
+                    columns: None,
                 },
             },
         )
@@ -1069,6 +1099,7 @@ async fn test_concurrent_update_to_same_table_name() {
                 inline: InlineData {
                     format: "csv".to_string(),
                     content: "y\n2".to_string(),
+                    columns: None,
                 },
             },
         )
@@ -1146,6 +1177,7 @@ async fn test_corrupted_schema_falls_back_to_parquet_inference() {
                 inline: InlineData {
                     format: "csv".to_string(),
                     content: csv_data.to_string(),
+                    columns: None,
                 },
             },
         )
@@ -1232,6 +1264,7 @@ this is not valid json
             DatasetSource::Upload {
                 upload_id: upload.id.clone(),
                 format: Some("json".to_string()),
+                columns: None,
             },
         )
         .await;
@@ -1289,6 +1322,7 @@ async fn test_temp_download_cleanup_on_success() {
             DatasetSource::Upload {
                 upload_id: upload.id.clone(),
                 format: None,
+                columns: None,
             },
         )
         .await
@@ -1379,6 +1413,7 @@ async fn test_unsupported_format_no_file_leak() {
             DatasetSource::Upload {
                 upload_id: upload.id.clone(),
                 format: Some("xml".to_string()), // Not supported
+                columns: None,
             },
         )
         .await;
@@ -1410,5 +1445,599 @@ async fn test_unsupported_format_no_file_leak() {
     assert_eq!(
         upload_after.unwrap().status,
         runtimedb::datasets::upload_status::PENDING
+    );
+}
+
+// ============================================================================
+// Explicit column definition tests
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_explicit_columns_csv_simple_types() {
+    let (engine, _temp) = create_test_engine().await;
+
+    let mut columns = std::collections::HashMap::new();
+    columns.insert(
+        "name".to_string(),
+        ColumnDefinition::Simple("VARCHAR".to_string()),
+    );
+    columns.insert(
+        "count".to_string(),
+        ColumnDefinition::Simple("BIGINT".to_string()),
+    );
+
+    let dataset = engine
+        .create_dataset(
+            "Explicit Types",
+            Some("explicit_types"),
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "csv".to_string(),
+                    content: "name,count\nAlice,100\nBob,200".to_string(),
+                    columns: Some(columns),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(dataset.table_name, "explicit_types");
+
+    // Query and verify types work correctly
+    let result = engine
+        .execute_query(&format!(
+            "SELECT name, count FROM datasets.{}.explicit_types ORDER BY count",
+            DEFAULT_SCHEMA
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(result.results[0].num_rows(), 2);
+    let batch = &result.results[0];
+
+    // Verify count is Int64 (BIGINT)
+    let count_col = batch.column_by_name("count").unwrap();
+    assert!(
+        matches!(count_col.data_type(), DataType::Int64),
+        "Expected Int64, got {:?}",
+        count_col.data_type()
+    );
+
+    assert_eq!(get_i64_value(count_col.as_ref(), 0), 100);
+    assert_eq!(get_i64_value(count_col.as_ref(), 1), 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_explicit_columns_csv_decimal() {
+    let (engine, _temp) = create_test_engine().await;
+
+    let mut columns = std::collections::HashMap::new();
+    columns.insert(
+        "item".to_string(),
+        ColumnDefinition::Simple("VARCHAR".to_string()),
+    );
+    columns.insert(
+        "price".to_string(),
+        ColumnDefinition::Detailed(ColumnTypeSpec {
+            data_type: "DECIMAL".to_string(),
+            precision: Some(10),
+            scale: Some(2),
+        }),
+    );
+
+    let dataset = engine
+        .create_dataset(
+            "Prices",
+            Some("prices"),
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "csv".to_string(),
+                    content: "item,price\nWidget,19.99\nGadget,29.50".to_string(),
+                    columns: Some(columns),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(dataset.table_name, "prices");
+
+    // Query and verify decimal type
+    let result = engine
+        .execute_query(&format!(
+            "SELECT item, price FROM datasets.{}.prices ORDER BY price",
+            DEFAULT_SCHEMA
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(result.results[0].num_rows(), 2);
+    let batch = &result.results[0];
+
+    // Verify price is Decimal128
+    let price_col = batch.column_by_name("price").unwrap();
+    assert!(
+        matches!(price_col.data_type(), DataType::Decimal128(10, 2)),
+        "Expected Decimal128(10, 2), got {:?}",
+        price_col.data_type()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_explicit_columns_json() {
+    let (engine, _temp) = create_test_engine().await;
+
+    let mut columns = std::collections::HashMap::new();
+    columns.insert(
+        "id".to_string(),
+        ColumnDefinition::Simple("INT".to_string()),
+    );
+    columns.insert(
+        "active".to_string(),
+        ColumnDefinition::Simple("BOOLEAN".to_string()),
+    );
+
+    let dataset = engine
+        .create_dataset(
+            "JSON Explicit",
+            Some("json_explicit"),
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "json".to_string(),
+                    content: r#"{"id": 1, "active": true}
+{"id": 2, "active": false}"#
+                        .to_string(),
+                    columns: Some(columns),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(dataset.table_name, "json_explicit");
+
+    let result = engine
+        .execute_query(&format!(
+            "SELECT id, active FROM datasets.{}.json_explicit ORDER BY id",
+            DEFAULT_SCHEMA
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(result.results[0].num_rows(), 2);
+    let batch = &result.results[0];
+
+    // Verify id is Int32
+    let id_col = batch.column_by_name("id").unwrap();
+    assert!(
+        matches!(id_col.data_type(), DataType::Int32),
+        "Expected Int32, got {:?}",
+        id_col.data_type()
+    );
+
+    // Verify active is Boolean
+    let active_col = batch.column_by_name("active").unwrap();
+    assert!(
+        matches!(active_col.data_type(), DataType::Boolean),
+        "Expected Boolean, got {:?}",
+        active_col.data_type()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_explicit_columns_error_column_not_defined() {
+    let (engine, _temp) = create_test_engine().await;
+
+    // Only define 'name', but data has 'name' and 'value'
+    let mut columns = std::collections::HashMap::new();
+    columns.insert(
+        "name".to_string(),
+        ColumnDefinition::Simple("VARCHAR".to_string()),
+    );
+
+    let result = engine
+        .create_dataset(
+            "Missing Column",
+            Some("missing_col"),
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "csv".to_string(),
+                    content: "name,value\nAlice,100".to_string(),
+                    columns: Some(columns),
+                },
+            },
+        )
+        .await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("value") && (err.contains("not defined") || err.contains("found in data")),
+        "Error should mention column 'value' not defined: {}",
+        err
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_explicit_columns_error_column_not_in_data() {
+    let (engine, _temp) = create_test_engine().await;
+
+    // Define 'name' and 'extra', but data only has 'name'
+    let mut columns = std::collections::HashMap::new();
+    columns.insert(
+        "name".to_string(),
+        ColumnDefinition::Simple("VARCHAR".to_string()),
+    );
+    columns.insert(
+        "extra".to_string(),
+        ColumnDefinition::Simple("INT".to_string()),
+    );
+
+    let result = engine
+        .create_dataset(
+            "Extra Column",
+            Some("extra_col"),
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "csv".to_string(),
+                    content: "name\nAlice".to_string(),
+                    columns: Some(columns),
+                },
+            },
+        )
+        .await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("extra")
+            && (err.contains("not found in data") || err.contains("defined but not")),
+        "Error should mention column 'extra' not in data: {}",
+        err
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_explicit_columns_error_unknown_type() {
+    let (engine, _temp) = create_test_engine().await;
+
+    let mut columns = std::collections::HashMap::new();
+    columns.insert(
+        "name".to_string(),
+        ColumnDefinition::Simple("FOOBAR".to_string()),
+    );
+
+    let result = engine
+        .create_dataset(
+            "Unknown Type",
+            Some("unknown_type"),
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "csv".to_string(),
+                    content: "name\nAlice".to_string(),
+                    columns: Some(columns),
+                },
+            },
+        )
+        .await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("FOOBAR") && err.contains("Unknown type"),
+        "Error should mention unknown type 'FOOBAR': {}",
+        err
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_explicit_columns_backward_compat_no_columns() {
+    let (engine, _temp) = create_test_engine().await;
+
+    // Create dataset without columns - should still work (inference)
+    let dataset = engine
+        .create_dataset(
+            "No Columns",
+            Some("no_columns"),
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "csv".to_string(),
+                    content: "name,value\nAlice,100".to_string(),
+                    columns: None, // No explicit columns
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(dataset.table_name, "no_columns");
+
+    // Query should work with inferred schema
+    let result = engine
+        .execute_query(&format!(
+            "SELECT * FROM datasets.{}.no_columns",
+            DEFAULT_SCHEMA
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(result.results[0].num_rows(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_explicit_columns_upload_csv() {
+    let (engine, _temp) = create_test_engine().await;
+
+    // Upload CSV data
+    let csv_data = b"product,quantity\nWidget,50\nGadget,25";
+    let upload = engine
+        .store_upload(csv_data.to_vec(), Some("text/csv".to_string()))
+        .await
+        .unwrap();
+
+    let mut columns = std::collections::HashMap::new();
+    columns.insert(
+        "product".to_string(),
+        ColumnDefinition::Simple("VARCHAR".to_string()),
+    );
+    columns.insert(
+        "quantity".to_string(),
+        ColumnDefinition::Simple("SMALLINT".to_string()),
+    );
+
+    let dataset = engine
+        .create_dataset(
+            "Upload Explicit",
+            Some("upload_explicit"),
+            DatasetSource::Upload {
+                upload_id: upload.id,
+                format: Some("csv".to_string()),
+                columns: Some(columns),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(dataset.table_name, "upload_explicit");
+
+    let result = engine
+        .execute_query(&format!(
+            "SELECT product, quantity FROM datasets.{}.upload_explicit ORDER BY quantity",
+            DEFAULT_SCHEMA
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(result.results[0].num_rows(), 2);
+    let batch = &result.results[0];
+
+    // Verify quantity is Int16 (SMALLINT)
+    let qty_col = batch.column_by_name("quantity").unwrap();
+    assert!(
+        matches!(qty_col.data_type(), DataType::Int16),
+        "Expected Int16, got {:?}",
+        qty_col.data_type()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_explicit_columns_case_insensitive_types() {
+    let (engine, _temp) = create_test_engine().await;
+
+    // Use mixed case type names
+    let mut columns = std::collections::HashMap::new();
+    columns.insert(
+        "name".to_string(),
+        ColumnDefinition::Simple("varChar".to_string()),
+    );
+    columns.insert(
+        "count".to_string(),
+        ColumnDefinition::Simple("integer".to_string()),
+    );
+
+    let dataset = engine
+        .create_dataset(
+            "Case Types",
+            Some("case_types"),
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "csv".to_string(),
+                    content: "name,count\nTest,42".to_string(),
+                    columns: Some(columns),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(dataset.table_name, "case_types");
+
+    let result = engine
+        .execute_query(&format!(
+            "SELECT * FROM datasets.{}.case_types",
+            DEFAULT_SCHEMA
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(result.results[0].num_rows(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_explicit_columns_json_sparse_fields() {
+    let (engine, _temp_dir) = create_test_engine().await;
+
+    // JSON with optional field that's present in some records but not others
+    let json_content = r#"{"name": "Alice", "age": 30}
+{"name": "Bob"}
+{"name": "Charlie", "age": 25}"#;
+
+    let mut columns = HashMap::new();
+    columns.insert(
+        "name".to_string(),
+        ColumnDefinition::Simple("VARCHAR".to_string()),
+    );
+    columns.insert(
+        "age".to_string(),
+        ColumnDefinition::Simple("INT".to_string()),
+    );
+
+    let dataset = engine
+        .create_dataset(
+            "sparse_json",
+            None,
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "json".to_string(),
+                    content: json_content.to_string(),
+                    columns: Some(columns),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(dataset.table_name, "sparsejson");
+
+    // Verify all 3 rows are present
+    let result = engine
+        .execute_query(&format!(
+            "SELECT name, age FROM datasets.{}.sparsejson ORDER BY name",
+            DEFAULT_SCHEMA
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(result.results[0].num_rows(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_explicit_columns_json_field_not_in_first_row() {
+    let (engine, _temp_dir) = create_test_engine().await;
+
+    // JSON where a field only appears in later records (not first row)
+    let json_content = r#"{"name": "Alice"}
+{"name": "Bob", "score": 100}
+{"name": "Charlie", "score": 95}"#;
+
+    let mut columns = HashMap::new();
+    columns.insert(
+        "name".to_string(),
+        ColumnDefinition::Simple("VARCHAR".to_string()),
+    );
+    columns.insert(
+        "score".to_string(),
+        ColumnDefinition::Simple("INT".to_string()),
+    );
+
+    let dataset = engine
+        .create_dataset(
+            "late_field_json",
+            None,
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "json".to_string(),
+                    content: json_content.to_string(),
+                    columns: Some(columns),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(dataset.table_name, "latefieldjson");
+
+    // Verify all 3 rows are present and score is correctly read
+    let result = engine
+        .execute_query(&format!(
+            "SELECT name, score FROM datasets.{}.latefieldjson ORDER BY name",
+            DEFAULT_SCHEMA
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(result.results[0].num_rows(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_explicit_columns_json_typo_rejected() {
+    let (engine, _temp_dir) = create_test_engine().await;
+
+    // JSON with "score" field, but columns define "scroe" (typo)
+    let json_content = r#"{"name": "Alice", "score": 100}
+{"name": "Bob", "score": 95}"#;
+
+    let mut columns = HashMap::new();
+    columns.insert(
+        "name".to_string(),
+        ColumnDefinition::Simple("VARCHAR".to_string()),
+    );
+    columns.insert(
+        "scroe".to_string(), // typo
+        ColumnDefinition::Simple("INT".to_string()),
+    );
+
+    let result = engine
+        .create_dataset(
+            "typo_test",
+            None,
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "json".to_string(),
+                    content: json_content.to_string(),
+                    columns: Some(columns),
+                },
+            },
+        )
+        .await;
+
+    // Should fail because "scroe" doesn't match any observed field
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("scroe") || err_msg.contains("not found"),
+        "Error should mention the typo'd column name: {}",
+        err_msg
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_explicit_columns_json_missing_definition_rejected() {
+    let (engine, _temp_dir) = create_test_engine().await;
+
+    // JSON with "name" and "score" fields, but only "name" is defined
+    let json_content = r#"{"name": "Alice", "score": 100}
+{"name": "Bob", "score": 95}"#;
+
+    let mut columns = HashMap::new();
+    columns.insert(
+        "name".to_string(),
+        ColumnDefinition::Simple("VARCHAR".to_string()),
+    );
+    // Missing "score" definition
+
+    let result = engine
+        .create_dataset(
+            "missing_def_test",
+            None,
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "json".to_string(),
+                    content: json_content.to_string(),
+                    columns: Some(columns),
+                },
+            },
+        )
+        .await;
+
+    // Should fail because "score" appears in data but isn't defined
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("score") || err_msg.contains("not defined"),
+        "Error should mention the undefined column: {}",
+        err_msg
     );
 }
