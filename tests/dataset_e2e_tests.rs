@@ -1519,6 +1519,8 @@ async fn test_explicit_columns_csv_decimal() {
             data_type: "DECIMAL".to_string(),
             precision: Some(10),
             scale: Some(2),
+            srid: None,
+            geometry_type: None,
         }),
     );
 

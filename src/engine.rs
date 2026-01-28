@@ -1935,7 +1935,7 @@ impl RuntimeEngine {
                 match data_source {
                     DataSource::FilePath(path) => {
                         // Determine schema: use explicit columns if provided, otherwise infer
-                        let schema = if let Some(ref cols) = explicit_columns {
+                        let (schema, geometry_columns) = if let Some(ref cols) = explicit_columns {
                             // Read header to get column names from data
                             let file = release_on_parse_error!(File::open(&path));
                             let mut reader = BufReader::new(file);
@@ -1944,11 +1944,14 @@ impl RuntimeEngine {
                                 .infer_schema(&mut reader, Some(1)));
                             let data_columns: Vec<String> =
                                 inferred.fields().iter().map(|f| f.name().clone()).collect();
-                            // Build schema from explicit column definitions
-                            release_on_schema_error!(crate::datasets::build_schema_from_columns(
-                                cols,
-                                &data_columns
-                            ))
+                            // Build schema from explicit column definitions (with geometry metadata)
+                            let parsed = release_on_schema_error!(
+                                crate::datasets::build_schema_from_columns_full(
+                                    cols,
+                                    &data_columns
+                                )
+                            );
+                            (parsed.schema, parsed.geometry_columns)
                         } else {
                             // Infer schema from file (reads first 10000 rows)
                             let file = release_on_parse_error!(File::open(&path));
@@ -1956,7 +1959,7 @@ impl RuntimeEngine {
                             let (schema, _) = release_on_parse_error!(Format::default()
                                 .with_header(true)
                                 .infer_schema(&mut reader, Some(10_000)));
-                            Arc::new(schema)
+                            (Arc::new(schema), std::collections::HashMap::new())
                         };
 
                         // Reopen file for streaming read
@@ -1967,9 +1970,11 @@ impl RuntimeEngine {
                                 .with_batch_size(8192)
                                 .build(BufReader::new(file)));
 
-                        // Initialize writer with schema
-                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
-                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        // Initialize writer with schema and geometry metadata
+                        let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
+                        if !geometry_columns.is_empty() {
+                            writer.set_geometry_columns(geometry_columns);
+                        }
                         release_on_storage_error!(writer.init(&schema));
 
                         // Stream batches directly to writer
@@ -1980,12 +1985,12 @@ impl RuntimeEngine {
                             release_on_storage_error!(writer.write_batch(&batch));
                         }
 
-                        release_on_storage_error!(writer.close());
+                        release_on_storage_error!(Box::new(writer).close());
                         (schema, row_count)
                     }
                     DataSource::InMemory(data) => {
                         // Determine schema: use explicit columns if provided, otherwise infer
-                        let schema = if let Some(ref cols) = explicit_columns {
+                        let (schema, geometry_columns) = if let Some(ref cols) = explicit_columns {
                             // Read header to get column names from data
                             let mut cursor = std::io::Cursor::new(&data);
                             let (inferred, _) = release_on_parse_error!(Format::default()
@@ -1993,18 +1998,21 @@ impl RuntimeEngine {
                                 .infer_schema(&mut cursor, Some(1)));
                             let data_columns: Vec<String> =
                                 inferred.fields().iter().map(|f| f.name().clone()).collect();
-                            // Build schema from explicit column definitions
-                            release_on_schema_error!(crate::datasets::build_schema_from_columns(
-                                cols,
-                                &data_columns
-                            ))
+                            // Build schema from explicit column definitions (with geometry metadata)
+                            let parsed = release_on_schema_error!(
+                                crate::datasets::build_schema_from_columns_full(
+                                    cols,
+                                    &data_columns
+                                )
+                            );
+                            (parsed.schema, parsed.geometry_columns)
                         } else {
                             // Infer schema (reads first 10000 rows)
                             let mut cursor = std::io::Cursor::new(&data);
                             let (schema, _) = release_on_parse_error!(Format::default()
                                 .with_header(true)
                                 .infer_schema(&mut cursor, Some(10_000)));
-                            Arc::new(schema)
+                            (Arc::new(schema), std::collections::HashMap::new())
                         };
 
                         // Reset cursor for reading
@@ -2015,8 +2023,10 @@ impl RuntimeEngine {
                                 .with_batch_size(8192)
                                 .build(cursor));
 
-                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
-                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
+                        if !geometry_columns.is_empty() {
+                            writer.set_geometry_columns(geometry_columns);
+                        }
                         release_on_storage_error!(writer.init(&schema));
 
                         let mut row_count = 0usize;
@@ -2026,7 +2036,7 @@ impl RuntimeEngine {
                             release_on_storage_error!(writer.write_batch(&batch));
                         }
 
-                        release_on_storage_error!(writer.close());
+                        release_on_storage_error!(Box::new(writer).close());
                         (schema, row_count)
                     }
                 }
@@ -2045,21 +2055,22 @@ impl RuntimeEngine {
 
                         // Determine final schema: use explicit columns validated against observed fields,
                         // or use inferred schema if no explicit columns provided
-                        let schema = if let Some(ref cols) = explicit_columns {
+                        let (schema, geometry_columns) = if let Some(ref cols) = explicit_columns {
                             // Get observed field names from inferred schema
                             let observed_fields: Vec<String> = inferred_schema
                                 .fields()
                                 .iter()
                                 .map(|f| f.name().clone())
                                 .collect();
-                            release_on_schema_error!(
-                                crate::datasets::build_schema_from_columns_for_json(
+                            let parsed = release_on_schema_error!(
+                                crate::datasets::build_schema_from_columns_for_json_full(
                                     cols,
                                     &observed_fields
                                 )
-                            )
+                            );
+                            (parsed.schema, parsed.geometry_columns)
                         } else {
-                            Arc::new(inferred_schema)
+                            (Arc::new(inferred_schema), std::collections::HashMap::new())
                         };
 
                         // Open file for streaming read
@@ -2069,8 +2080,10 @@ impl RuntimeEngine {
                                 .with_batch_size(8192)
                                 .build(BufReader::new(file)));
 
-                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
-                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
+                        if !geometry_columns.is_empty() {
+                            writer.set_geometry_columns(geometry_columns);
+                        }
                         release_on_storage_error!(writer.init(&schema));
 
                         let mut row_count = 0usize;
@@ -2080,7 +2093,7 @@ impl RuntimeEngine {
                             release_on_storage_error!(writer.write_batch(&batch));
                         }
 
-                        release_on_storage_error!(writer.close());
+                        release_on_storage_error!(Box::new(writer).close());
                         (schema, row_count)
                     }
                     DataSource::InMemory(data) => {
@@ -2092,21 +2105,22 @@ impl RuntimeEngine {
 
                         // Determine final schema: use explicit columns validated against observed fields,
                         // or use inferred schema if no explicit columns provided
-                        let schema = if let Some(ref cols) = explicit_columns {
+                        let (schema, geometry_columns) = if let Some(ref cols) = explicit_columns {
                             // Get observed field names from inferred schema
                             let observed_fields: Vec<String> = inferred_schema
                                 .fields()
                                 .iter()
                                 .map(|f| f.name().clone())
                                 .collect();
-                            release_on_schema_error!(
-                                crate::datasets::build_schema_from_columns_for_json(
+                            let parsed = release_on_schema_error!(
+                                crate::datasets::build_schema_from_columns_for_json_full(
                                     cols,
                                     &observed_fields
                                 )
-                            )
+                            );
+                            (parsed.schema, parsed.geometry_columns)
                         } else {
-                            Arc::new(inferred_schema)
+                            (Arc::new(inferred_schema), std::collections::HashMap::new())
                         };
 
                         // Open cursor for reading
@@ -2116,8 +2130,10 @@ impl RuntimeEngine {
                                 .with_batch_size(8192)
                                 .build(cursor));
 
-                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
-                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
+                        if !geometry_columns.is_empty() {
+                            writer.set_geometry_columns(geometry_columns);
+                        }
                         release_on_storage_error!(writer.init(&schema));
 
                         let mut row_count = 0usize;
@@ -2127,7 +2143,7 @@ impl RuntimeEngine {
                             release_on_storage_error!(writer.write_batch(&batch));
                         }
 
-                        release_on_storage_error!(writer.close());
+                        release_on_storage_error!(Box::new(writer).close());
                         (schema, row_count)
                     }
                 }

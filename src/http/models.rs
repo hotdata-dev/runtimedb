@@ -434,7 +434,7 @@ pub enum ColumnDefinition {
 /// Detailed column type specification with optional properties.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ColumnTypeSpec {
-    /// The data type name (e.g., "DECIMAL", "TIMESTAMP")
+    /// The data type name (e.g., "DECIMAL", "TIMESTAMP", "GEOMETRY")
     #[serde(rename = "type")]
     pub data_type: String,
     /// Precision for DECIMAL type (1-38)
@@ -443,7 +443,15 @@ pub struct ColumnTypeSpec {
     /// Scale for DECIMAL type
     #[serde(default)]
     pub scale: Option<i8>,
-    // Future: format, srid, geometry_type, timezone, etc.
+    /// Spatial Reference System Identifier for GEOMETRY/GEOGRAPHY types.
+    /// Common values: 4326 (WGS84), 3857 (Web Mercator).
+    #[serde(default)]
+    pub srid: Option<i32>,
+    /// Geometry type for GEOMETRY/GEOGRAPHY columns.
+    /// E.g., "Point", "LineString", "Polygon", "MultiPoint", "MultiLineString",
+    /// "MultiPolygon", "GeometryCollection", or "Geometry" (any).
+    #[serde(default)]
+    pub geometry_type: Option<String>,
 }
 
 /// Request body for POST /v1/datasets
