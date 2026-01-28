@@ -21,6 +21,7 @@ use datafusion::arrow::datatypes::Schema;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::CatalogProvider;
 use datafusion::prelude::*;
+use liquid_cache_client::LiquidCacheClientBuilder;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -129,6 +130,15 @@ impl RuntimeEngine {
             builder = builder.storage(storage);
         }
 
+        if config.liquid_cache.enabled {
+            let server = config.liquid_cache.server_address.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("liquid cache enabled but server_address not set")
+            })?;
+            info!("Creating liquid cache builder for server: {}", server);
+            let liquid_cache_builder = LiquidCacheClientBuilder::new(server);
+            builder = builder.liquid_cache_builder(liquid_cache_builder);
+        }
+
         builder.build().await
     }
 
@@ -185,29 +195,49 @@ impl RuntimeEngine {
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("S3 storage requires bucket"))?;
 
-                // Check if we have custom endpoint (for MinIO/localstack)
-                if let Some(endpoint) = &config.storage.endpoint {
-                    // For custom endpoint, we need credentials from environment
-                    let access_key = std::env::var("AWS_ACCESS_KEY_ID")
-                        .or_else(|_| std::env::var("RUNTIMEDB_STORAGE_ACCESS_KEY_ID"))
-                        .unwrap_or_else(|_| "minioadmin".to_string());
-                    let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")
-                        .or_else(|_| std::env::var("RUNTIMEDB_STORAGE_SECRET_ACCESS_KEY"))
-                        .unwrap_or_else(|_| "minioadmin".to_string());
+                let region = config.storage.region.as_deref().unwrap_or("us-east-1");
 
-                    // Allow HTTP for local MinIO
+                // Get credentials from config first, then fall back to environment
+                let access_key = config
+                    .storage
+                    .access_key
+                    .clone()
+                    .or_else(|| std::env::var("AWS_ACCESS_KEY_ID").ok())
+                    .or_else(|| std::env::var("RUNTIMEDB_STORAGE_ACCESS_KEY_ID").ok());
+                let secret_key = config
+                    .storage
+                    .secret_key
+                    .clone()
+                    .or_else(|| std::env::var("AWS_SECRET_ACCESS_KEY").ok())
+                    .or_else(|| std::env::var("RUNTIMEDB_STORAGE_SECRET_ACCESS_KEY").ok());
+
+                // Custom endpoint (for MinIO/localstack) - uses path-style URLs
+                if let Some(endpoint) = &config.storage.endpoint {
+                    let access_key = access_key.unwrap_or_else(|| "minioadmin".to_string());
+                    let secret_key = secret_key.unwrap_or_else(|| "minioadmin".to_string());
                     let allow_http = endpoint.starts_with("http://");
 
-                    Ok(Arc::new(crate::storage::S3Storage::new_with_config(
+                    Ok(Arc::new(crate::storage::S3Storage::new_with_endpoint(
                         bucket,
                         endpoint,
                         &access_key,
                         &secret_key,
+                        region,
                         allow_http,
                     )?))
+                } else if let (Some(access_key), Some(secret_key)) = (access_key, secret_key) {
+                    // AWS S3 with explicit credentials from config/env
+                    Ok(Arc::new(crate::storage::S3Storage::new_with_credentials(
+                        bucket,
+                        &access_key,
+                        &secret_key,
+                        region,
+                    )?))
                 } else {
-                    // Use AWS credentials from environment
-                    Ok(Arc::new(crate::storage::S3Storage::new(bucket)?))
+                    // Production: use IAM/automatic credential discovery
+                    Ok(Arc::new(crate::storage::S3Storage::new_with_iam(
+                        bucket, region,
+                    )?))
                 }
             }
             _ => anyhow::bail!("Unsupported storage type: {}", config.storage.storage_type),
@@ -1968,6 +1998,7 @@ pub struct RuntimeEngineBuilder {
     deletion_grace_period: Duration,
     deletion_worker_interval: Duration,
     parallel_refresh_count: usize,
+    liquid_cache_builder: Option<LiquidCacheClientBuilder>,
 }
 
 impl Default for RuntimeEngineBuilder {
@@ -1990,6 +2021,7 @@ impl RuntimeEngineBuilder {
             deletion_grace_period: DEFAULT_DELETION_GRACE_PERIOD,
             deletion_worker_interval: Duration::from_secs(DEFAULT_DELETION_WORKER_INTERVAL_SECS),
             parallel_refresh_count: DEFAULT_PARALLEL_REFRESH_COUNT,
+            liquid_cache_builder: None,
         }
     }
 
@@ -2055,6 +2087,13 @@ impl RuntimeEngineBuilder {
         self
     }
 
+    /// Configure liquid cache for distributed query caching.
+    /// When enabled, queries are offloaded to a liquid-cache server for caching.
+    pub fn liquid_cache_builder(mut self, builder: LiquidCacheClientBuilder) -> Self {
+        self.liquid_cache_builder = Some(builder);
+        self
+    }
+
     /// Resolve the base directory, using default if not set.
     fn resolve_base_dir(&self) -> PathBuf {
         self.base_dir.clone().unwrap_or_else(|| {
@@ -2111,8 +2150,22 @@ impl RuntimeEngineBuilder {
         // Step 5: Run migrations and set up DataFusion
         catalog.run_migrations().await?;
 
-        let df_ctx = SessionContext::new();
-        storage.register_with_datafusion(&df_ctx)?;
+        let df_ctx = if let Some(mut liquid_cache_builder) = self.liquid_cache_builder {
+            info!("Building liquid cache session context");
+
+            // Register object stores from storage config
+            if let Some((url, options)) = storage.get_object_store_config() {
+                info!("URL: {}, options: {:?}", url, options);
+                liquid_cache_builder = liquid_cache_builder.with_object_store(url, Some(options));
+            }
+
+            liquid_cache_builder.build(SessionConfig::new())?
+        } else {
+            let ctx = SessionContext::new();
+            // Register storage with DataFusion (when not using liquid cache)
+            storage.register_with_datafusion(&ctx)?;
+            ctx
+        };
 
         // Step 6: Initialize secret manager
         let (secret_key, using_default_key) = match self.secret_key {
@@ -2425,7 +2478,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_from_config_sqlite_filesystem() {
         use crate::config::{
-            AppConfig, CatalogConfig, PathsConfig, SecretsConfig, ServerConfig, StorageConfig,
+            AppConfig, CatalogConfig, LiquidCacheConfig, PathsConfig, SecretsConfig, ServerConfig,
+            StorageConfig,
         };
 
         let temp_dir = TempDir::new().unwrap();
@@ -2449,6 +2503,8 @@ mod tests {
                 bucket: None,
                 region: None,
                 endpoint: None,
+                access_key: None,
+                secret_key: None,
             },
             paths: PathsConfig {
                 base_dir: Some(base_dir.to_str().unwrap().to_string()),
@@ -2456,6 +2512,10 @@ mod tests {
             },
             secrets: SecretsConfig {
                 encryption_key: Some(test_secret_key()),
+            },
+            liquid_cache: LiquidCacheConfig {
+                enabled: false,
+                server_address: None,
             },
         };
 
