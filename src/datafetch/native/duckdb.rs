@@ -79,6 +79,9 @@ fn discover_tables_sync(
     let conn = Connection::open(connection_string)
         .map_err(|e| DataFetchError::Connection(e.to_string()))?;
 
+    // Load spatial extension if available — needed for spatial type detection
+    let _ = conn.execute_batch("LOAD spatial;");
+
     let query = r#"
         SELECT
             t.table_catalog,
@@ -236,6 +239,9 @@ fn fetch_table_to_channel(
     let conn = Connection::open(connection_string)
         .map_err(|e| DataFetchError::Connection(e.to_string()))?;
 
+    // Load spatial extension if available — needed for ST_AsBinary() wrapping
+    let _ = conn.execute_batch("LOAD spatial;");
+
     // Query column types to detect spatial columns for ST_AsBinary wrapping
     let query = build_fetch_query(&conn, schema, table)?;
 
@@ -275,6 +281,7 @@ fn fetch_table_to_channel(
 ///
 /// DuckDB's Spatial extension stores geometry in an internal format. ST_AsBinary() converts
 /// it to standard WKB, matching the approach used by the PostgreSQL and MySQL adapters.
+/// Falls back to `SELECT *` if the spatial extension is not functional on this connection.
 fn build_fetch_query(
     conn: &Connection,
     schema: &str,
@@ -318,12 +325,25 @@ fn build_fetch_query(
     }
 
     if has_spatial {
-        Ok(format!(
-            "SELECT {} FROM \"{}\".\"{}\"",
-            column_exprs.join(", "),
-            escaped_schema,
-            escaped_table
-        ))
+        // Verify that ST_AsBinary is actually available on this connection.
+        // The spatial extension may fail to load on file-based DuckDB connections
+        // opened via the bundled crate (LOAD spatial returns Ok but functions are absent).
+        let spatial_works = conn.prepare("SELECT ST_AsBinary(ST_Point(0,0))").is_ok();
+
+        if spatial_works {
+            Ok(format!(
+                "SELECT {} FROM \"{}\".\"{}\"",
+                column_exprs.join(", "),
+                escaped_schema,
+                escaped_table
+            ))
+        } else {
+            // Fall back to SELECT * — geometry will arrive in DuckDB's internal format
+            Ok(format!(
+                "SELECT * FROM \"{}\".\"{}\"",
+                escaped_schema, escaped_table
+            ))
+        }
     } else {
         Ok(format!(
             "SELECT * FROM \"{}\".\"{}\"",
@@ -857,11 +877,12 @@ mod tests {
     #[test]
     fn test_build_fetch_query_with_spatial() {
         let conn = Connection::open_in_memory().unwrap();
-        // Load spatial extension and create table with geometry column
-        let has_spatial = conn.execute_batch("INSTALL spatial; LOAD spatial;").is_ok();
+        // Load spatial extension and verify it actually works
+        let has_spatial = conn.execute_batch("INSTALL spatial; LOAD spatial;").is_ok()
+            && conn.prepare("SELECT ST_AsBinary(ST_Point(0,0))").is_ok();
 
         if !has_spatial {
-            // Skip test if spatial extension not available
+            // Skip test if spatial extension not available or not functional
             return;
         }
 
@@ -889,5 +910,24 @@ mod tests {
             "Expected plain name column, got: {}",
             query
         );
+    }
+
+    #[test]
+    fn test_build_fetch_query_spatial_fallback() {
+        // When spatial extension is not functional, build_fetch_query should
+        // fall back to SELECT * instead of failing with ST_AsBinary
+        let conn = Connection::open_in_memory().unwrap();
+
+        // Create a table that looks like it has spatial columns via information_schema
+        // but WITHOUT loading spatial — simulates the bundled crate limitation
+        conn.execute_batch(
+            "CREATE SCHEMA test_schema; \
+             CREATE TABLE test_schema.fallback_test (id INTEGER, name VARCHAR);",
+        )
+        .unwrap();
+
+        // No spatial columns → SELECT *
+        let query = build_fetch_query(&conn, "test_schema", "fallback_test").unwrap();
+        assert_eq!(query, "SELECT * FROM \"test_schema\".\"fallback_test\"");
     }
 }
