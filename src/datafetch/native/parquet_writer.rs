@@ -63,7 +63,11 @@ struct GeoColumnMetadata {
     crs: Option<CrsMetadata>,
 }
 
-/// CRS metadata in PROJJSON-style format (simplified for EPSG codes)
+/// CRS metadata in PROJJSON-style format (simplified for EPSG codes).
+///
+/// Note: The GeoParquet 1.1.0 spec supports full PROJJSON CRS definitions.
+/// This implementation only supports the `{ "id": { "authority", "code" } }` subset,
+/// which covers EPSG-coded SRIDs (the vast majority of use cases).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CrsMetadata {
     id: CrsId,
