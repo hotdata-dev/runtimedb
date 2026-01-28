@@ -83,8 +83,8 @@ impl GeoParquetMetadata {
             return None;
         }
 
-        // Find the first geometry column to be the primary
-        let primary_column = columns.keys().next()?.clone();
+        // Pick the alphabetically first geometry column as primary for determinism
+        let primary_column = columns.keys().min()?.clone();
 
         let geo_columns: HashMap<String, GeoColumnMetadata> = columns
             .iter()
@@ -645,5 +645,42 @@ mod tests {
             geo_metadata.is_none(),
             "Regular parquet should not have 'geo' metadata"
         );
+    }
+
+    #[test]
+    fn test_primary_column_deterministic_with_multiple_geometry_columns() {
+        // When multiple geometry columns exist, primary_column must be
+        // deterministic (alphabetically first), not random HashMap order.
+        let mut columns = HashMap::new();
+        columns.insert(
+            "z_geom".to_string(),
+            GeometryColumnInfo {
+                srid: 4326,
+                geometry_type: Some("Point".to_string()),
+            },
+        );
+        columns.insert(
+            "a_geom".to_string(),
+            GeometryColumnInfo {
+                srid: 4326,
+                geometry_type: Some("Polygon".to_string()),
+            },
+        );
+        columns.insert(
+            "m_geom".to_string(),
+            GeometryColumnInfo {
+                srid: 0,
+                geometry_type: None,
+            },
+        );
+
+        // Run multiple times to catch nondeterminism
+        for _ in 0..20 {
+            let meta = GeoParquetMetadata::from_geometry_columns(&columns).unwrap();
+            assert_eq!(
+                meta.primary_column, "a_geom",
+                "primary_column should always be alphabetically first"
+            );
+        }
     }
 }
