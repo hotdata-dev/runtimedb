@@ -1,5 +1,6 @@
 //! Error types for dataset operations.
 
+use super::schema::SchemaError;
 use super::validation::TableNameError;
 
 /// Errors that can occur during dataset operations.
@@ -30,6 +31,8 @@ pub enum DatasetError {
     UnsupportedFormat(String),
     /// No data found in the input.
     EmptyData,
+    /// Invalid column schema definition.
+    InvalidSchema(SchemaError),
     /// Storage error (reading, writing, etc.).
     Storage(anyhow::Error),
     /// Catalog error (database operations).
@@ -64,6 +67,7 @@ impl std::fmt::Display for DatasetError {
             Self::UploadNotAvailable(id) => write!(f, "Upload '{}' is not available", id),
             Self::UnsupportedFormat(format) => write!(f, "Unsupported format: {}", format),
             Self::EmptyData => write!(f, "No data found in the input"),
+            Self::InvalidSchema(e) => write!(f, "Invalid column schema: {}", e),
             Self::Storage(e) => write!(f, "Storage error: {}", e),
             Self::Catalog(e) => write!(f, "Catalog error: {}", e),
             Self::ParseError(e) => write!(f, "Parse error: {}", e),
@@ -76,6 +80,7 @@ impl std::error::Error for DatasetError {
         match self {
             Self::InvalidTableName(e) => Some(e),
             Self::InvalidGeneratedTableName { error, .. } => Some(error),
+            Self::InvalidSchema(e) => Some(e),
             Self::Storage(e) | Self::Catalog(e) | Self::ParseError(e) => e.source(),
             _ => None,
         }
@@ -97,6 +102,7 @@ impl DatasetError {
                 | Self::UploadNotAvailable(_)
                 | Self::UnsupportedFormat(_)
                 | Self::EmptyData
+                | Self::InvalidSchema(_)
                 | Self::ParseError(_)
         )
     }

@@ -328,6 +328,34 @@ pub struct UploadInfo {
 
 // Dataset models
 
+/// Column type specification - either a simple type string or detailed spec with properties.
+///
+/// Simple form: `"VARCHAR"`, `"INT"`, `"DATE"`
+/// Detailed form: `{ "type": "DECIMAL", "precision": 10, "scale": 2 }`
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ColumnDefinition {
+    /// Simple type name (e.g., "VARCHAR", "INT", "DATE")
+    Simple(String),
+    /// Detailed specification with type and optional properties
+    Detailed(ColumnTypeSpec),
+}
+
+/// Detailed column type specification with optional properties.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ColumnTypeSpec {
+    /// The data type name (e.g., "DECIMAL", "TIMESTAMP")
+    #[serde(rename = "type")]
+    pub data_type: String,
+    /// Precision for DECIMAL type (1-38)
+    #[serde(default)]
+    pub precision: Option<u8>,
+    /// Scale for DECIMAL type
+    #[serde(default)]
+    pub scale: Option<i8>,
+    // Future: format, srid, geometry_type, timezone, etc.
+}
+
 /// Request body for POST /v1/datasets
 #[derive(Debug, Deserialize)]
 pub struct CreateDatasetRequest {
@@ -347,6 +375,10 @@ pub enum DatasetSource {
         upload_id: String,
         #[serde(default)]
         format: Option<String>,
+        /// Optional explicit column definitions. Keys are column names, values are type specs.
+        /// When provided, the schema is built from these definitions instead of being inferred.
+        #[serde(default)]
+        columns: Option<std::collections::HashMap<String, ColumnDefinition>>,
     },
     /// Create from inline data (small payloads)
     Inline { inline: InlineData },
@@ -357,6 +389,10 @@ pub enum DatasetSource {
 pub struct InlineData {
     pub format: String,
     pub content: String,
+    /// Optional explicit column definitions. Keys are column names, values are type specs.
+    /// When provided, the schema is built from these definitions instead of being inferred.
+    #[serde(default)]
+    pub columns: Option<std::collections::HashMap<String, ColumnDefinition>>,
 }
 
 /// Response body for POST /v1/datasets

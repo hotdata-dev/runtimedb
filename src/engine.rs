@@ -1069,7 +1069,7 @@ impl RuntimeEngine {
         use crate::http::models::DatasetSource;
         use datafusion::arrow::csv::{reader::Format, ReaderBuilder};
         use std::fs::File;
-        use std::io::{BufReader, Seek, SeekFrom};
+        use std::io::BufReader;
 
         // Validate label is not empty
         if label.trim().is_empty() {
@@ -1125,11 +1125,15 @@ impl RuntimeEngine {
             InMemory(Vec<u8>),
         }
 
-        // Get format and data source based on input
+        // Get format, data source, and optional columns based on input
         // For uploads, we use streaming from local file path to avoid loading entire file into memory
         // For inline, we keep the data in memory (typically small)
-        let (data_source, format, source_type, source_config) = match &source {
-            DatasetSource::Upload { upload_id, format } => {
+        let (data_source, format, source_type, source_config, explicit_columns) = match &source {
+            DatasetSource::Upload {
+                upload_id,
+                format,
+                columns,
+            } => {
                 // Atomically claim the upload to prevent concurrent dataset creation
                 // This must happen before reading data to avoid race conditions
                 let claimed = self
@@ -1213,6 +1217,7 @@ impl RuntimeEngine {
                     format,
                     "upload",
                     source_config,
+                    columns.clone(),
                 )
             }
             DatasetSource::Inline { inline } => {
@@ -1225,6 +1230,7 @@ impl RuntimeEngine {
                     inline.format.clone(),
                     "inline",
                     source_config,
+                    inline.columns.clone(),
                 )
             }
         };
@@ -1277,6 +1283,23 @@ impl RuntimeEngine {
             };
         }
 
+        // Helper macro to release upload, cleanup temp/parquet, and return schema error
+        macro_rules! release_on_schema_error {
+            ($result:expr) => {
+                match $result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        if let Some(ref upload_id) = claimed_upload_id {
+                            let _ = self.catalog.release_upload(upload_id).await;
+                        }
+                        cleanup_temp(&temp_file_path);
+                        cleanup_parquet(&handle);
+                        return Err(DatasetError::InvalidSchema(e));
+                    }
+                }
+            };
+        }
+
         // Process data in streaming fashion based on format
         // For file paths, we read from disk; for inline, from memory
         // We stream batches directly to the parquet writer to minimize memory usage
@@ -1284,13 +1307,30 @@ impl RuntimeEngine {
             "csv" => {
                 match data_source {
                     DataSource::FilePath(path) => {
-                        // Infer schema from file (reads only first 10000 rows)
-                        let file = release_on_parse_error!(File::open(&path));
-                        let mut reader = BufReader::new(file);
-                        let (schema, _) = release_on_parse_error!(Format::default()
-                            .with_header(true)
-                            .infer_schema(&mut reader, Some(10_000)));
-                        let schema = Arc::new(schema);
+                        // Determine schema: use explicit columns if provided, otherwise infer
+                        let schema = if let Some(ref cols) = explicit_columns {
+                            // Read header to get column names from data
+                            let file = release_on_parse_error!(File::open(&path));
+                            let mut reader = BufReader::new(file);
+                            let (inferred, _) = release_on_parse_error!(Format::default()
+                                .with_header(true)
+                                .infer_schema(&mut reader, Some(1)));
+                            let data_columns: Vec<String> =
+                                inferred.fields().iter().map(|f| f.name().clone()).collect();
+                            // Build schema from explicit column definitions
+                            release_on_schema_error!(crate::datasets::build_schema_from_columns(
+                                cols,
+                                &data_columns
+                            ))
+                        } else {
+                            // Infer schema from file (reads first 10000 rows)
+                            let file = release_on_parse_error!(File::open(&path));
+                            let mut reader = BufReader::new(file);
+                            let (schema, _) = release_on_parse_error!(Format::default()
+                                .with_header(true)
+                                .infer_schema(&mut reader, Some(10_000)));
+                            Arc::new(schema)
+                        };
 
                         // Reopen file for streaming read
                         let file = release_on_parse_error!(File::open(&path));
@@ -1317,14 +1357,31 @@ impl RuntimeEngine {
                         (schema, row_count)
                     }
                     DataSource::InMemory(data) => {
-                        // For inline data, use cursor (typically small)
-                        let mut cursor = std::io::Cursor::new(&data);
-                        let (schema, _) = release_on_parse_error!(Format::default()
-                            .with_header(true)
-                            .infer_schema(&mut cursor, Some(10_000)));
-                        release_on_parse_error!(cursor.seek(SeekFrom::Start(0)));
-                        let schema = Arc::new(schema);
+                        // Determine schema: use explicit columns if provided, otherwise infer
+                        let schema = if let Some(ref cols) = explicit_columns {
+                            // Read header to get column names from data
+                            let mut cursor = std::io::Cursor::new(&data);
+                            let (inferred, _) = release_on_parse_error!(Format::default()
+                                .with_header(true)
+                                .infer_schema(&mut cursor, Some(1)));
+                            let data_columns: Vec<String> =
+                                inferred.fields().iter().map(|f| f.name().clone()).collect();
+                            // Build schema from explicit column definitions
+                            release_on_schema_error!(crate::datasets::build_schema_from_columns(
+                                cols,
+                                &data_columns
+                            ))
+                        } else {
+                            // Infer schema (reads first 10000 rows)
+                            let mut cursor = std::io::Cursor::new(&data);
+                            let (schema, _) = release_on_parse_error!(Format::default()
+                                .with_header(true)
+                                .infer_schema(&mut cursor, Some(10_000)));
+                            Arc::new(schema)
+                        };
 
+                        // Reset cursor for reading
+                        let cursor = std::io::Cursor::new(&data);
                         let csv_reader =
                             release_on_parse_error!(ReaderBuilder::new(schema.clone())
                                 .with_header(true)
@@ -1352,16 +1409,33 @@ impl RuntimeEngine {
 
                 match data_source {
                     DataSource::FilePath(path) => {
-                        // Infer schema from file
+                        // Always infer schema first to get observed field names
                         let file = release_on_parse_error!(File::open(&path));
                         let mut reader = BufReader::new(file);
-                        let (schema, _) = release_on_parse_error!(infer_json_schema_from_seekable(
-                            &mut reader,
-                            Some(10_000)
-                        ));
-                        let schema = Arc::new(schema);
+                        let (inferred_schema, _) = release_on_parse_error!(
+                            infer_json_schema_from_seekable(&mut reader, Some(10_000))
+                        );
 
-                        // Reopen file for streaming read
+                        // Determine final schema: use explicit columns validated against observed fields,
+                        // or use inferred schema if no explicit columns provided
+                        let schema = if let Some(ref cols) = explicit_columns {
+                            // Get observed field names from inferred schema
+                            let observed_fields: Vec<String> = inferred_schema
+                                .fields()
+                                .iter()
+                                .map(|f| f.name().clone())
+                                .collect();
+                            release_on_schema_error!(
+                                crate::datasets::build_schema_from_columns_for_json(
+                                    cols,
+                                    &observed_fields
+                                )
+                            )
+                        } else {
+                            Arc::new(inferred_schema)
+                        };
+
+                        // Open file for streaming read
                         let file = release_on_parse_error!(File::open(&path));
                         let json_reader =
                             release_on_parse_error!(arrow_json::ReaderBuilder::new(schema.clone())
@@ -1383,14 +1457,33 @@ impl RuntimeEngine {
                         (schema, row_count)
                     }
                     DataSource::InMemory(data) => {
+                        // Always infer schema first to get observed field names
                         let mut cursor = std::io::Cursor::new(&data);
-                        let (schema, _) = release_on_parse_error!(infer_json_schema_from_seekable(
-                            &mut cursor,
-                            Some(10_000)
-                        ));
-                        release_on_parse_error!(cursor.seek(SeekFrom::Start(0)));
-                        let schema = Arc::new(schema);
+                        let (inferred_schema, _) = release_on_parse_error!(
+                            infer_json_schema_from_seekable(&mut cursor, Some(10_000))
+                        );
 
+                        // Determine final schema: use explicit columns validated against observed fields,
+                        // or use inferred schema if no explicit columns provided
+                        let schema = if let Some(ref cols) = explicit_columns {
+                            // Get observed field names from inferred schema
+                            let observed_fields: Vec<String> = inferred_schema
+                                .fields()
+                                .iter()
+                                .map(|f| f.name().clone())
+                                .collect();
+                            release_on_schema_error!(
+                                crate::datasets::build_schema_from_columns_for_json(
+                                    cols,
+                                    &observed_fields
+                                )
+                            )
+                        } else {
+                            Arc::new(inferred_schema)
+                        };
+
+                        // Open cursor for reading
+                        let cursor = std::io::Cursor::new(&data);
                         let json_reader =
                             release_on_parse_error!(arrow_json::ReaderBuilder::new(schema.clone())
                                 .with_batch_size(8192)
@@ -1414,6 +1507,11 @@ impl RuntimeEngine {
             }
             "parquet" => {
                 use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+                // Log warning if columns were provided - parquet has embedded schema
+                if explicit_columns.is_some() {
+                    warn!("Ignoring explicit columns for parquet format - parquet files have embedded schema");
+                }
 
                 match data_source {
                     DataSource::FilePath(path) => {
