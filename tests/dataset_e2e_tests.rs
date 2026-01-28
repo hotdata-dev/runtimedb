@@ -2225,3 +2225,143 @@ async fn test_geometry_json_hex_decode() {
         "Beta y should be 4.0"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_geometry_parquet_round_trip() {
+    use datafusion::arrow::array::BinaryArray;
+    use datafusion::arrow::datatypes::{Field, Schema};
+    use datafusion::arrow::record_batch::RecordBatch;
+    use datafusion::parquet::arrow::ArrowWriter;
+    use datafusion::parquet::basic::Compression;
+    use datafusion::parquet::file::properties::WriterProperties;
+    use std::sync::Arc;
+
+    let (engine, _temp) = create_test_engine().await;
+
+    // Build WKB bytes for POINT(1.0 2.0) and POINT(3.0 4.0)
+    let wkb_point1: Vec<u8> = {
+        let mut v = vec![0x01u8]; // little-endian
+        v.extend_from_slice(&1u32.to_le_bytes()); // WKB type Point
+        v.extend_from_slice(&1.0f64.to_le_bytes());
+        v.extend_from_slice(&2.0f64.to_le_bytes());
+        v
+    };
+    let wkb_point2: Vec<u8> = {
+        let mut v = vec![0x01u8];
+        v.extend_from_slice(&1u32.to_le_bytes());
+        v.extend_from_slice(&3.0f64.to_le_bytes());
+        v.extend_from_slice(&4.0f64.to_le_bytes());
+        v
+    };
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("name", DataType::Utf8, false),
+        Field::new("geom", DataType::Binary, true),
+    ]));
+
+    let name_array = datafusion::arrow::array::StringArray::from(vec!["Alpha", "Beta"]);
+    let geom_array = BinaryArray::from_vec(vec![&wkb_point1, &wkb_point2]);
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(name_array), Arc::new(geom_array)],
+    )
+    .unwrap();
+
+    // Write Parquet with GeoParquet metadata
+    let geo_metadata = serde_json::json!({
+        "version": "1.1.0",
+        "primary_column": "geom",
+        "columns": {
+            "geom": {
+                "encoding": "WKB",
+                "geometry_types": ["Point"],
+                "crs": {
+                    "id": { "authority": "EPSG", "code": 4326 }
+                }
+            }
+        }
+    });
+
+    let props = WriterProperties::builder()
+        .set_compression(Compression::SNAPPY)
+        .set_key_value_metadata(Some(vec![
+            datafusion::parquet::file::metadata::KeyValue::new(
+                "geo".to_string(),
+                geo_metadata.to_string(),
+            ),
+        ]))
+        .build();
+
+    let mut buf = Vec::new();
+    {
+        let mut writer = ArrowWriter::try_new(&mut buf, schema, Some(props)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    // Upload the Parquet file
+    let upload = engine
+        .store_upload(buf, Some("application/octet-stream".to_string()))
+        .await
+        .unwrap();
+
+    let dataset = engine
+        .create_dataset(
+            "Geo Parquet Test",
+            Some("geo_parquet_test"),
+            DatasetSource::Upload {
+                upload_id: upload.id,
+                format: Some("parquet".to_string()),
+                columns: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(dataset.table_name, "geo_parquet_test");
+
+    // Query geometry via spatial functions — verifies the binary WKB data survived round-trip
+    let result = engine
+        .execute_query(&format!(
+            "SELECT name, \
+                    st_x(st_geomfromwkb(geom)) AS x, \
+                    st_y(st_geomfromwkb(geom)) AS y \
+             FROM datasets.{}.geo_parquet_test ORDER BY name",
+            DEFAULT_SCHEMA
+        ))
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "Spatial query on Parquet geometry should succeed: {:?}",
+        result.err()
+    );
+
+    let response = result.unwrap();
+    let batch = &response.results[0];
+    assert_eq!(batch.num_rows(), 2);
+
+    let name_col = batch.column_by_name("name").unwrap();
+    assert_eq!(get_string_value(name_col, 0), "Alpha");
+    assert_eq!(get_string_value(name_col, 1), "Beta");
+
+    let x_col = batch.column_by_name("x").unwrap();
+    let y_col = batch.column_by_name("y").unwrap();
+    assert!(
+        (get_f64_value(x_col, 0) - 1.0).abs() < 1e-10,
+        "Alpha x should be 1.0"
+    );
+    assert!(
+        (get_f64_value(y_col, 0) - 2.0).abs() < 1e-10,
+        "Alpha y should be 2.0"
+    );
+    assert!(
+        (get_f64_value(x_col, 1) - 3.0).abs() < 1e-10,
+        "Beta x should be 3.0"
+    );
+    assert!(
+        (get_f64_value(y_col, 1) - 4.0).abs() < 1e-10,
+        "Beta y should be 4.0"
+    );
+}
