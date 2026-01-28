@@ -131,6 +131,56 @@ impl GeoParquetMetadata {
     }
 }
 
+/// Extract GeometryColumnInfo from GeoParquet metadata JSON string.
+/// This parses the "geo" key-value metadata from a GeoParquet file.
+pub fn parse_geoparquet_metadata(geo_json: &str) -> HashMap<String, GeometryColumnInfo> {
+    #[derive(Deserialize)]
+    struct GeoMeta {
+        columns: HashMap<String, GeoColMeta>,
+    }
+
+    #[derive(Deserialize)]
+    struct GeoColMeta {
+        #[serde(default)]
+        geometry_types: Option<Vec<String>>,
+        crs: Option<CrsMeta>,
+    }
+
+    #[derive(Deserialize)]
+    struct CrsMeta {
+        id: Option<CrsIdMeta>,
+    }
+
+    #[derive(Deserialize)]
+    struct CrsIdMeta {
+        #[serde(default)]
+        code: i32,
+    }
+
+    let Ok(geo_meta) = serde_json::from_str::<GeoMeta>(geo_json) else {
+        return HashMap::new();
+    };
+
+    geo_meta
+        .columns
+        .into_iter()
+        .map(|(name, col)| {
+            let srid = col.crs.and_then(|c| c.id).map(|id| id.code).unwrap_or(0);
+            let geometry_type = col
+                .geometry_types
+                .and_then(|types| types.into_iter().next());
+
+            (
+                name,
+                GeometryColumnInfo {
+                    srid,
+                    geometry_type,
+                },
+            )
+        })
+        .collect()
+}
+
 /// Normalize geometry type names to GeoParquet standard format
 fn normalize_geometry_type(geom_type: &str) -> String {
     match geom_type.to_uppercase().as_str() {

@@ -2147,11 +2147,25 @@ impl RuntimeEngine {
                         let builder =
                             release_on_parse_error!(ParquetRecordBatchReaderBuilder::try_new(file));
                         let schema = builder.schema().clone();
+
+                        // Extract GeoParquet metadata if present
+                        let geometry_columns = builder
+                            .metadata()
+                            .file_metadata()
+                            .key_value_metadata()
+                            .and_then(|kv| kv.iter().find(|item| item.key == "geo"))
+                            .and_then(|item| item.value.as_ref())
+                            .map(|geo_json| crate::datafetch::parse_geoparquet_metadata(geo_json))
+                            .unwrap_or_default();
+
                         let parquet_reader =
                             release_on_parse_error!(builder.with_batch_size(8192).build());
 
-                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
-                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
+                        // Set geometry columns before init() to include in GeoParquet metadata
+                        if !geometry_columns.is_empty() {
+                            writer.set_geometry_columns(geometry_columns);
+                        }
                         release_on_storage_error!(writer.init(&schema));
 
                         let mut row_count = 0usize;
@@ -2161,7 +2175,7 @@ impl RuntimeEngine {
                             release_on_storage_error!(writer.write_batch(&batch));
                         }
 
-                        release_on_storage_error!(writer.close());
+                        release_on_storage_error!(Box::new(writer).close());
                         (schema, row_count)
                     }
                     DataSource::InMemory(data) => {
@@ -2171,11 +2185,25 @@ impl RuntimeEngine {
                             ParquetRecordBatchReaderBuilder::try_new(cursor)
                         );
                         let schema = builder.schema().clone();
+
+                        // Extract GeoParquet metadata if present
+                        let geometry_columns = builder
+                            .metadata()
+                            .file_metadata()
+                            .key_value_metadata()
+                            .and_then(|kv| kv.iter().find(|item| item.key == "geo"))
+                            .and_then(|item| item.value.as_ref())
+                            .map(|geo_json| crate::datafetch::parse_geoparquet_metadata(geo_json))
+                            .unwrap_or_default();
+
                         let parquet_reader =
                             release_on_parse_error!(builder.with_batch_size(8192).build());
 
-                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
-                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
+                        // Set geometry columns before init() to include in GeoParquet metadata
+                        if !geometry_columns.is_empty() {
+                            writer.set_geometry_columns(geometry_columns);
+                        }
                         release_on_storage_error!(writer.init(&schema));
 
                         let mut row_count = 0usize;
@@ -2185,7 +2213,7 @@ impl RuntimeEngine {
                             release_on_storage_error!(writer.write_batch(&batch));
                         }
 
-                        release_on_storage_error!(writer.close());
+                        release_on_storage_error!(Box::new(writer).close());
                         (schema, row_count)
                     }
                 }
