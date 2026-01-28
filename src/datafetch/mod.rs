@@ -3,7 +3,7 @@ mod error;
 mod fetcher;
 pub mod native;
 mod orchestrator;
-mod types;
+pub(crate) mod types;
 
 pub use batch_writer::{BatchWriteResult, BatchWriter};
 pub use error::DataFetchError;

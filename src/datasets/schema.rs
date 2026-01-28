@@ -1,5 +1,6 @@
 //! Schema building from explicit column definitions.
 
+use crate::datafetch::types::normalize_geometry_type;
 use crate::datafetch::GeometryColumnInfo;
 use crate::http::models::ColumnDefinition;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -290,12 +291,12 @@ fn parse_geometry_info(
             match parts.len() {
                 1 if !parts[0].is_empty() => {
                     // GEOMETRY(Point) - type only
-                    let geom_type = normalize_geometry_type(parts[0])?;
+                    let geom_type = normalize_geometry_type(parts[0]);
                     (Some(geom_type), None)
                 }
                 2 => {
                     // GEOMETRY(Point, 4326) - type and SRID
-                    let geom_type = normalize_geometry_type(parts[0])?;
+                    let geom_type = normalize_geometry_type(parts[0]);
                     let srid = parts[1].parse::<i32>().map_err(|_| ColumnTypeError {
                         column_name: column_name.to_string(),
                         message: format!("Invalid SRID '{}': must be an integer", parts[1]),
@@ -330,25 +331,6 @@ fn parse_geometry_info(
         srid: final_srid,
         geometry_type: final_geometry_type,
     })
-}
-
-/// Normalize geometry type names to standard capitalization.
-fn normalize_geometry_type(type_name: &str) -> Result<String, ColumnTypeError> {
-    let normalized = match type_name.to_uppercase().as_str() {
-        "POINT" => "Point",
-        "LINESTRING" => "LineString",
-        "POLYGON" => "Polygon",
-        "MULTIPOINT" => "MultiPoint",
-        "MULTILINESTRING" => "MultiLineString",
-        "MULTIPOLYGON" => "MultiPolygon",
-        "GEOMETRYCOLLECTION" => "GeometryCollection",
-        "GEOMETRY" => "Geometry",
-        _ => {
-            // Accept unknown types but warn - could be a database-specific extension
-            return Ok(type_name.to_string());
-        }
-    };
-    Ok(normalized.to_string())
 }
 
 /// Parse DECIMAL(precision, scale) parameters from type string.
