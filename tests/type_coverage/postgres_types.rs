@@ -64,6 +64,7 @@ fn build_postgres_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Boolean,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -85,6 +86,7 @@ fn build_postgres_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Int16,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // INTEGER: -2147483648 to 2147483647
@@ -103,6 +105,7 @@ fn build_postgres_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Int32,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // BIGINT: -9223372036854775808 to 9223372036854775807
@@ -121,6 +124,7 @@ fn build_postgres_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Int64,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -141,6 +145,7 @@ fn build_postgres_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Float32,
             values: real_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // DOUBLE PRECISION (float8) - 64-bit float
@@ -152,6 +157,7 @@ fn build_postgres_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Float64,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -166,6 +172,7 @@ fn build_postgres_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Utf8, // NUMERIC often maps to string for full precision
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // NUMERIC(10,2) - constrained precision and scale
@@ -182,6 +189,7 @@ fn build_postgres_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Decimal128(10, 2),
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -196,6 +204,7 @@ fn build_postgres_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Utf8,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // TEXT (unlimited)
@@ -207,6 +216,7 @@ fn build_postgres_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Utf8,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -222,6 +232,7 @@ fn build_postgres_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, None),
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // NOTE: TIMESTAMPTZ is not yet fully supported - there's a schema mismatch bug
@@ -262,6 +273,7 @@ fn build_postgres_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Date32,
             values: date_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // NOTE: TIME and INTERVAL types are not yet supported by the production fetch code.
@@ -309,6 +321,7 @@ fn build_postgres_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Binary,
             values: bytea_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
