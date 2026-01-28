@@ -13,6 +13,7 @@ datafusion-tracing = "51.0.0"
 instrumented-object-store = "52.0.0"
 geodatafusion = "0.2"
 geozero = { version = "0.15", features = ["with-wkb"] }
+hex = "0.4"
 duckdb = { version = "1.4.4", features = ["bundled"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "sqlite", "mysql", "chrono", "tls-rustls", "bigdecimal"] }
 bigdecimal = "0.4"

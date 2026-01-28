@@ -6512,6 +6512,7 @@ dependencies = [
  "futures",
  "geodatafusion",
  "geozero",
+ "hex",
  "iceberg",
  "iceberg-catalog-glue",
  "iceberg-catalog-rest",

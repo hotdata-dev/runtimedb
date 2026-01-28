@@ -2040,3 +2040,103 @@ async fn test_explicit_columns_json_missing_definition_rejected() {
         err_msg
     );
 }
+
+/// Test that CSV datasets with GEOMETRY columns properly hex-decode WKB data.
+///
+/// When geometry data is provided as hex-encoded WKB strings in CSV (which is
+/// the standard PostGIS text representation), the engine must decode the hex
+/// to actual binary WKB bytes. Without this, spatial functions fail with
+/// "WKT error: Unable to parse input number as the desired output type".
+#[tokio::test(flavor = "multi_thread")]
+async fn test_geometry_csv_hex_decode() {
+    let (engine, _temp) = create_test_engine().await;
+
+    // WKB hex for POINT(1.0 2.0) in little-endian ISO WKB format:
+    //   01 = little-endian
+    //   01000000 = WKB type Point
+    //   000000000000F03F = 1.0 as f64 LE
+    //   0000000000000040 = 2.0 as f64 LE
+    let point_1_wkb_hex = "0101000000000000000000F03F0000000000000040";
+    // WKB hex for POINT(3.0 4.0)
+    let point_2_wkb_hex = "010100000000000000000008400000000000001040";
+
+    let csv_content = format!(
+        "name,geom\nAlpha,{}\nBeta,{}",
+        point_1_wkb_hex, point_2_wkb_hex
+    );
+
+    let mut columns = HashMap::new();
+    columns.insert(
+        "name".to_string(),
+        ColumnDefinition::Simple("VARCHAR".to_string()),
+    );
+    columns.insert(
+        "geom".to_string(),
+        ColumnDefinition::Simple("GEOMETRY".to_string()),
+    );
+
+    let dataset = engine
+        .create_dataset(
+            "Geo CSV Test",
+            Some("geo_csv_test"),
+            DatasetSource::Inline {
+                inline: InlineData {
+                    format: "csv".to_string(),
+                    content: csv_content,
+                    columns: Some(columns),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(dataset.table_name, "geo_csv_test");
+
+    // Verify spatial functions can parse the geometry data.
+    // st_geomfromwkb converts WKB binary to native geometry, st_x/st_y extract coords.
+    // If hex decoding was NOT done, st_geomfromwkb would fail with:
+    //   "WKT error: Unable to parse input number as the desired output type"
+    // because it would receive the hex characters as bytes instead of actual WKB.
+    let result = engine
+        .execute_query(&format!(
+            "SELECT name, \
+                    st_x(st_geomfromwkb(geom)) AS x, \
+                    st_y(st_geomfromwkb(geom)) AS y \
+             FROM datasets.{}.geo_csv_test ORDER BY name",
+            DEFAULT_SCHEMA
+        ))
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "Spatial query on CSV geometry should succeed: {:?}",
+        result.err()
+    );
+
+    let response = result.unwrap();
+    let batch = &response.results[0];
+    assert_eq!(batch.num_rows(), 2);
+
+    let name_col = batch.column_by_name("name").unwrap();
+    assert_eq!(get_string_value(name_col, 0), "Alpha");
+    assert_eq!(get_string_value(name_col, 1), "Beta");
+
+    let x_col = batch.column_by_name("x").unwrap();
+    let y_col = batch.column_by_name("y").unwrap();
+    assert!(
+        (get_f64_value(x_col, 0) - 1.0).abs() < 1e-10,
+        "Alpha x should be 1.0"
+    );
+    assert!(
+        (get_f64_value(y_col, 0) - 2.0).abs() < 1e-10,
+        "Alpha y should be 2.0"
+    );
+    assert!(
+        (get_f64_value(x_col, 1) - 3.0).abs() < 1e-10,
+        "Beta x should be 3.0"
+    );
+    assert!(
+        (get_f64_value(y_col, 1) - 4.0).abs() < 1e-10,
+        "Beta y should be 4.0"
+    );
+}
