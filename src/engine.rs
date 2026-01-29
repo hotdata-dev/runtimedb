@@ -1,6 +1,6 @@
 use crate::catalog::{
-    is_dataset_table_name_conflict, CatalogManager, ConnectionInfo, QueryResult,
-    SqliteCatalogManager, TableInfo,
+    is_dataset_table_name_conflict, CachingCatalogManager, CatalogManager, ConnectionInfo,
+    QueryResult, SqliteCatalogManager, TableInfo,
 };
 use crate::datafetch::native::StreamingParquetWriter;
 use crate::datafetch::{BatchWriter, FetchOrchestrator, NativeFetcher};
@@ -140,6 +140,9 @@ impl RuntimeEngine {
             let liquid_cache_builder = LiquidCacheClientBuilder::new(server);
             builder = builder.liquid_cache_builder(liquid_cache_builder);
         }
+
+        // Pass cache config to builder
+        builder = builder.cache_config(config.cache.clone());
 
         builder.build().await
     }
@@ -2007,6 +2010,7 @@ pub struct RuntimeEngineBuilder {
     deletion_worker_interval: Duration,
     parallel_refresh_count: usize,
     liquid_cache_builder: Option<LiquidCacheClientBuilder>,
+    cache_config: Option<crate::config::CacheConfig>,
 }
 
 impl Default for RuntimeEngineBuilder {
@@ -2030,6 +2034,7 @@ impl RuntimeEngineBuilder {
             deletion_worker_interval: Duration::from_secs(DEFAULT_DELETION_WORKER_INTERVAL_SECS),
             parallel_refresh_count: DEFAULT_PARALLEL_REFRESH_COUNT,
             liquid_cache_builder: None,
+            cache_config: None,
         }
     }
 
@@ -2102,6 +2107,12 @@ impl RuntimeEngineBuilder {
         self
     }
 
+    /// Set the cache configuration for Redis metadata caching.
+    pub fn cache_config(mut self, config: crate::config::CacheConfig) -> Self {
+        self.cache_config = Some(config);
+        self
+    }
+
     /// Resolve the base directory, using default if not set.
     fn resolve_base_dir(&self) -> PathBuf {
         self.base_dir.clone().unwrap_or_else(|| {
@@ -2142,6 +2153,21 @@ impl RuntimeEngineBuilder {
                     .await?,
                 )
             }
+        };
+
+        // Wrap catalog with caching layer if Redis is configured
+        let catalog: Arc<dyn CatalogManager> = if let Some(cache_config) = &self.cache_config {
+            if let Some(ref redis_url) = cache_config.redis_url {
+                Arc::new(
+                    CachingCatalogManager::new(catalog, redis_url, cache_config.clone())
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to create caching catalog: {}", e))?,
+                )
+            } else {
+                catalog
+            }
+        } else {
+            catalog
         };
 
         // Step 4: Create storage if not provided
