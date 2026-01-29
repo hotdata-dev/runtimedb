@@ -975,3 +975,187 @@ async fn sqlite_v3_migration_preserves_data() {
 
     pool.close().await;
 }
+
+/// Test that v3 migration correctly migrates data from v1+v2 schema for PostgreSQL.
+/// This simulates upgrading a database that has existing connections and tables.
+#[tokio::test]
+async fn postgres_v3_migration_preserves_data() {
+    let container = Postgres::default()
+        .with_tag("15-alpine")
+        .start()
+        .await
+        .expect("Failed to start postgres container");
+
+    let host_port = container.get_host_port_ipv4(5432).await.unwrap();
+    let connection_string = format!(
+        "postgres://postgres:postgres@localhost:{}/postgres",
+        host_port
+    );
+
+    let pool = PgPool::connect(&connection_string).await.unwrap();
+
+    // Create schema_migrations table
+    sqlx::query(
+        "CREATE TABLE schema_migrations (
+            version INTEGER PRIMARY KEY,
+            hash TEXT NOT NULL,
+            applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Apply v1 and v2 migrations using actual migration files
+    let v1_sql = include_str!("../migrations/postgres/v1.sql");
+    sqlx::raw_sql(v1_sql).execute(&pool).await.unwrap();
+
+    let v2_sql = include_str!("../migrations/postgres/v2.sql");
+    sqlx::raw_sql(v2_sql).execute(&pool).await.unwrap();
+
+    // Record v1 and v2 as applied (use placeholder hashes - won't be checked in this test)
+    sqlx::query(
+        "INSERT INTO schema_migrations (version, hash) VALUES (1, 'v1hash'), (2, 'v2hash')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Insert test data using the OLD schema (integer connection_id)
+    sqlx::query(
+        "INSERT INTO connections (id, external_id, name, source_type, config_json)
+         VALUES (1, 'conn_test123456789012345678', 'my_postgres', 'postgres', '{\"host\":\"localhost\"}')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO connections (id, external_id, name, source_type, config_json)
+         VALUES (2, 'conn_other12345678901234567', 'my_mysql', 'mysql', '{\"host\":\"db.example.com\"}')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Insert tables referencing connections by INTEGER id
+    sqlx::query(
+        "INSERT INTO tables (connection_id, schema_name, table_name, parquet_path)
+         VALUES (1, 'public', 'users', '/cache/conn1/users.parquet')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO tables (connection_id, schema_name, table_name, parquet_path)
+         VALUES (1, 'public', 'orders', '/cache/conn1/orders.parquet')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO tables (connection_id, schema_name, table_name)
+         VALUES (2, 'mydb', 'products')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Apply v3 migration
+    let v3_sql = include_str!("../migrations/postgres/v3.sql");
+    sqlx::raw_sql(v3_sql).execute(&pool).await.unwrap();
+
+    // Verify the migration worked correctly
+
+    // Check connections table structure - should now have TEXT id (was external_id)
+    let conn: (String, String, String) =
+        sqlx::query_as("SELECT id, name, source_type FROM connections WHERE name = 'my_postgres'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        conn.0, "conn_test123456789012345678",
+        "Connection id should be the old external_id"
+    );
+    assert_eq!(conn.1, "my_postgres");
+    assert_eq!(conn.2, "postgres");
+
+    // Check that old integer id column is gone and external_id column is gone
+    let columns: Vec<(String,)> = sqlx::query_as(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'connections'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let column_names: Vec<&str> = columns.iter().map(|c| c.0.as_str()).collect();
+    assert!(
+        column_names.contains(&"id"),
+        "connections should have 'id' column"
+    );
+    assert!(
+        !column_names.iter().any(|c| *c == "external_id"),
+        "connections should not have 'external_id' column"
+    );
+
+    // Check tables.connection_id is now TEXT and contains the external_id value
+    let table: (String, String, String, Option<String>) = sqlx::query_as(
+        "SELECT connection_id, schema_name, table_name, parquet_path FROM tables WHERE table_name = 'users'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        table.0, "conn_test123456789012345678",
+        "tables.connection_id should be the external_id string"
+    );
+    assert_eq!(table.1, "public");
+    assert_eq!(table.2, "users");
+    assert_eq!(table.3, Some("/cache/conn1/users.parquet".to_string()));
+
+    // Verify all tables were migrated correctly
+    let table_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tables")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(table_count.0, 3, "All 3 tables should be preserved");
+
+    // Verify foreign key works by checking we can join
+    let joined: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT c.name, t.schema_name, t.table_name
+         FROM tables t
+         JOIN connections c ON t.connection_id = c.id
+         ORDER BY c.name, t.table_name",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(joined.len(), 3);
+    assert_eq!(
+        joined[0],
+        (
+            "my_mysql".to_string(),
+            "mydb".to_string(),
+            "products".to_string()
+        )
+    );
+    assert_eq!(
+        joined[1],
+        (
+            "my_postgres".to_string(),
+            "public".to_string(),
+            "orders".to_string()
+        )
+    );
+    assert_eq!(
+        joined[2],
+        (
+            "my_postgres".to_string(),
+            "public".to_string(),
+            "users".to_string()
+        )
+    );
+
+    pool.close().await;
+}
