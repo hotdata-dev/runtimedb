@@ -272,7 +272,7 @@ where
 
         let mut stmt = query_as::<DB, TableInfo>(&sql);
         if let Some(conn_id) = connection_id {
-            stmt = stmt.bind(conn_id.to_string());
+            stmt = stmt.bind(conn_id);
         }
 
         stmt.fetch_all(&self.pool).await.map_err(Into::into)

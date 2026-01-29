@@ -21,3 +21,6 @@ JOIN connections c ON t.connection_id = c.id;
 
 DROP TABLE tables;
 ALTER TABLE tables_new RENAME TO tables;
+
+-- Add index for efficient lookups by connection_id
+CREATE INDEX idx_tables_connection_id ON tables(connection_id);

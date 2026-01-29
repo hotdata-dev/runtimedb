@@ -48,6 +48,8 @@ const DEFAULT_PARALLEL_REFRESH_COUNT: usize = 4;
 const DEFAULT_DELETION_WORKER_INTERVAL_SECS: u64 = 30;
 
 /// Connection ID used for internal runtimedb storage (results, etc.)
+/// This uses a leading underscore to ensure it cannot conflict with user-created
+/// connection IDs, which use the "conn_" prefix from nanoid generation.
 const INTERNAL_CONNECTION_ID: &str = "_runtimedb_internal";
 
 /// Result of a query execution with optional persistence.

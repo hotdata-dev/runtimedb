@@ -26,3 +26,6 @@ ALTER TABLE tables ADD CONSTRAINT tables_connection_id_fkey
     FOREIGN KEY (connection_id) REFERENCES connections(external_id);
 ALTER TABLE tables ADD CONSTRAINT tables_connection_id_schema_name_table_name_key
     UNIQUE (connection_id, schema_name, table_name);
+
+-- Add index for efficient lookups by connection_id
+CREATE INDEX idx_tables_connection_id ON tables(connection_id);

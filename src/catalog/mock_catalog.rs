@@ -32,7 +32,7 @@ impl MockCatalog {
         }
     }
 
-    /// Add a table entry to the mock catalog.
+    /// Add a table entry to the mock catalog (test helper).
     pub fn add_table_entry(&self, connection_id: &str, schema: &str, table: &str) {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst) as i32;
         self.tables.lock().unwrap().insert(
