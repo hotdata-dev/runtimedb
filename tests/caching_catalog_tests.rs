@@ -41,9 +41,8 @@ async fn test_cache_miss_then_hit() {
 
     let config = CacheConfig {
         redis_url: Some(redis_url.clone()),
-        hard_ttl_secs: 60,
-        warmup_interval_secs: 0,
-        warmup_lock_ttl_secs: 30,
+        ttl_secs: 60,
+        refresh_interval_secs: 0,
         key_prefix: "test:".to_string(),
     };
 
@@ -78,9 +77,8 @@ async fn test_connection_write_through() {
 
     let config = CacheConfig {
         redis_url: Some(redis_url.clone()),
-        hard_ttl_secs: 60,
-        warmup_interval_secs: 0,
-        warmup_lock_ttl_secs: 30,
+        ttl_secs: 60,
+        refresh_interval_secs: 0,
         key_prefix: "test2:".to_string(),
     };
 
@@ -119,9 +117,8 @@ async fn test_table_caching() {
 
     let config = CacheConfig {
         redis_url: Some(redis_url.clone()),
-        hard_ttl_secs: 60,
-        warmup_interval_secs: 0,
-        warmup_lock_ttl_secs: 30,
+        ttl_secs: 60,
+        refresh_interval_secs: 0,
         key_prefix: "test3:".to_string(),
     };
 
@@ -162,9 +159,8 @@ async fn test_special_characters_in_keys() {
 
     let config = CacheConfig {
         redis_url: Some(redis_url.clone()),
-        hard_ttl_secs: 60,
-        warmup_interval_secs: 0,
-        warmup_lock_ttl_secs: 30,
+        ttl_secs: 60,
+        refresh_interval_secs: 0,
         key_prefix: "test4:".to_string(),
     };
 
@@ -201,39 +197,38 @@ async fn test_special_characters_in_keys() {
 }
 
 #[tokio::test]
-async fn test_warmup_loop_populates_cache() {
+async fn test_refresh_loop_populates_cache() {
     let (_redis, redis_url) = start_redis().await;
     let (_dir, inner) = create_sqlite_catalog().await;
 
     // Add some data before creating caching layer
     let conn_id = inner
-        .add_connection("warmup_test", "postgres", r#"{}"#, None)
+        .add_connection("refresh_test", "postgres", r#"{}"#, None)
         .await
         .unwrap();
     let _ = inner
-        .add_table(&conn_id, "public", "warmup_table", r#"{}"#)
+        .add_table(&conn_id, "public", "refresh_table", r#"{}"#)
         .await
         .unwrap();
 
     let config = CacheConfig {
         redis_url: Some(redis_url.clone()),
-        hard_ttl_secs: 60,
-        warmup_interval_secs: 1, // 1 second for test
-        warmup_lock_ttl_secs: 5,
-        key_prefix: "warmup_test:".to_string(),
+        ttl_secs: 60,
+        refresh_interval_secs: 1, // 1 second for test
+        key_prefix: "refresh_test:".to_string(),
     };
 
     let caching = CachingCatalogManager::new(inner.clone(), &redis_url, config)
         .await
         .unwrap();
 
-    // Initialize (starts warmup loop)
+    // Initialize (starts refresh loop)
     caching.init().await.unwrap();
 
-    // Wait for warmup to run (interval is 1 second, so wait 2)
+    // Wait for refresh to run (interval is 1 second, so wait 2)
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
-    // Close to stop warmup loop gracefully
+    // Close to stop refresh loop gracefully
     caching.close().await.unwrap();
 
     // Verify cache was populated by checking Redis directly
@@ -241,13 +236,13 @@ async fn test_warmup_loop_populates_cache() {
     let mut conn = client.get_multiplexed_async_connection().await.unwrap();
 
     let keys: Vec<String> = redis::cmd("KEYS")
-        .arg("warmup_test:*")
+        .arg("refresh_test:*")
         .query_async(&mut conn)
         .await
         .unwrap();
 
     // Should have conn:list, conn:{id}, conn:name:{name}, tbl:list:all, tbl:list:conn:{id}, etc.
-    assert!(!keys.is_empty(), "Warmup should have populated cache keys");
+    assert!(!keys.is_empty(), "Refresh should have populated cache keys");
     assert!(
         keys.iter().any(|k| k.contains("conn:list")),
         "Should have conn:list key"
@@ -255,11 +250,11 @@ async fn test_warmup_loop_populates_cache() {
 }
 
 #[tokio::test]
-async fn test_warmup_distributed_lock() {
+async fn test_refresh_distributed_lock() {
     let (_redis, redis_url) = start_redis().await;
     let (_dir, inner) = create_sqlite_catalog().await;
 
-    // Add some data before starting warmup
+    // Add some data before starting refresh
     let _ = inner
         .add_connection("lock_test_conn", "postgres", r#"{}"#, None)
         .await
@@ -267,9 +262,8 @@ async fn test_warmup_distributed_lock() {
 
     let config = CacheConfig {
         redis_url: Some(redis_url.clone()),
-        hard_ttl_secs: 60,
-        warmup_interval_secs: 1,
-        warmup_lock_ttl_secs: 10,
+        ttl_secs: 60,
+        refresh_interval_secs: 1,
         key_prefix: "lock_test:".to_string(),
     };
 
@@ -281,34 +275,34 @@ async fn test_warmup_distributed_lock() {
         .await
         .unwrap();
 
-    // Initialize both (starts warmup loops)
+    // Initialize both (starts refresh loops)
     caching1.init().await.unwrap();
     caching2.init().await.unwrap();
 
-    // Wait for warmup cycles to complete
+    // Wait for refresh cycles to complete
     tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
     // Close both gracefully
     caching1.close().await.unwrap();
     caching2.close().await.unwrap();
 
-    // After warmup, lock should be released (we release after successful warmup)
+    // After refresh, lock should be released (we release after successful refresh)
     let client = redis::Client::open(redis_url.as_str()).unwrap();
     let mut conn = client.get_multiplexed_async_connection().await.unwrap();
 
     let lock_value: Option<String> = redis::cmd("GET")
-        .arg("lock_test:lock:warmup")
+        .arg("lock_test:lock:refresh")
         .query_async(&mut conn)
         .await
         .unwrap();
 
-    // Lock should be released after successful warmup
+    // Lock should be released after successful refresh
     assert!(
         lock_value.is_none(),
-        "Lock should be released after warmup completes"
+        "Lock should be released after refresh completes"
     );
 
-    // But cache should be populated (proving warmup ran)
+    // But cache should be populated (proving refresh ran)
     let keys: Vec<String> = redis::cmd("KEYS")
         .arg("lock_test:*")
         .query_async(&mut conn)
@@ -317,7 +311,7 @@ async fn test_warmup_distributed_lock() {
 
     assert!(
         keys.iter().any(|k| k.contains("conn:list")),
-        "Cache should be populated after warmup"
+        "Cache should be populated after refresh"
     );
 }
 
@@ -332,9 +326,8 @@ async fn test_delete_connection_preserves_schema_cache() {
 
     let config = CacheConfig {
         redis_url: Some(redis_url.clone()),
-        hard_ttl_secs: 60,
-        warmup_interval_secs: 0,
-        warmup_lock_ttl_secs: 30,
+        ttl_secs: 60,
+        refresh_interval_secs: 0,
         key_prefix: "del_conn_test:".to_string(),
     };
 
@@ -418,9 +411,8 @@ async fn test_update_table_sync_cache_invalidation() {
 
     let config = CacheConfig {
         redis_url: Some(redis_url.clone()),
-        hard_ttl_secs: 60,
-        warmup_interval_secs: 0,
-        warmup_lock_ttl_secs: 30,
+        ttl_secs: 60,
+        refresh_interval_secs: 0,
         key_prefix: "update_sync_test:".to_string(),
     };
 
@@ -490,9 +482,8 @@ async fn test_dataset_cache_invalidation() {
 
     let config = CacheConfig {
         redis_url: Some(redis_url.clone()),
-        hard_ttl_secs: 60,
-        warmup_interval_secs: 0,
-        warmup_lock_ttl_secs: 30,
+        ttl_secs: 60,
+        refresh_interval_secs: 0,
         key_prefix: "dataset_test:".to_string(),
     };
 
@@ -551,15 +542,15 @@ async fn test_dataset_cache_invalidation() {
     assert!(names.is_empty(), "delete_dataset should invalidate cache");
 }
 
-/// Test that warmup aborts when the distributed lock is lost.
-/// This simulates another node stealing the lock mid-warmup and verifies
+/// Test that refresh aborts when the distributed lock is lost.
+/// This simulates another node stealing the lock mid-refresh and verifies
 /// that no new cache writes occur after lock loss is detected.
 #[tokio::test]
-async fn test_warmup_aborts_on_lock_loss() {
+async fn test_refresh_aborts_on_lock_loss() {
     let (_redis, redis_url) = start_redis().await;
     let (_dir, inner) = create_sqlite_catalog().await;
 
-    // Add many connections so warmup takes time and we can observe partial completion
+    // Add many connections so refresh takes time and we can observe partial completion
     for i in 0..20 {
         inner
             .add_connection(&format!("conn_{}", i), "postgres", r#"{}"#, None)
@@ -569,9 +560,8 @@ async fn test_warmup_aborts_on_lock_loss() {
 
     let config = CacheConfig {
         redis_url: Some(redis_url.clone()),
-        hard_ttl_secs: 60,
-        warmup_interval_secs: 1,
-        warmup_lock_ttl_secs: 2, // Short TTL for testing
+        ttl_secs: 60,
+        refresh_interval_secs: 1,
         key_prefix: "lock_loss_test:".to_string(),
     };
 
@@ -579,10 +569,10 @@ async fn test_warmup_aborts_on_lock_loss() {
         .await
         .unwrap();
 
-    // Initialize (starts warmup loop)
+    // Initialize (starts refresh loop)
     caching.init().await.unwrap();
 
-    // Wait for warmup to start and acquire lock
+    // Wait for refresh to start and acquire lock
     tokio::time::sleep(tokio::time::Duration::from_millis(1200)).await;
 
     // Simulate another node stealing the lock by deleting and re-acquiring it
@@ -591,14 +581,14 @@ async fn test_warmup_aborts_on_lock_loss() {
 
     // Delete the lock (simulating expiry or another node's action)
     let _: () = redis::cmd("DEL")
-        .arg("lock_loss_test:lock:warmup")
+        .arg("lock_loss_test:lock:refresh")
         .query_async(&mut conn)
         .await
         .unwrap();
 
     // Set a new lock with a different node ID (simulating another node acquiring it)
     let _: () = redis::cmd("SET")
-        .arg("lock_loss_test:lock:warmup")
+        .arg("lock_loss_test:lock:refresh")
         .arg("node-thief")
         .arg("EX")
         .arg(10)
@@ -606,10 +596,10 @@ async fn test_warmup_aborts_on_lock_loss() {
         .await
         .unwrap();
 
-    // Wait for the heartbeat to detect lock loss (heartbeat runs at TTL/2 = 1 second)
+    // Wait for the heartbeat to detect lock loss (heartbeat runs at lock_ttl/2)
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
-    // Count cache keys at this point (warmup should have aborted)
+    // Count cache keys at this point (refresh should have aborted)
     let keys_after_lock_loss: Vec<String> = redis::cmd("KEYS")
         .arg("lock_loss_test:*")
         .query_async(&mut conn)
@@ -627,12 +617,12 @@ async fn test_warmup_aborts_on_lock_loss() {
         .unwrap();
     let count_after_wait = keys_after_wait.len();
 
-    // Close the caching manager (will stop warmup loop gracefully)
+    // Close the caching manager (will stop refresh loop gracefully)
     caching.close().await.unwrap();
 
     // Verify the lock is still held by the "thief"
     let lock_value: Option<String> = redis::cmd("GET")
-        .arg("lock_loss_test:lock:warmup")
+        .arg("lock_loss_test:lock:refresh")
         .query_async(&mut conn)
         .await
         .unwrap();
@@ -644,10 +634,10 @@ async fn test_warmup_aborts_on_lock_loss() {
     );
 
     // Assert that no new cache keys were written after lock loss was detected
-    // The count should remain the same (warmup stopped writing)
+    // The count should remain the same (refresh stopped writing)
     assert_eq!(
         count_after_lock_loss, count_after_wait,
-        "Warmup should stop writing after lock loss (keys before: {}, after: {})",
+        "Refresh should stop writing after lock loss (keys before: {}, after: {})",
         count_after_lock_loss, count_after_wait
     );
 }
@@ -666,9 +656,8 @@ async fn test_redis_unavailable_at_startup_fails() {
     let invalid_url = "redis://127.0.0.1:59999";
     let config = CacheConfig {
         redis_url: Some(invalid_url.to_string()),
-        hard_ttl_secs: 60,
-        warmup_interval_secs: 0,
-        warmup_lock_ttl_secs: 30,
+        ttl_secs: 60,
+        refresh_interval_secs: 0,
         key_prefix: "fallback:".to_string(),
     };
 

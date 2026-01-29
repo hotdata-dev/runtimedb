@@ -40,7 +40,7 @@ struct CachingCatalogManagerInner {
     inner: Arc<dyn CatalogManager>,
     redis: ConnectionManager,
     config: CacheConfig,
-    warmup_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    refresh_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     shutdown_token: tokio_util::sync::CancellationToken,
 }
 
@@ -77,7 +77,7 @@ impl CachingCatalogManager {
                 inner,
                 redis,
                 config,
-                warmup_handle: std::sync::Mutex::new(None),
+                refresh_handle: std::sync::Mutex::new(None),
                 shutdown_token: CancellationToken::new(),
             }),
         })
@@ -199,7 +199,7 @@ impl CachingCatalogManager {
 
         let _: () = self
             .redis()
-            .set_ex(key, json, self.config().hard_ttl_secs)
+            .set_ex(key, json, self.config().ttl_secs)
             .await
             .map_err(|e| anyhow!("redis set failed: {}", e))?;
 
@@ -245,46 +245,47 @@ impl CachingCatalogManager {
         }
     }
 
-    /// Start the background warmup loop (internal).
+    /// Start the background refresh loop (internal).
     ///
-    /// Called from init() when warmup is enabled.
-    fn start_warmup_loop(&self, node_id: String) {
+    /// Called from init() when refresh is enabled.
+    fn start_refresh_loop(&self, node_id: String) {
         let state = Arc::clone(&self.state);
-        let interval_secs = self.config().warmup_interval_secs;
+        let interval_secs = self.config().refresh_interval_secs;
         let shutdown_token = self.state.shutdown_token.clone();
 
         let handle = tokio::spawn(async move {
-            Self::warmup_loop_inner(state, node_id, interval_secs, shutdown_token).await;
+            Self::refresh_loop_inner(state, node_id, interval_secs, shutdown_token).await;
         });
 
-        *self.state.warmup_handle.lock().unwrap() = Some(handle);
+        *self.state.refresh_handle.lock().unwrap() = Some(handle);
     }
 
-    /// The warmup loop that periodically refreshes all cached metadata.
-    async fn warmup_loop_inner(
+    /// The refresh loop that periodically refreshes all cached metadata.
+    async fn refresh_loop_inner(
         state: Arc<CachingCatalogManagerInner>,
         node_id: String,
         interval_secs: u64,
         shutdown_token: CancellationToken,
     ) {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
-        // Skip missed ticks to prevent back-to-back warmups if a cycle exceeds the interval
+        // Skip missed ticks to prevent back-to-back refreshes if a cycle exceeds the interval
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Don't run immediately on first tick
         interval.tick().await;
 
         let prefix = &state.config.key_prefix;
+        let lock_ttl = state.config.refresh_lock_ttl_secs();
 
         loop {
             tokio::select! {
                 _ = shutdown_token.cancelled() => {
-                    info!("cache warmup: received shutdown signal");
+                    info!("cache refresh: received shutdown signal");
                     break;
                 }
                 _ = interval.tick() => {
                     // Try to acquire distributed lock
-                    let lock_key = format!("{}lock:warmup", prefix);
-                    let acquired = Self::try_acquire_lock_inner(&state, &lock_key, &node_id).await;
+                    let lock_key = format!("{}lock:refresh", prefix);
+                    let acquired = Self::try_acquire_lock_inner(&state, &lock_key, &node_id, lock_ttl).await;
                     if !acquired {
                         continue;
                     }
@@ -294,39 +295,40 @@ impl CachingCatalogManager {
 
                     // Start heartbeat
                     let heartbeat_handle =
-                        Self::start_heartbeat_inner(&state, lock_key.clone(), node_id.clone(), lock_lost_tx);
+                        Self::start_heartbeat_inner(&state, lock_key.clone(), node_id.clone(), lock_lost_tx, lock_ttl);
 
-                    // Run warmup phases
-                    Self::run_warmup_phases_inner(&state, lock_lost_rx).await;
+                    // Run refresh phases
+                    Self::run_refresh_phases_inner(&state, lock_lost_rx).await;
 
                     heartbeat_handle.abort();
 
-                    // Release the lock so other nodes can run warmup sooner
+                    // Release the lock so other nodes can run refresh sooner
                     Self::release_lock_inner(&state, &lock_key, &node_id).await;
                 }
             }
         }
     }
 
-    /// Try to acquire the distributed warmup lock.
+    /// Try to acquire the distributed refresh lock.
     async fn try_acquire_lock_inner(
         state: &CachingCatalogManagerInner,
         lock_key: &str,
         node_id: &str,
+        lock_ttl: u64,
     ) -> bool {
         let result: Result<bool, _> = redis::cmd("SET")
             .arg(lock_key)
             .arg(node_id)
             .arg("NX")
             .arg("EX")
-            .arg(state.config.warmup_lock_ttl_secs)
+            .arg(lock_ttl)
             .query_async(&mut state.redis.clone())
             .await;
 
         result.unwrap_or(false)
     }
 
-    /// Release the warmup lock after successful completion.
+    /// Release the refresh lock after successful completion.
     async fn release_lock_inner(state: &CachingCatalogManagerInner, lock_key: &str, node_id: &str) {
         let script = r#"
             if redis.call("GET", KEYS[1]) == ARGV[1] then
@@ -350,9 +352,9 @@ impl CachingCatalogManager {
         lock_key: String,
         node_id: String,
         lock_lost_tx: watch::Sender<bool>,
+        lock_ttl: u64,
     ) -> tokio::task::JoinHandle<()> {
         let redis = state.redis.clone();
-        let ttl = state.config.warmup_lock_ttl_secs;
 
         tokio::spawn(async move {
             let extend_script = r#"
@@ -364,21 +366,21 @@ impl CachingCatalogManager {
             "#;
 
             loop {
-                tokio::time::sleep(Duration::from_secs(ttl / 2)).await;
+                tokio::time::sleep(Duration::from_secs(lock_ttl / 2)).await;
 
                 let result: Result<i32, _> = redis::cmd("EVAL")
                     .arg(extend_script)
                     .arg(1)
                     .arg(&lock_key)
                     .arg(&node_id)
-                    .arg(ttl)
+                    .arg(lock_ttl)
                     .query_async(&mut redis.clone())
                     .await;
 
                 match result {
                     Ok(1) => continue,
                     _ => {
-                        warn!("cache warmup: lock lost or heartbeat failed");
+                        warn!("cache refresh: lock lost or heartbeat failed");
                         let _ = lock_lost_tx.send(true);
                         break;
                     }
@@ -387,8 +389,8 @@ impl CachingCatalogManager {
         })
     }
 
-    /// Run all warmup phases with lock-loss checking.
-    async fn run_warmup_phases_inner(
+    /// Run all refresh phases with lock-loss checking.
+    async fn run_refresh_phases_inner(
         state: &CachingCatalogManagerInner,
         lock_lost_rx: watch::Receiver<bool>,
     ) {
@@ -396,7 +398,7 @@ impl CachingCatalogManager {
         macro_rules! check_lock {
             () => {
                 if *lock_lost_rx.borrow() {
-                    warn!("cache warmup: aborting due to lock loss");
+                    warn!("cache refresh: aborting due to lock loss");
                     return;
                 }
             };
@@ -410,7 +412,7 @@ impl CachingCatalogManager {
                 check_lock!();
                 let key = format!("{}conn:list", prefix);
                 if let Err(e) = Self::cache_set_inner(state, &key, &conns).await {
-                    warn!("cache warmup: failed to set conn:list: {}", e);
+                    warn!("cache refresh: failed to set conn:list: {}", e);
                 }
                 for conn in &conns {
                     check_lock!();
@@ -423,7 +425,7 @@ impl CachingCatalogManager {
                 conns
             }
             Err(e) => {
-                warn!("cache warmup: failed to list connections: {}", e);
+                warn!("cache refresh: failed to list connections: {}", e);
                 return;
             }
         };
@@ -455,7 +457,7 @@ impl CachingCatalogManager {
             }
         }
 
-        info!("cache warmup: completed successfully");
+        info!("cache refresh: completed successfully");
     }
 
     /// Set a value in the cache with TTL (static version for warmup loop).
@@ -476,7 +478,7 @@ impl CachingCatalogManager {
         let _: () = state
             .redis
             .clone()
-            .set_ex(key, json, state.config.hard_ttl_secs)
+            .set_ex(key, json, state.config.ttl_secs)
             .await
             .map_err(|e| anyhow!("redis set failed: {}", e))?;
 
@@ -491,30 +493,30 @@ impl CatalogManager for CachingCatalogManager {
     // ─────────────────────────────────────────────────────────────────────────
 
     async fn init(&self) -> Result<()> {
-        // Start warmup loop if configured (guard against duplicate calls)
-        if self.config().warmup_interval_secs > 0 {
-            let guard = self.state.warmup_handle.lock().unwrap();
+        // Start refresh loop if configured (guard against duplicate calls)
+        if self.config().refresh_interval_secs > 0 {
+            let guard = self.state.refresh_handle.lock().unwrap();
             if guard.is_some() {
                 // Already initialized
                 return Ok(());
             }
             let node_id = format!("runtimedb-{}", uuid::Uuid::new_v4());
             info!(
-                "Starting cache warmup loop with interval {}s",
-                self.config().warmup_interval_secs
+                "Starting cache refresh loop with interval {}s",
+                self.config().refresh_interval_secs
             );
             drop(guard); // Release lock before spawning
-            self.start_warmup_loop(node_id);
+            self.start_refresh_loop(node_id);
         }
         Ok(())
     }
 
     async fn close(&self) -> Result<()> {
-        // Signal shutdown to warmup loop
+        // Signal shutdown to refresh loop
         self.state.shutdown_token.cancel();
 
         // Take the handle out of the mutex (drop the guard before awaiting)
-        let handle = self.state.warmup_handle.lock().unwrap().take();
+        let handle = self.state.refresh_handle.lock().unwrap().take();
         if let Some(h) = handle {
             let _ = h.await;
         }

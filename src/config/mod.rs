@@ -83,26 +83,29 @@ pub struct LiquidCacheConfig {
 pub struct CacheConfig {
     /// Redis connection URL. None = caching disabled.
     pub redis_url: Option<String>,
-    /// Hard TTL in seconds. Default: 1800 (30 minutes).
-    #[serde(default = "default_cache_hard_ttl")]
-    pub hard_ttl_secs: u64,
-    /// Background warmup interval in seconds. 0 = disabled. Default: 0.
+    /// TTL in seconds. How long items should remain cached before removal. Default: 1800 (30 minutes).
+    #[serde(default = "default_cache_ttl")]
+    pub ttl_secs: u64,
+    /// Background refresh interval in seconds. 0 = disabled. Default: 0.
+    /// When enabled, periodically refreshes cached metadata to keep it warm.
+    /// Can be used with ttl_secs to eliminate cache misses.
     #[serde(default)]
-    pub warmup_interval_secs: u64,
-    /// Distributed lock TTL for warmup. Default: 300 (5 minutes).
-    #[serde(default = "default_warmup_lock_ttl")]
-    pub warmup_lock_ttl_secs: u64,
+    pub refresh_interval_secs: u64,
     /// Key prefix. Default: "rdb:"
     #[serde(default = "default_cache_key_prefix")]
     pub key_prefix: String,
 }
 
-fn default_cache_hard_ttl() -> u64 {
-    1800
+impl CacheConfig {
+    /// Compute the distributed lock TTL for cache refresh.
+    /// Clamped to [60, 300] seconds (1-5 minutes).
+    pub fn refresh_lock_ttl_secs(&self) -> u64 {
+        (self.refresh_interval_secs / 2).clamp(60, 300)
+    }
 }
 
-fn default_warmup_lock_ttl() -> u64 {
-    300
+fn default_cache_ttl() -> u64 {
+    1800
 }
 
 fn default_cache_key_prefix() -> String {
@@ -171,13 +174,13 @@ impl AppConfig {
         }
 
         // Validate cache config
-        if self.cache.warmup_interval_secs > 0
-            && self.cache.warmup_interval_secs >= self.cache.hard_ttl_secs
+        if self.cache.refresh_interval_secs > 0
+            && self.cache.refresh_interval_secs >= self.cache.ttl_secs
         {
             anyhow::bail!(
-                "Cache warmup_interval_secs ({}) must be less than hard_ttl_secs ({})",
-                self.cache.warmup_interval_secs,
-                self.cache.hard_ttl_secs
+                "Cache refresh_interval_secs ({}) must be less than hard_ttl_secs ({})",
+                self.cache.refresh_interval_secs,
+                self.cache.ttl_secs
             );
         }
 
