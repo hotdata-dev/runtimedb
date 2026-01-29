@@ -268,6 +268,8 @@ impl CachingCatalogManager {
         shutdown_token: CancellationToken,
     ) {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+        // Skip missed ticks to prevent back-to-back warmups if a cycle exceeds the interval
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Don't run immediately on first tick
         interval.tick().await;
 
@@ -489,13 +491,19 @@ impl CatalogManager for CachingCatalogManager {
     // ─────────────────────────────────────────────────────────────────────────
 
     async fn init(&self) -> Result<()> {
-        // Start warmup loop if configured
+        // Start warmup loop if configured (guard against duplicate calls)
         if self.config().warmup_interval_secs > 0 {
+            let guard = self.state.warmup_handle.lock().unwrap();
+            if guard.is_some() {
+                // Already initialized
+                return Ok(());
+            }
             let node_id = format!("runtimedb-{}", uuid::Uuid::new_v4());
             info!(
                 "Starting cache warmup loop with interval {}s",
                 self.config().warmup_interval_secs
             );
+            drop(guard); // Release lock before spawning
             self.start_warmup_loop(node_id);
         }
         Ok(())

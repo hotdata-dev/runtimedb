@@ -552,14 +552,15 @@ async fn test_dataset_cache_invalidation() {
 }
 
 /// Test that warmup aborts when the distributed lock is lost.
-/// This simulates another node stealing the lock mid-warmup.
+/// This simulates another node stealing the lock mid-warmup and verifies
+/// that no new cache writes occur after lock loss is detected.
 #[tokio::test]
 async fn test_warmup_aborts_on_lock_loss() {
     let (_redis, redis_url) = start_redis().await;
     let (_dir, inner) = create_sqlite_catalog().await;
 
-    // Add enough data that warmup takes some time
-    for i in 0..10 {
+    // Add many connections so warmup takes time and we can observe partial completion
+    for i in 0..20 {
         inner
             .add_connection(&format!("conn_{}", i), "postgres", r#"{}"#, None)
             .await
@@ -605,16 +606,29 @@ async fn test_warmup_aborts_on_lock_loss() {
         .await
         .unwrap();
 
-    // Wait for the heartbeat to detect lock loss and abort
-    // Heartbeat runs at TTL/2 = 1 second intervals
+    // Wait for the heartbeat to detect lock loss (heartbeat runs at TTL/2 = 1 second)
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    // Count cache keys at this point (warmup should have aborted)
+    let keys_after_lock_loss: Vec<String> = redis::cmd("KEYS")
+        .arg("lock_loss_test:*")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let count_after_lock_loss = keys_after_lock_loss.len();
+
+    // Wait additional time to see if any new keys are written (they shouldn't be)
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let keys_after_wait: Vec<String> = redis::cmd("KEYS")
+        .arg("lock_loss_test:*")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let count_after_wait = keys_after_wait.len();
 
     // Close the caching manager (will stop warmup loop gracefully)
     caching.close().await.unwrap();
-
-    // The warmup should have aborted (we can verify by checking that cache was not fully populated)
-    // Since warmup aborted, some keys may not have been written
-    // This test mainly verifies the lock-loss detection doesn't panic or hang
 
     // Verify the lock is still held by the "thief"
     let lock_value: Option<String> = redis::cmd("GET")
@@ -627,6 +641,14 @@ async fn test_warmup_aborts_on_lock_loss() {
         lock_value,
         Some("node-thief".to_string()),
         "Lock should still be held by the thief node"
+    );
+
+    // Assert that no new cache keys were written after lock loss was detected
+    // The count should remain the same (warmup stopped writing)
+    assert_eq!(
+        count_after_lock_loss, count_after_wait,
+        "Warmup should stop writing after lock loss (keys before: {}, after: {})",
+        count_after_lock_loss, count_after_wait
     );
 }
 
