@@ -199,3 +199,114 @@ async fn test_special_characters_in_keys() {
     assert_eq!(table.as_ref().unwrap().schema_name, "my:schema");
     assert_eq!(table.as_ref().unwrap().table_name, "my:table");
 }
+
+#[tokio::test]
+async fn test_warmup_loop_populates_cache() {
+    let (_redis, redis_url) = start_redis().await;
+    let (_dir, inner) = create_sqlite_catalog().await;
+
+    // Add some data before creating caching layer
+    let conn_id = inner
+        .add_connection("warmup_test", "postgres", r#"{}"#, None)
+        .await
+        .unwrap();
+    let _ = inner
+        .add_table(&conn_id, "public", "warmup_table", r#"{}"#)
+        .await
+        .unwrap();
+
+    let config = CacheConfig {
+        redis_url: Some(redis_url.clone()),
+        hard_ttl_secs: 60,
+        warmup_interval_secs: 1, // 1 second for test
+        warmup_lock_ttl_secs: 5,
+        key_prefix: "warmup_test:".to_string(),
+    };
+
+    let caching = Arc::new(
+        CachingCatalogManager::new(inner.clone(), &redis_url, config)
+            .await
+            .unwrap(),
+    );
+
+    // Start warmup loop
+    let handle = caching.start_warmup_loop("test-node".to_string());
+
+    // Wait for warmup to run (interval is 1 second, so wait 2)
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    // Stop the warmup loop
+    handle.abort();
+
+    // Verify cache was populated by checking Redis directly
+    let client = redis::Client::open(redis_url.as_str()).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let keys: Vec<String> = redis::cmd("KEYS")
+        .arg("warmup_test:*")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    // Should have conn:list, conn:{id}, conn:name:{name}, tbl:list:all, tbl:list:conn:{id}, etc.
+    assert!(!keys.is_empty(), "Warmup should have populated cache keys");
+    assert!(
+        keys.iter().any(|k| k.contains("conn:list")),
+        "Should have conn:list key"
+    );
+}
+
+#[tokio::test]
+async fn test_warmup_distributed_lock() {
+    let (_redis, redis_url) = start_redis().await;
+    let (_dir, inner) = create_sqlite_catalog().await;
+
+    let config = CacheConfig {
+        redis_url: Some(redis_url.clone()),
+        hard_ttl_secs: 60,
+        warmup_interval_secs: 1,
+        warmup_lock_ttl_secs: 10,
+        key_prefix: "lock_test:".to_string(),
+    };
+
+    // Create two caching managers
+    let caching1 = Arc::new(
+        CachingCatalogManager::new(inner.clone(), &redis_url, config.clone())
+            .await
+            .unwrap(),
+    );
+    let caching2 = Arc::new(
+        CachingCatalogManager::new(inner.clone(), &redis_url, config)
+            .await
+            .unwrap(),
+    );
+
+    // Start both warmup loops
+    let handle1 = caching1.start_warmup_loop("node-1".to_string());
+    let handle2 = caching2.start_warmup_loop("node-2".to_string());
+
+    // Wait for a warmup cycle
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    // Stop both
+    handle1.abort();
+    handle2.abort();
+
+    // Check that only one lock exists (only one should win)
+    let client = redis::Client::open(redis_url.as_str()).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let lock_value: Option<String> = redis::cmd("GET")
+        .arg("lock_test:lock:warmup")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    // Lock should exist and be held by one node
+    assert!(lock_value.is_some(), "Lock should exist after warmup cycle");
+    let value = lock_value.unwrap();
+    assert!(
+        value == "node-1" || value == "node-2",
+        "Lock should be held by one of the nodes"
+    );
+}
