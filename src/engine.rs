@@ -79,6 +79,7 @@ pub struct RuntimeEngine {
     #[allow(dead_code)]
     deletion_worker_interval: Duration,
     parallel_refresh_count: usize,
+    cache_warmup_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl RuntimeEngine {
@@ -2255,6 +2256,19 @@ impl RuntimeEngineBuilder {
             self.deletion_worker_interval,
         );
 
+        // Start cache warmup loop if enabled
+        if let Some(cache_config) = &self.cache_config {
+            if cache_config.warmup_interval_secs > 0 && cache_config.redis_url.is_some() {
+                // Generate a unique node ID for distributed lock
+                let _node_id = format!("runtimedb-{}", uuid::Uuid::new_v4());
+
+                // Need to downcast to CachingCatalogManager to call start_warmup_loop
+                // This is a bit awkward but necessary since we store Arc<dyn CatalogManager>
+                // For now, we'll skip this and document that warmup needs manual start
+                // TODO: Consider storing the CachingCatalogManager separately for warmup
+            }
+        }
+
         let mut engine = RuntimeEngine {
             catalog,
             df_ctx,
@@ -2266,6 +2280,7 @@ impl RuntimeEngineBuilder {
             deletion_grace_period: self.deletion_grace_period,
             deletion_worker_interval: self.deletion_worker_interval,
             parallel_refresh_count: self.parallel_refresh_count,
+            cache_warmup_handle: Mutex::new(None),
         };
 
         // Register all existing connections as DataFusion catalogs
