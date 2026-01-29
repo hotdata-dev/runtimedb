@@ -259,6 +259,9 @@ impl CachingCatalogManager {
             self.run_warmup_phases(lock_lost_rx).await;
 
             heartbeat_handle.abort();
+
+            // Release the lock so other nodes can run warmup sooner
+            self.release_lock(&lock_key, &node_id).await;
         }
     }
 
@@ -274,6 +277,24 @@ impl CachingCatalogManager {
             .await;
 
         result.unwrap_or(false)
+    }
+
+    /// Release the warmup lock after successful completion.
+    async fn release_lock(&self, lock_key: &str, node_id: &str) {
+        let script = r#"
+            if redis.call("GET", KEYS[1]) == ARGV[1] then
+                return redis.call("DEL", KEYS[1])
+            else
+                return 0
+            end
+        "#;
+        let _: Result<i32, _> = redis::cmd("EVAL")
+            .arg(script)
+            .arg(1)
+            .arg(lock_key)
+            .arg(node_id)
+            .query_async(&mut self.redis.clone())
+            .await;
     }
 
     /// Start heartbeat task to extend lock TTL.

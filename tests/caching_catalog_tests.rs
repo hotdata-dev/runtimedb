@@ -261,6 +261,12 @@ async fn test_warmup_distributed_lock() {
     let (_redis, redis_url) = start_redis().await;
     let (_dir, inner) = create_sqlite_catalog().await;
 
+    // Add some data before starting warmup
+    let _ = inner
+        .add_connection("lock_test_conn", "postgres", r#"{}"#, None)
+        .await
+        .unwrap();
+
     let config = CacheConfig {
         redis_url: Some(redis_url.clone()),
         hard_ttl_secs: 60,
@@ -285,14 +291,14 @@ async fn test_warmup_distributed_lock() {
     let handle1 = caching1.start_warmup_loop("node-1".to_string());
     let handle2 = caching2.start_warmup_loop("node-2".to_string());
 
-    // Wait for a warmup cycle
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    // Wait for warmup cycles to complete
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
     // Stop both
     handle1.abort();
     handle2.abort();
 
-    // Check that only one lock exists (only one should win)
+    // After warmup, lock should be released (we release after successful warmup)
     let client = redis::Client::open(redis_url.as_str()).unwrap();
     let mut conn = client.get_multiplexed_async_connection().await.unwrap();
 
@@ -302,17 +308,27 @@ async fn test_warmup_distributed_lock() {
         .await
         .unwrap();
 
-    // Lock should exist and be held by one node
-    assert!(lock_value.is_some(), "Lock should exist after warmup cycle");
-    let value = lock_value.unwrap();
+    // Lock should be released after successful warmup
     assert!(
-        value == "node-1" || value == "node-2",
-        "Lock should be held by one of the nodes"
+        lock_value.is_none(),
+        "Lock should be released after warmup completes"
+    );
+
+    // But cache should be populated (proving warmup ran)
+    let keys: Vec<String> = redis::cmd("KEYS")
+        .arg("lock_test:*")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    assert!(
+        keys.iter().any(|k| k.contains("conn:list")),
+        "Cache should be populated after warmup"
     );
 }
 
 #[tokio::test]
-async fn test_redis_down_falls_through() {
+async fn test_redis_unavailable_at_startup_fails() {
     let (_dir, inner) = create_sqlite_catalog().await;
 
     // Add data directly to inner catalog
