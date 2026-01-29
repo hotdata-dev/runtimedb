@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::error;
-use tracing::{info, warn};
+use tracing::{info, warn, Instrument};
 
 /// Default insecure encryption key for development use only.
 /// This key is publicly known and provides NO security.
@@ -411,31 +411,32 @@ impl RuntimeEngine {
         }
 
         // Parse SQL and create logical plan
-        let df = tracing::info_span!("sql_to_dataframe")
-            .in_scope(|| async {
-                self.df_ctx.sql(sql).await.map_err(|e| {
-                    error!("Error executing query: {}", e);
-                    e
-                })
-            })
-            .await?;
+        let df = self
+            .df_ctx
+            .sql(sql)
+            .instrument(tracing::info_span!("sql_to_dataframe"))
+            .await
+            .map_err(|e| {
+                error!("Error executing query: {}", e);
+                e
+            })?;
 
         let schema: Arc<Schema> = Arc::clone(df.schema().inner());
 
         // Execute physical plan and collect results
-        let results = {
-            let span = tracing::info_span!(
-                "collect_results",
-                runtimedb.batches_collected = tracing::field::Empty
-            );
-            let _guard = span.enter();
+        let results = async {
             let results = df.collect().await.map_err(|e| {
                 error!("Error getting query result: {}", e);
                 e
             })?;
-            span.record("runtimedb.batches_collected", results.len());
-            results
-        };
+            tracing::Span::current().record("runtimedb.batches_collected", results.len());
+            Ok::<_, datafusion::error::DataFusionError>(results)
+        }
+        .instrument(tracing::info_span!(
+            "collect_results",
+            runtimedb.batches_collected = tracing::field::Empty
+        ))
+        .await?;
 
         info!("Execution completed in {:?}", start.elapsed());
         info!("Results available");
