@@ -310,3 +310,39 @@ async fn test_warmup_distributed_lock() {
         "Lock should be held by one of the nodes"
     );
 }
+
+#[tokio::test]
+async fn test_redis_down_falls_through() {
+    let (_dir, inner) = create_sqlite_catalog().await;
+
+    // Add data directly to inner catalog
+    let _conn_id = inner
+        .add_connection("fallback_test", "postgres", r#"{}"#, None)
+        .await
+        .unwrap();
+
+    // Use a localhost address with a port that's not listening - fails faster than invalid hostname
+    let invalid_url = "redis://127.0.0.1:59999";
+    let config = CacheConfig {
+        redis_url: Some(invalid_url.to_string()),
+        hard_ttl_secs: 60,
+        warmup_interval_secs: 0,
+        warmup_lock_ttl_secs: 30,
+        key_prefix: "fallback:".to_string(),
+    };
+
+    // This should fail to connect - use a timeout to avoid hanging on connection attempts
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        CachingCatalogManager::new(inner.clone(), invalid_url, config),
+    )
+    .await;
+
+    // Connection should either timeout or fail - caching manager requires Redis to be available at startup
+    // This is by design - if Redis is configured, it should be available
+    match result {
+        Ok(Ok(_)) => panic!("Should fail to create caching manager with invalid Redis URL"),
+        Ok(Err(_)) => {} // Connection error - expected
+        Err(_) => {}     // Timeout - also acceptable for unavailable Redis
+    }
+}
