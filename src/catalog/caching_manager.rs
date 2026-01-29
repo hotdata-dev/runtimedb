@@ -482,10 +482,20 @@ impl CatalogManager for CachingCatalogManager {
     async fn update_table_sync(&self, table_id: i32, parquet_path: &str) -> Result<()> {
         self.inner.update_table_sync(table_id, parquet_path).await?;
 
-        // We don't have connection_id/schema/table from just table_id, so invalidate list caches
-        // The individual table cache will be stale but will be refreshed on next read
+        // Refresh global table list and find the updated table to get its identifiers
         if let Ok(tables) = self.inner.list_tables(None).await {
             let _ = self.cache_set(&self.key_tbl_list(None), &tables).await;
+
+            // Find the table by ID to get connection_id/schema/table for cache invalidation
+            if let Some(table) = tables.iter().find(|t| t.id == table_id) {
+                // Invalidate per-table cache
+                let key = self.key_tbl(&table.connection_id, &table.schema_name, &table.table_name);
+                self.cache_del(&key).await;
+
+                // Invalidate per-connection list cache
+                self.cache_del(&self.key_tbl_list(Some(&table.connection_id)))
+                    .await;
+            }
         }
 
         Ok(())

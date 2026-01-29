@@ -327,6 +327,78 @@ async fn test_warmup_distributed_lock() {
     );
 }
 
+/// Test that update_table_sync properly invalidates per-table and per-connection caches.
+#[tokio::test]
+async fn test_update_table_sync_cache_invalidation() {
+    let (_redis, redis_url) = start_redis().await;
+    let (_dir, inner) = create_sqlite_catalog().await;
+
+    let config = CacheConfig {
+        redis_url: Some(redis_url.clone()),
+        hard_ttl_secs: 60,
+        warmup_interval_secs: 0,
+        warmup_lock_ttl_secs: 30,
+        key_prefix: "update_sync_test:".to_string(),
+    };
+
+    let caching = CachingCatalogManager::new(inner.clone(), &redis_url, config)
+        .await
+        .unwrap();
+
+    // Add a connection and table
+    let conn_id = caching
+        .add_connection("sync_test_conn", "postgres", r#"{}"#, None)
+        .await
+        .unwrap();
+
+    let table_id = caching
+        .add_table(&conn_id, "public", "sync_table", r#"{"fields":[]}"#)
+        .await
+        .unwrap();
+
+    // Read the table to populate cache (should have no parquet_path)
+    let table1 = caching
+        .get_table(&conn_id, "public", "sync_table")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        table1.parquet_path.is_none(),
+        "Should start with no parquet path"
+    );
+
+    // Also populate per-connection list cache
+    let tables_by_conn = caching.list_tables(Some(&conn_id)).await.unwrap();
+    assert_eq!(tables_by_conn.len(), 1);
+    assert!(tables_by_conn[0].parquet_path.is_none());
+
+    // Now update the sync path
+    caching
+        .update_table_sync(table_id, "/path/to/data.parquet")
+        .await
+        .unwrap();
+
+    // The per-table cache should be invalidated and show the new path
+    let table2 = caching
+        .get_table(&conn_id, "public", "sync_table")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        table2.parquet_path,
+        Some("/path/to/data.parquet".to_string()),
+        "update_table_sync should invalidate per-table cache"
+    );
+
+    // The per-connection list cache should also be invalidated
+    let tables_by_conn2 = caching.list_tables(Some(&conn_id)).await.unwrap();
+    assert_eq!(
+        tables_by_conn2[0].parquet_path,
+        Some("/path/to/data.parquet".to_string()),
+        "update_table_sync should invalidate per-connection list cache"
+    );
+}
+
 /// Test that dataset mutations invalidate list_dataset_table_names cache.
 #[tokio::test]
 async fn test_dataset_cache_invalidation() {
