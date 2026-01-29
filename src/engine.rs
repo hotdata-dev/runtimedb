@@ -409,15 +409,34 @@ impl RuntimeEngine {
         if crate::telemetry::include_sql_in_traces() {
             tracing::Span::current().record("runtimedb.sql", sql);
         }
-        let df = self.df_ctx.sql(sql).await.map_err(|e| {
-            error!("Error executing query: {}", e);
-            e
-        })?;
+
+        // Parse SQL and create logical plan
+        let df = tracing::info_span!("sql_to_dataframe")
+            .in_scope(|| async {
+                self.df_ctx.sql(sql).await.map_err(|e| {
+                    error!("Error executing query: {}", e);
+                    e
+                })
+            })
+            .await?;
+
         let schema: Arc<Schema> = Arc::clone(df.schema().inner());
-        let results = df.collect().await.map_err(|e| {
-            error!("Error getting query result: {}", e);
-            e
-        })?;
+
+        // Execute physical plan and collect results
+        let results = {
+            let span = tracing::info_span!(
+                "collect_results",
+                runtimedb.batches_collected = tracing::field::Empty
+            );
+            let _guard = span.enter();
+            let results = df.collect().await.map_err(|e| {
+                error!("Error getting query result: {}", e);
+                e
+            })?;
+            span.record("runtimedb.batches_collected", results.len());
+            results
+        };
+
         info!("Execution completed in {:?}", start.elapsed());
         info!("Results available");
 

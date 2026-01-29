@@ -44,6 +44,7 @@ impl FetchOrchestrator {
             runtimedb.schema = %schema_name,
             runtimedb.table = %table_name,
             runtimedb.rows_written = tracing::field::Empty,
+            runtimedb.bytes_written = tracing::field::Empty,
             runtimedb.cache_url = tracing::field::Empty,
         )
     )]
@@ -108,9 +109,12 @@ impl FetchOrchestrator {
             }
         }
 
-        tracing::Span::current()
-            .record("runtimedb.rows_written", row_count)
-            .record("runtimedb.cache_url", &parquet_url);
+        let span = tracing::Span::current();
+        span.record("runtimedb.rows_written", row_count);
+        if let Some(bytes) = result.bytes_written {
+            span.record("runtimedb.bytes_written", bytes);
+        }
+        span.record("runtimedb.cache_url", &parquet_url);
 
         Ok((parquet_url, row_count))
     }
@@ -140,6 +144,7 @@ impl FetchOrchestrator {
             runtimedb.schema = %schema_name,
             runtimedb.table = %table_name,
             runtimedb.rows_synced = tracing::field::Empty,
+            runtimedb.bytes_written = tracing::field::Empty,
             runtimedb.cache_url = tracing::field::Empty,
         )
     )]
@@ -216,9 +221,12 @@ impl FetchOrchestrator {
             return Err(e);
         }
 
-        tracing::Span::current()
-            .record("runtimedb.rows_synced", row_count)
-            .record("runtimedb.cache_url", &new_url);
+        let span = tracing::Span::current();
+        span.record("runtimedb.rows_synced", row_count);
+        if let Some(bytes) = result.bytes_written {
+            span.record("runtimedb.bytes_written", bytes);
+        }
+        span.record("runtimedb.cache_url", &new_url);
 
         Ok((new_url, old_path, row_count))
     }

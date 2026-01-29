@@ -52,6 +52,11 @@ impl LazyTableProvider {
     /// Load a parquet file and return an ExecutionPlan.
     /// Uses the catalog schema (self.schema) to ensure consistency with schema()
     /// and proper projection index alignment.
+    #[tracing::instrument(
+        name = "load_parquet_exec",
+        skip(self, state, projection, filters, limit),
+        fields(runtimedb.parquet_url = %parquet_url)
+    )]
     async fn load_parquet_exec(
         &self,
         parquet_url: &str,
@@ -121,6 +126,16 @@ impl TableProvider for LazyTableProvider {
         TableType::Base
     }
 
+    #[tracing::instrument(
+        name = "lazy_table_scan",
+        skip(self, state, projection, filters, limit),
+        fields(
+            runtimedb.connection_id = %self.connection_id,
+            runtimedb.schema = %self.schema_name,
+            runtimedb.table = %self.table_name,
+            runtimedb.cache_hit = tracing::field::Empty,
+        )
+    )]
     async fn scan(
         &self,
         state: &dyn Session,
@@ -140,17 +155,21 @@ impl TableProvider for LazyTableProvider {
                 DataFusionError::External("Table not found in catalog".to_string().into())
             })?;
 
-        let parquet_url = if let Some(path) = table_info.parquet_path {
+        let (parquet_url, cache_hit) = if let Some(path) = table_info.parquet_path {
             // Already cached, use existing path
-            if path.starts_with("file://") || path.starts_with("s3://") {
+            let url = if path.starts_with("file://") || path.starts_with("s3://") {
                 path
             } else {
                 format!("file://{}", path)
-            }
+            };
+            (url, true)
         } else {
             // Not cached, fetch now
-            self.fetch_and_cache().await?
+            let url = self.fetch_and_cache().await?;
+            (url, false)
         };
+
+        tracing::Span::current().record("runtimedb.cache_hit", cache_hit);
 
         // Load the parquet file and create execution plan with projection, filter, and limit pushdown
         self.load_parquet_exec(&parquet_url, state, projection, filters, limit)

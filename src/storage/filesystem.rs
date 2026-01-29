@@ -157,6 +157,7 @@ impl StorageManager for FilesystemStorage {
         fields(
             runtimedb.backend = "filesystem",
             runtimedb.cache_url = tracing::field::Empty,
+            runtimedb.bytes_written = tracing::field::Empty,
         )
     )]
     async fn finalize_cache_write(&self, handle: &CacheWriteHandle) -> Result<String> {
@@ -169,7 +170,14 @@ impl StorageManager for FilesystemStorage {
             .join(&handle.table)
             .join(&handle.version);
         let url = format!("file://{}", version_dir.display());
-        tracing::Span::current().record("runtimedb.cache_url", &url);
+
+        // Get file size for tracing
+        let span = tracing::Span::current();
+        span.record("runtimedb.cache_url", &url);
+        if let Ok(metadata) = tokio::fs::metadata(&handle.local_path).await {
+            span.record("runtimedb.bytes_written", metadata.len());
+        }
+
         Ok(url)
     }
 

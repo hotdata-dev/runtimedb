@@ -203,6 +203,14 @@ impl StorageManager for S3Storage {
         }
     }
 
+    #[tracing::instrument(
+        name = "s3_download",
+        skip(self),
+        fields(
+            runtimedb.source_url = %url,
+            runtimedb.bytes_downloaded = tracing::field::Empty,
+        )
+    )]
     async fn get_local_path(&self, url: &str) -> Result<(std::path::PathBuf, bool)> {
         // For S3, download the file to a temp location
         let path = self.url_to_path(url)?;
@@ -223,11 +231,15 @@ impl StorageManager for S3Storage {
         let mut stream = result.into_stream();
         let file = tokio::fs::File::create(&temp_path).await?;
         let mut writer = tokio::io::BufWriter::new(file);
+        let mut bytes_downloaded: u64 = 0;
 
         while let Some(chunk) = stream.try_next().await? {
+            bytes_downloaded += chunk.len() as u64;
             tokio::io::AsyncWriteExt::write_all(&mut writer, &chunk).await?;
         }
         tokio::io::AsyncWriteExt::flush(&mut writer).await?;
+
+        tracing::Span::current().record("runtimedb.bytes_downloaded", bytes_downloaded);
 
         Ok((temp_path, true)) // true = caller should delete after use
     }
@@ -314,6 +326,7 @@ impl StorageManager for S3Storage {
             runtimedb.bucket = %self.bucket,
             runtimedb.key = tracing::field::Empty,
             runtimedb.cache_url = tracing::field::Empty,
+            runtimedb.bytes_uploaded = tracing::field::Empty,
         )
     )]
     async fn finalize_cache_write(&self, handle: &CacheWriteHandle) -> Result<String> {
@@ -328,10 +341,19 @@ impl StorageManager for S3Storage {
         );
         let s3_path = ObjectPath::from(s3_key.as_str());
 
+        // Get file size before upload for tracing
+        let file_size = tokio::fs::metadata(&handle.local_path)
+            .await
+            .map(|m| m.len())
+            .ok();
+
         // Record the key and cache_url on the current span
-        tracing::Span::current()
-            .record("runtimedb.key", &s3_key)
-            .record("runtimedb.cache_url", &versioned_dir_url);
+        let span = tracing::Span::current();
+        span.record("runtimedb.key", &s3_key);
+        span.record("runtimedb.cache_url", &versioned_dir_url);
+        if let Some(size) = file_size {
+            span.record("runtimedb.bytes_uploaded", size);
+        }
 
         // Stream file to S3 using BufWriter to avoid loading entire file into memory.
         // BufWriter adaptively uses put() for small files or put_multipart() for large files.
