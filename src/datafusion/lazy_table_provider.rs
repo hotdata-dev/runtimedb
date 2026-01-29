@@ -23,7 +23,7 @@ pub struct LazyTableProvider {
     source: Arc<Source>,
     catalog: Arc<dyn CatalogManager>,
     orchestrator: Arc<FetchOrchestrator>,
-    connection_id: i32,
+    connection_id: String,
     schema_name: String,
     table_name: String,
 }
@@ -34,7 +34,7 @@ impl LazyTableProvider {
         source: Arc<Source>,
         catalog: Arc<dyn CatalogManager>,
         orchestrator: Arc<FetchOrchestrator>,
-        connection_id: i32,
+        connection_id: String,
         schema_name: String,
         table_name: String,
     ) -> Self {
@@ -94,7 +94,7 @@ impl LazyTableProvider {
             .orchestrator
             .cache_table(
                 &self.source,
-                self.connection_id,
+                &self.connection_id,
                 &self.schema_name,
                 &self.table_name,
             )
@@ -131,7 +131,7 @@ impl TableProvider for LazyTableProvider {
         // Check if table is already cached
         let table_info = self
             .catalog
-            .get_table(self.connection_id, &self.schema_name, &self.table_name)
+            .get_table(&self.connection_id, &self.schema_name, &self.table_name)
             .await
             .map_err(|e| {
                 DataFusionError::External(format!("Failed to get table info: {}", e).into())

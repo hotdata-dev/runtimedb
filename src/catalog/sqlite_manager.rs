@@ -182,22 +182,17 @@ impl CatalogManager for SqliteCatalogManager {
             .await
     }
 
-    async fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>> {
-        self.backend.get_connection(name).await
+    async fn get_connection(&self, id: &str) -> Result<Option<ConnectionInfo>> {
+        self.backend.get_connection(id).await
     }
 
-    async fn get_connection_by_external_id(
-        &self,
-        external_id: &str,
-    ) -> Result<Option<ConnectionInfo>> {
-        self.backend
-            .get_connection_by_external_id(external_id)
-            .await
+    async fn get_connection_by_name(&self, name: &str) -> Result<Option<ConnectionInfo>> {
+        self.backend.get_connection_by_name(name).await
     }
 
     async fn add_table(
         &self,
-        connection_id: i32,
+        connection_id: &str,
         schema_name: &str,
         table_name: &str,
         arrow_schema_json: &str,
@@ -207,13 +202,13 @@ impl CatalogManager for SqliteCatalogManager {
             .await
     }
 
-    async fn list_tables(&self, connection_id: Option<i32>) -> Result<Vec<TableInfo>> {
+    async fn list_tables(&self, connection_id: Option<&str>) -> Result<Vec<TableInfo>> {
         self.backend.list_tables(connection_id).await
     }
 
     async fn get_table(
         &self,
-        connection_id: i32,
+        connection_id: &str,
         schema_name: &str,
         table_name: &str,
     ) -> Result<Option<TableInfo>> {
@@ -228,7 +223,7 @@ impl CatalogManager for SqliteCatalogManager {
 
     async fn clear_table_cache_metadata(
         &self,
-        connection_id: i32,
+        connection_id: &str,
         schema_name: &str,
         table_name: &str,
     ) -> Result<TableInfo> {
@@ -237,12 +232,14 @@ impl CatalogManager for SqliteCatalogManager {
             .await
     }
 
-    async fn clear_connection_cache_metadata(&self, name: &str) -> Result<()> {
-        self.backend.clear_connection_cache_metadata(name).await
+    async fn clear_connection_cache_metadata(&self, connection_id: &str) -> Result<()> {
+        self.backend
+            .clear_connection_cache_metadata(connection_id)
+            .await
     }
 
-    async fn delete_connection(&self, name: &str) -> Result<()> {
-        self.backend.delete_connection(name).await
+    async fn delete_connection(&self, connection_id: &str) -> Result<()> {
+        self.backend.delete_connection(connection_id).await
     }
 
     async fn get_secret_metadata(&self, name: &str) -> Result<Option<SecretMetadata>> {
@@ -401,10 +398,6 @@ impl CatalogManager for SqliteCatalogManager {
         .await?;
 
         Ok(row.map(SecretMetadataRow::into_metadata))
-    }
-
-    async fn get_connection_by_id(&self, id: i32) -> Result<Option<ConnectionInfo>> {
-        self.backend.get_connection_by_id(id).await
     }
 
     async fn schedule_file_deletion(&self, path: &str, delete_after: DateTime<Utc>) -> Result<()> {

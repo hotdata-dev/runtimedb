@@ -139,7 +139,7 @@ impl S3Storage {
 
 #[async_trait]
 impl StorageManager for S3Storage {
-    fn cache_url(&self, connection_id: i32, schema: &str, table: &str) -> String {
+    fn cache_url(&self, connection_id: &str, schema: &str, table: &str) -> String {
         // For S3, return directory path (DLT creates <table>/*.parquet files)
         format!(
             "s3://{}/cache/{}/{}/{}",
@@ -147,7 +147,7 @@ impl StorageManager for S3Storage {
         )
     }
 
-    fn cache_prefix(&self, connection_id: i32) -> String {
+    fn cache_prefix(&self, connection_id: &str) -> String {
         format!("s3://{}/cache/{}", self.bucket, connection_id)
     }
 
@@ -282,7 +282,7 @@ impl StorageManager for S3Storage {
     )]
     fn prepare_cache_write(
         &self,
-        connection_id: i32,
+        connection_id: &str,
         schema: &str,
         table: &str,
     ) -> CacheWriteHandle {
@@ -291,7 +291,7 @@ impl StorageManager for S3Storage {
         // This matches the S3 destination structure for consistency.
         let version = nanoid::nanoid!(8);
         let local_path = std::env::temp_dir()
-            .join(connection_id.to_string())
+            .join(connection_id)
             .join(schema)
             .join(table)
             .join(&version)
@@ -300,7 +300,7 @@ impl StorageManager for S3Storage {
         CacheWriteHandle {
             local_path,
             version,
-            connection_id,
+            connection_id: connection_id.to_string(),
             schema: schema.to_string(),
             table: table.to_string(),
         }
@@ -464,8 +464,8 @@ mod tests {
             config: test_config("test-bucket"),
         };
 
-        let handle1 = storage.prepare_cache_write(1, "main", "orders");
-        let handle2 = storage.prepare_cache_write(1, "main", "orders");
+        let handle1 = storage.prepare_cache_write("1", "main", "orders");
+        let handle2 = storage.prepare_cache_write("1", "main", "orders");
         assert_ne!(
             handle1.version, handle2.version,
             "Versions should be unique"
@@ -484,10 +484,10 @@ mod tests {
             config: test_config("test-bucket"),
         };
 
-        let handle = storage.prepare_cache_write(42, "public", "users");
+        let handle = storage.prepare_cache_write("42", "public", "users");
         let path_str = handle.local_path.to_string_lossy();
 
-        assert_eq!(handle.connection_id, 42);
+        assert_eq!(handle.connection_id, "42");
         assert_eq!(handle.schema, "public");
         assert_eq!(handle.table, "users");
         assert!(!handle.version.is_empty(), "Version should not be empty");
@@ -519,8 +519,8 @@ mod tests {
             config: test_config("test-bucket"),
         };
 
-        let handle1 = storage.prepare_cache_write(1, "main", "orders");
-        let handle2 = storage.prepare_cache_write(1, "main", "orders");
+        let handle1 = storage.prepare_cache_write("1", "main", "orders");
+        let handle2 = storage.prepare_cache_write("1", "main", "orders");
 
         // Both should end with data.parquet
         assert!(handle1.local_path.ends_with("data.parquet"));
@@ -589,7 +589,7 @@ mod tests {
         let handle = CacheWriteHandle {
             local_path: temp_file,
             version: version.to_string(),
-            connection_id: 1,
+            connection_id: "1".to_string(),
             schema: "public".to_string(),
             table: "orders".to_string(),
         };
@@ -646,7 +646,7 @@ mod tests {
         let handle = CacheWriteHandle {
             local_path: temp_file.clone(),
             version: version.to_string(),
-            connection_id: 1,
+            connection_id: "1".to_string(),
             schema: "public".to_string(),
             table: "orders".to_string(),
         };
@@ -702,7 +702,7 @@ mod tests {
         let handle = CacheWriteHandle {
             local_path: temp_file.clone(),
             version: version.to_string(),
-            connection_id: 1,
+            connection_id: "1".to_string(),
             schema: "public".to_string(),
             table: "big_table".to_string(),
         };

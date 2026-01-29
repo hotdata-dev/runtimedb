@@ -33,7 +33,7 @@ pub async fn refresh_handler(
         // Verify connection exists
         engine
             .catalog()
-            .get_connection_by_external_id(ext_id)
+            .get_connection(ext_id)
             .await?
             .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", ext_id)))?;
         Some(ext_id.clone())

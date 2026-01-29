@@ -293,7 +293,7 @@ impl ConnectionDetails {
         tables: &[runtimedb::catalog::TableInfo],
     ) -> Self {
         Self {
-            id: conn.external_id.clone(),
+            id: conn.id.clone(),
             name: conn.name.clone(),
             source_type: conn.source_type.clone(),
             table_count: tables.len(),
@@ -361,15 +361,15 @@ impl TestExecutor for EngineExecutor {
             .await
             .expect("Engine connect failed");
 
-        // Return external_id to match API behavior
+        // Return id to match API behavior
         let conn = self
             .engine
             .catalog()
-            .get_connection(name)
+            .get_connection_by_name(name)
             .await
             .expect("Failed to get connection")
             .expect("Connection not found after creation");
-        conn.external_id
+        conn.id
     }
 
     async fn list_connections(&self) -> ConnectionResult {
@@ -385,11 +385,11 @@ impl TestExecutor for EngineExecutor {
     }
 
     async fn get_connection(&self, identifier: &str) -> Option<ConnectionDetails> {
-        // identifier is external_id
+        // identifier is the connection id
         let conn = self
             .engine
             .catalog()
-            .get_connection_by_external_id(identifier)
+            .get_connection(identifier)
             .await
             .ok()??;
         let tables = self.engine.list_tables(Some(identifier)).await.ok()?;

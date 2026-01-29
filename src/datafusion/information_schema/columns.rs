@@ -48,7 +48,7 @@ impl ColumnsTableProvider {
             .await
             .map_err(|e| DataFusionError::Execution(e.to_string()))?;
 
-        let conn_map: std::collections::HashMap<i32, String> =
+        let conn_map: std::collections::HashMap<String, String> =
             connections.into_iter().map(|c| (c.id, c.name)).collect();
 
         // Get all tables

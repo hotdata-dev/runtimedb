@@ -13,7 +13,7 @@ use crate::source::Source;
 /// Wraps MemorySchemaProvider for caching already-loaded tables.
 #[derive(Debug)]
 pub struct RuntimeSchemaProvider {
-    connection_id: i32,
+    connection_id: String,
     #[allow(dead_code)]
     connection_name: String,
     schema_name: String,
@@ -25,7 +25,7 @@ pub struct RuntimeSchemaProvider {
 
 impl RuntimeSchemaProvider {
     pub fn new(
-        connection_id: i32,
+        connection_id: String,
         connection_name: String,
         schema_name: String,
         source: Arc<Source>,
@@ -53,7 +53,7 @@ impl SchemaProvider for RuntimeSchemaProvider {
     fn table_names(&self) -> Vec<String> {
         // Return all known tables from the catalog store
         // Uses block_on since SchemaProvider trait methods are sync
-        match block_on(self.catalog.list_tables(Some(self.connection_id))) {
+        match block_on(self.catalog.list_tables(Some(&self.connection_id))) {
             Ok(tables) => tables
                 .into_iter()
                 .filter(|t| t.schema_name == self.schema_name)
@@ -75,7 +75,7 @@ impl SchemaProvider for RuntimeSchemaProvider {
         // Get table info from catalog
         let table_info = match self
             .catalog
-            .get_table(self.connection_id, &self.schema_name, name)
+            .get_table(&self.connection_id, &self.schema_name, name)
             .await
         {
             Ok(Some(info)) => info,
@@ -106,7 +106,7 @@ impl SchemaProvider for RuntimeSchemaProvider {
             self.source.clone(),
             self.catalog.clone(),
             self.orchestrator.clone(),
-            self.connection_id,
+            self.connection_id.clone(),
             self.schema_name.clone(),
             name.to_string(),
         )) as Arc<dyn TableProvider>;
@@ -125,7 +125,7 @@ impl SchemaProvider for RuntimeSchemaProvider {
         matches!(
             block_on(
                 self.catalog
-                    .get_table(self.connection_id, &self.schema_name, name)
+                    .get_table(&self.connection_id, &self.schema_name, name)
             ),
             Ok(Some(_))
         )

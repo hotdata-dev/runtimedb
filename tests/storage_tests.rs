@@ -8,7 +8,7 @@ fn filesystem_cache_url_constructs_correct_path() {
 
     let storage = FilesystemStorage::new(cache_base.to_str().unwrap());
 
-    let url = storage.cache_url(1, "public", "users");
+    let url = storage.cache_url("1", "public", "users");
     assert!(url.starts_with("file://"));
     // cache_url now returns directory path (DLT creates <table>/*.parquet files)
     assert!(url.contains("/cache/1/public/users"));
@@ -22,7 +22,7 @@ fn filesystem_cache_prefix_constructs_correct_path() {
 
     let storage = FilesystemStorage::new(cache_base.to_str().unwrap());
 
-    let prefix = storage.cache_prefix(1);
+    let prefix = storage.cache_prefix("1");
     assert!(prefix.ends_with("/cache/1"));
 }
 
@@ -33,7 +33,7 @@ async fn filesystem_write_and_read_works() {
 
     let storage = FilesystemStorage::new(cache_base.to_str().unwrap());
 
-    let url = storage.cache_url(1, "public", "users");
+    let url = storage.cache_url("1", "public", "users");
     let data = b"test data";
 
     storage.write(&url, data).await.unwrap();
@@ -49,7 +49,7 @@ async fn filesystem_exists_works() {
 
     let storage = FilesystemStorage::new(cache_base.to_str().unwrap());
 
-    let url = storage.cache_url(1, "public", "users");
+    let url = storage.cache_url("1", "public", "users");
 
     assert!(!storage.exists(&url).await.unwrap());
 
@@ -65,7 +65,7 @@ async fn filesystem_delete_works() {
 
     let storage = FilesystemStorage::new(cache_base.to_str().unwrap());
 
-    let url = storage.cache_url(1, "public", "users");
+    let url = storage.cache_url("1", "public", "users");
 
     storage.write(&url, b"test").await.unwrap();
     assert!(storage.exists(&url).await.unwrap());
@@ -82,14 +82,14 @@ async fn filesystem_delete_prefix_works() {
     let storage = FilesystemStorage::new(cache_base.to_str().unwrap());
 
     // Write multiple files under same prefix
-    let url1 = storage.cache_url(1, "public", "users");
-    let url2 = storage.cache_url(1, "public", "orders");
+    let url1 = storage.cache_url("1", "public", "users");
+    let url2 = storage.cache_url("1", "public", "orders");
 
     storage.write(&url1, b"users").await.unwrap();
     storage.write(&url2, b"orders").await.unwrap();
 
     // Delete entire connection prefix
-    let prefix = storage.cache_prefix(1);
+    let prefix = storage.cache_prefix("1");
     storage.delete_prefix(&prefix).await.unwrap();
 
     assert!(!storage.exists(&url1).await.unwrap());
@@ -103,10 +103,10 @@ fn test_filesystem_prepare_cache_write_returns_handle() {
 
     let storage = FilesystemStorage::new(cache_base.to_str().unwrap());
 
-    let handle = storage.prepare_cache_write(1, "public", "users");
+    let handle = storage.prepare_cache_write("1", "public", "users");
 
     // Verify handle fields
-    assert_eq!(handle.connection_id, 1);
+    assert_eq!(handle.connection_id, "1");
     assert_eq!(handle.schema, "public");
     assert_eq!(handle.table, "users");
     assert!(!handle.version.is_empty());
@@ -128,7 +128,7 @@ async fn test_filesystem_finalize_cache_write_returns_url() {
     let storage = FilesystemStorage::new(cache_base.to_str().unwrap());
 
     // Prepare write handle
-    let handle = storage.prepare_cache_write(1, "public", "users");
+    let handle = storage.prepare_cache_write("1", "public", "users");
 
     // Create parent directories and write a test file
     fs::create_dir_all(handle.local_path.parent().unwrap()).unwrap();
@@ -154,7 +154,7 @@ async fn test_filesystem_prepare_and_finalize_path_consistency() {
     let storage = FilesystemStorage::new(cache_base.to_str().unwrap());
 
     // Prepare write handle
-    let handle = storage.prepare_cache_write(1, "public", "orders");
+    let handle = storage.prepare_cache_write("1", "public", "orders");
 
     // Create parent directories and write a test file
     fs::create_dir_all(handle.local_path.parent().unwrap()).unwrap();
@@ -184,7 +184,7 @@ async fn test_filesystem_delete_prefix_with_file_url() {
     let storage = FilesystemStorage::new(cache_base.to_str().unwrap());
 
     // Prepare and finalize a cache write (simulating what refresh_table does)
-    let handle = storage.prepare_cache_write(1, "public", "orders");
+    let handle = storage.prepare_cache_write("1", "public", "orders");
     fs::create_dir_all(handle.local_path.parent().unwrap()).unwrap();
     fs::write(&handle.local_path, b"test parquet data").unwrap();
 
@@ -223,11 +223,11 @@ async fn test_filesystem_delete_prefix_with_raw_path() {
     let storage = FilesystemStorage::new(cache_base.to_str().unwrap());
 
     // Write some data
-    let url = storage.cache_url(1, "public", "users");
+    let url = storage.cache_url("1", "public", "users");
     storage.write(&url, b"test").await.unwrap();
 
     // cache_prefix returns a raw path (no file:// prefix)
-    let prefix = storage.cache_prefix(1);
+    let prefix = storage.cache_prefix("1");
     assert!(
         !prefix.starts_with("file://"),
         "cache_prefix should return raw path"

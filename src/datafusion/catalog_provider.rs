@@ -12,7 +12,7 @@ use std::sync::{Arc, RwLock};
 /// Lazily creates schema providers as they are accessed.
 #[derive(Debug)]
 pub struct RuntimeCatalogProvider {
-    connection_id: i32,
+    connection_id: String,
     connection_name: String,
     source: Arc<Source>,
     catalog: Arc<dyn CatalogManager>,
@@ -22,7 +22,7 @@ pub struct RuntimeCatalogProvider {
 
 impl RuntimeCatalogProvider {
     pub fn new(
-        connection_id: i32,
+        connection_id: String,
         connection_name: String,
         source: Arc<Source>,
         catalog: Arc<dyn CatalogManager>,
@@ -58,7 +58,7 @@ impl RuntimeCatalogProvider {
 
         // Create new schema provider
         let schema_provider = Arc::new(RuntimeSchemaProvider::new(
-            self.connection_id,
+            self.connection_id.clone(),
             self.connection_name.clone(),
             schema_name.to_string(),
             self.source.clone(),
@@ -81,7 +81,7 @@ impl CatalogProvider for RuntimeCatalogProvider {
     fn schema_names(&self) -> Vec<String> {
         // Return schema names tracked in the catalog store for this connection
         // Uses block_on since CatalogProvider trait methods are sync
-        match block_on(self.catalog.list_tables(Some(self.connection_id))) {
+        match block_on(self.catalog.list_tables(Some(&self.connection_id))) {
             Ok(tables) => {
                 let mut schemas: Vec<String> = tables
                     .into_iter()
@@ -99,7 +99,7 @@ impl CatalogProvider for RuntimeCatalogProvider {
     fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
         // Check if this schema exists in our catalog
         // Uses block_on since CatalogProvider trait methods are sync
-        let schema_exists = match block_on(self.catalog.list_tables(Some(self.connection_id))) {
+        let schema_exists = match block_on(self.catalog.list_tables(Some(&self.connection_id))) {
             Ok(tables) => tables.iter().any(|t| t.schema_name == name),
             Err(_) => false,
         };

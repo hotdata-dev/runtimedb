@@ -35,7 +35,7 @@ pub async fn information_schema_handler(
 
     // Get all connections to map connection_id to connection name
     let connections = engine.list_connections().await?;
-    let connection_map: HashMap<i32, String> =
+    let connection_map: HashMap<String, String> =
         connections.into_iter().map(|c| (c.id, c.name)).collect();
 
     // Convert to API response format

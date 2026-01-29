@@ -20,8 +20,7 @@ impl From<DateTime<Utc>> for OptimisticLock {
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ConnectionInfo {
-    pub id: i32,
-    pub external_id: String,
+    pub id: String,
     pub name: String,
     pub source_type: String,
     pub config_json: String,
@@ -32,7 +31,7 @@ pub struct ConnectionInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct TableInfo {
     pub id: i32,
-    pub connection_id: i32,
+    pub connection_id: String,
     pub schema_name: String,
     pub table_name: String,
     pub parquet_path: Option<String>,
@@ -107,22 +106,19 @@ pub trait CatalogManager: Debug + Send + Sync {
         config_json: &str,
         secret_id: Option<&str>,
     ) -> Result<String>;
-    async fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>>;
-    async fn get_connection_by_external_id(
-        &self,
-        external_id: &str,
-    ) -> Result<Option<ConnectionInfo>>;
+    async fn get_connection(&self, id: &str) -> Result<Option<ConnectionInfo>>;
+    async fn get_connection_by_name(&self, name: &str) -> Result<Option<ConnectionInfo>>;
     async fn add_table(
         &self,
-        connection_id: i32,
+        connection_id: &str,
         schema_name: &str,
         table_name: &str,
         arrow_schema_json: &str,
     ) -> Result<i32>;
-    async fn list_tables(&self, connection_id: Option<i32>) -> Result<Vec<TableInfo>>;
+    async fn list_tables(&self, connection_id: Option<&str>) -> Result<Vec<TableInfo>>;
     async fn get_table(
         &self,
-        connection_id: i32,
+        connection_id: &str,
         schema_name: &str,
         table_name: &str,
     ) -> Result<Option<TableInfo>>;
@@ -131,19 +127,16 @@ pub trait CatalogManager: Debug + Send + Sync {
     /// Clear table cache metadata (set paths to NULL) without deleting files.
     async fn clear_table_cache_metadata(
         &self,
-        connection_id: i32,
+        connection_id: &str,
         schema_name: &str,
         table_name: &str,
     ) -> Result<TableInfo>;
 
     /// Clear cache metadata for all tables in a connection (set paths to NULL).
-    async fn clear_connection_cache_metadata(&self, name: &str) -> Result<()>;
+    async fn clear_connection_cache_metadata(&self, connection_id: &str) -> Result<()>;
 
     /// Delete connection and all associated table rows from metadata.
-    async fn delete_connection(&self, name: &str) -> Result<()>;
-
-    /// Get connection by internal ID.
-    async fn get_connection_by_id(&self, id: i32) -> Result<Option<ConnectionInfo>>;
+    async fn delete_connection(&self, connection_id: &str) -> Result<()>;
 
     // NOTE: Stale table detection (tables removed from remote source) is intentionally
     // not implemented. The naive approach of comparing discovered vs existing tables

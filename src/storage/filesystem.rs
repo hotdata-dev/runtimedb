@@ -22,20 +22,16 @@ impl FilesystemStorage {
 
 #[async_trait]
 impl StorageManager for FilesystemStorage {
-    fn cache_url(&self, connection_id: i32, schema: &str, table: &str) -> String {
+    fn cache_url(&self, connection_id: &str, schema: &str, table: &str) -> String {
         // Return directory path (DLT creates <table>/*.parquet files)
         // This matches S3Storage behavior and works with DataFusion's ListingTable
-        let path = self
-            .cache_base
-            .join(connection_id.to_string())
-            .join(schema)
-            .join(table);
+        let path = self.cache_base.join(connection_id).join(schema).join(table);
         format!("file://{}", path.display())
     }
 
-    fn cache_prefix(&self, connection_id: i32) -> String {
+    fn cache_prefix(&self, connection_id: &str) -> String {
         self.cache_base
-            .join(connection_id.to_string())
+            .join(connection_id)
             .to_string_lossy()
             .to_string()
     }
@@ -128,7 +124,7 @@ impl StorageManager for FilesystemStorage {
     )]
     fn prepare_cache_write(
         &self,
-        connection_id: i32,
+        connection_id: &str,
         schema: &str,
         table: &str,
     ) -> CacheWriteHandle {
@@ -140,7 +136,7 @@ impl StorageManager for FilesystemStorage {
         let version = nanoid::nanoid!(8);
         let local_path = self
             .cache_base
-            .join(connection_id.to_string())
+            .join(connection_id)
             .join(schema)
             .join(table)
             .join(&version)
@@ -149,7 +145,7 @@ impl StorageManager for FilesystemStorage {
         CacheWriteHandle {
             local_path,
             version,
-            connection_id,
+            connection_id: connection_id.to_string(),
             schema: schema.to_string(),
             table: table.to_string(),
         }
@@ -168,7 +164,7 @@ impl StorageManager for FilesystemStorage {
         // Return the versioned directory URL (for ListingTable compatibility).
         let version_dir = self
             .cache_base
-            .join(handle.connection_id.to_string())
+            .join(&handle.connection_id)
             .join(&handle.schema)
             .join(&handle.table)
             .join(&handle.version);
@@ -234,8 +230,8 @@ mod tests {
     #[test]
     fn test_cache_write_handle_unique_versions() {
         let storage = FilesystemStorage::new("/tmp/cache");
-        let handle1 = storage.prepare_cache_write(1, "main", "orders");
-        let handle2 = storage.prepare_cache_write(1, "main", "orders");
+        let handle1 = storage.prepare_cache_write("1", "main", "orders");
+        let handle2 = storage.prepare_cache_write("1", "main", "orders");
         assert_ne!(
             handle1.version, handle2.version,
             "Versions should be unique"
@@ -249,10 +245,10 @@ mod tests {
     #[test]
     fn test_cache_write_handle_structure() {
         let storage = FilesystemStorage::new("/tmp/cache");
-        let handle = storage.prepare_cache_write(42, "public", "users");
+        let handle = storage.prepare_cache_write("42", "public", "users");
         let path_str = handle.local_path.to_string_lossy();
 
-        assert_eq!(handle.connection_id, 42);
+        assert_eq!(handle.connection_id, "42");
         assert_eq!(handle.schema, "public");
         assert_eq!(handle.table, "users");
         assert!(!handle.version.is_empty(), "Version should not be empty");
@@ -279,8 +275,8 @@ mod tests {
     #[test]
     fn test_versioned_directories_are_separate() {
         let storage = FilesystemStorage::new("/tmp/cache");
-        let handle1 = storage.prepare_cache_write(1, "main", "orders");
-        let handle2 = storage.prepare_cache_write(1, "main", "orders");
+        let handle1 = storage.prepare_cache_write("1", "main", "orders");
+        let handle2 = storage.prepare_cache_write("1", "main", "orders");
 
         // Both should end with data.parquet
         assert!(handle1.local_path.ends_with("data.parquet"));
