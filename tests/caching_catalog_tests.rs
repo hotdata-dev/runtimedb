@@ -327,6 +327,75 @@ async fn test_warmup_distributed_lock() {
     );
 }
 
+/// Test that dataset mutations invalidate list_dataset_table_names cache.
+#[tokio::test]
+async fn test_dataset_cache_invalidation() {
+    let (_redis, redis_url) = start_redis().await;
+    let (_dir, inner) = create_sqlite_catalog().await;
+
+    let config = CacheConfig {
+        redis_url: Some(redis_url.clone()),
+        hard_ttl_secs: 60,
+        warmup_interval_secs: 0,
+        warmup_lock_ttl_secs: 30,
+        key_prefix: "dataset_test:".to_string(),
+    };
+
+    let caching = CachingCatalogManager::new(inner.clone(), &redis_url, config)
+        .await
+        .unwrap();
+
+    let schema_name = "datasets";
+
+    // Initially no datasets
+    let names = caching.list_dataset_table_names(schema_name).await.unwrap();
+    assert!(names.is_empty());
+
+    // Create a dataset
+    let dataset = runtimedb::catalog::DatasetInfo {
+        id: "ds-001".to_string(),
+        label: "Test Dataset".to_string(),
+        schema_name: schema_name.to_string(),
+        table_name: "my_table".to_string(),
+        parquet_url: "s3://bucket/data.parquet".to_string(),
+        arrow_schema_json: "{}".to_string(),
+        source_type: "upload".to_string(),
+        source_config: "{}".to_string(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    caching.create_dataset(&dataset).await.unwrap();
+
+    // list_dataset_table_names should now include the new table
+    let names = caching.list_dataset_table_names(schema_name).await.unwrap();
+    assert_eq!(
+        names,
+        vec!["my_table"],
+        "create_dataset should invalidate cache"
+    );
+
+    // Update the dataset (rename table)
+    caching
+        .update_dataset("ds-001", "Renamed Dataset", "renamed_table")
+        .await
+        .unwrap();
+
+    // Cache should reflect the update
+    let names = caching.list_dataset_table_names(schema_name).await.unwrap();
+    assert_eq!(
+        names,
+        vec!["renamed_table"],
+        "update_dataset should invalidate cache"
+    );
+
+    // Delete the dataset
+    caching.delete_dataset("ds-001").await.unwrap();
+
+    // Cache should reflect the deletion
+    let names = caching.list_dataset_table_names(schema_name).await.unwrap();
+    assert!(names.is_empty(), "delete_dataset should invalidate cache");
+}
+
 #[tokio::test]
 async fn test_redis_unavailable_at_startup_fails() {
     let (_dir, inner) = create_sqlite_catalog().await;

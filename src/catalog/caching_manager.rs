@@ -701,10 +701,16 @@ impl CatalogManager for CachingCatalogManager {
         self.inner.release_upload(id).await
     }
 
-    // Dataset management methods (mostly passthrough, except list_dataset_table_names)
+    // Dataset management methods (with cache invalidation for list_dataset_table_names)
 
     async fn create_dataset(&self, dataset: &DatasetInfo) -> Result<()> {
-        self.inner.create_dataset(dataset).await
+        self.inner.create_dataset(dataset).await?;
+
+        // Invalidate dataset table names cache for the affected schema
+        self.cache_del(&self.key_tbl_names(&dataset.schema_name))
+            .await;
+
+        Ok(())
     }
 
     async fn get_dataset(&self, id: &str) -> Result<Option<DatasetInfo>> {
@@ -730,11 +736,28 @@ impl CatalogManager for CachingCatalogManager {
     }
 
     async fn update_dataset(&self, id: &str, label: &str, table_name: &str) -> Result<bool> {
-        self.inner.update_dataset(id, label, table_name).await
+        // Get dataset before update to know which schema to invalidate
+        let dataset = self.inner.get_dataset(id).await?;
+
+        let result = self.inner.update_dataset(id, label, table_name).await?;
+
+        // Invalidate dataset table names cache for the affected schema
+        if let Some(ds) = dataset {
+            self.cache_del(&self.key_tbl_names(&ds.schema_name)).await;
+        }
+
+        Ok(result)
     }
 
     async fn delete_dataset(&self, id: &str) -> Result<Option<DatasetInfo>> {
-        self.inner.delete_dataset(id).await
+        let deleted = self.inner.delete_dataset(id).await?;
+
+        // Invalidate dataset table names cache for the affected schema
+        if let Some(ref ds) = deleted {
+            self.cache_del(&self.key_tbl_names(&ds.schema_name)).await;
+        }
+
+        Ok(deleted)
     }
 
     // ─────────────────────────────────────────────────────────────────────────
