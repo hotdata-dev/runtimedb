@@ -91,7 +91,7 @@ where
 {
     pub async fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
         query_as::<DB, ConnectionInfo>(
-            "SELECT external_id as id, name, source_type, config_json, secret_id FROM connections ORDER BY name",
+            "SELECT id, name, source_type, config_json, secret_id FROM connections ORDER BY name",
         )
         .fetch_all(&self.pool)
         .await
@@ -118,9 +118,9 @@ where
         const MAX_RETRIES: usize = 3;
 
         for attempt in 0..MAX_RETRIES {
-            let external_id = crate::id::generate_connection_id();
+            let id = crate::id::generate_connection_id();
             let insert_sql = format!(
-                "INSERT INTO connections (external_id, name, source_type, config_json, secret_id) VALUES ({}, {}, {}, {}, {})",
+                "INSERT INTO connections (id, name, source_type, config_json, secret_id) VALUES ({}, {}, {}, {}, {})",
                 DB::bind_param(1),
                 DB::bind_param(2),
                 DB::bind_param(3),
@@ -129,7 +129,7 @@ where
             );
 
             let result = query(&insert_sql)
-                .bind(external_id.as_str())
+                .bind(id.as_str())
                 .bind(name)
                 .bind(source_type)
                 .bind(config_json)
@@ -139,8 +139,8 @@ where
 
             match result {
                 Ok(_) => {
-                    // Success - return the external_id we just inserted
-                    return Ok(external_id);
+                    // Success - return the id we just inserted
+                    return Ok(id);
                 }
                 Err(sqlx::Error::Database(db_err)) => {
                     // Check for unique constraint violation using structured error inspection
@@ -156,9 +156,9 @@ where
                     };
 
                     if is_unique_violation {
-                        // Check if the violation is on external_id (retry) or name (conflict error)
+                        // Check if the violation is on id (retry) or name (conflict error)
                         let msg = db_err.message().to_lowercase();
-                        if msg.contains("external_id") && attempt < MAX_RETRIES - 1 {
+                        if msg.contains("connections.id") && attempt < MAX_RETRIES - 1 {
                             // Retry with new ID
                             continue;
                         }
@@ -181,7 +181,7 @@ where
 
     pub async fn get_connection(&self, id: &str) -> Result<Option<ConnectionInfo>> {
         let sql = format!(
-            "SELECT external_id as id, name, source_type, config_json, secret_id FROM connections WHERE external_id = {}",
+            "SELECT id, name, source_type, config_json, secret_id FROM connections WHERE id = {}",
             DB::bind_param(1)
         );
 
@@ -194,7 +194,7 @@ where
 
     pub async fn get_connection_by_name(&self, name: &str) -> Result<Option<ConnectionInfo>> {
         let sql = format!(
-            "SELECT external_id as id, name, source_type, config_json, secret_id FROM connections WHERE name = {}",
+            "SELECT id, name, source_type, config_json, secret_id FROM connections WHERE name = {}",
             DB::bind_param(1)
         );
 
@@ -394,10 +394,8 @@ where
             .execute(&self.pool)
             .await?;
 
-        let delete_connection_sql = format!(
-            "DELETE FROM connections WHERE external_id = {}",
-            DB::bind_param(1)
-        );
+        let delete_connection_sql =
+            format!("DELETE FROM connections WHERE id = {}", DB::bind_param(1));
 
         query(&delete_connection_sql)
             .bind(connection_id)

@@ -303,7 +303,7 @@ impl RuntimeEngine {
 
         // Store config as JSON (includes "type" from serde tag)
         let config_json = serde_json::to_string(&source)?;
-        let external_id = self
+        let connection_id = self
             .catalog
             .add_connection(name, source_type, &config_json, secret_id.as_deref())
             .await?;
@@ -311,7 +311,7 @@ impl RuntimeEngine {
         // Get the connection to retrieve info for RuntimeCatalogProvider
         let conn = self
             .catalog
-            .get_connection(&external_id)
+            .get_connection(&connection_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Connection not found after creation"))?;
 
@@ -326,10 +326,10 @@ impl RuntimeEngine {
 
         self.df_ctx.register_catalog(name, catalog_provider);
 
-        tracing::Span::current().record("runtimedb.connection_id", &external_id);
+        tracing::Span::current().record("runtimedb.connection_id", &connection_id);
         info!("Connection '{}' registered (discovery pending)", name);
 
-        Ok(external_id)
+        Ok(connection_id)
     }
 
     /// Connect to a new external data source and register it as a catalog.
@@ -622,24 +622,24 @@ impl RuntimeEngine {
     #[tracing::instrument(
         name = "remove_connection",
         skip(self),
-        fields(runtimedb.connection_id = %external_id)
+        fields(runtimedb.connection_id = %connection_id)
     )]
-    pub async fn remove_connection(&self, external_id: &str) -> Result<()> {
+    pub async fn remove_connection(&self, connection_id: &str) -> Result<()> {
         // Get connection info (validates it exists)
         let conn = self
             .catalog
-            .get_connection(external_id)
+            .get_connection(connection_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", external_id))?;
+            .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", connection_id))?;
 
         // Capture secret_id before deleting the connection
         let secret_id = conn.secret_id.clone();
 
         // Step 1: Delete metadata first
-        self.catalog.delete_connection(external_id).await?;
+        self.catalog.delete_connection(connection_id).await?;
 
         // Step 2: Delete the physical files
-        self.delete_connection_files(external_id).await?;
+        self.delete_connection_files(connection_id).await?;
 
         // Step 3: Clean up orphaned secret if applicable
         if let Some(ref secret_id) = secret_id {
