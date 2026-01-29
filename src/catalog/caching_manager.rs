@@ -240,9 +240,23 @@ impl CatalogManager for CachingCatalogManager {
         config_json: &str,
         secret_id: Option<&str>,
     ) -> Result<String> {
-        self.inner
+        let id = self
+            .inner
             .add_connection(name, source_type, config_json, secret_id)
-            .await
+            .await?;
+
+        // Write-through: update connection list cache
+        if let Ok(conns) = self.inner.list_connections().await {
+            let _ = self.cache_set(&self.key_conn_list(), &conns).await;
+        }
+
+        // Cache the new connection
+        if let Ok(Some(conn)) = self.inner.get_connection(&id).await {
+            let _ = self.cache_set(&self.key_conn_id(&id), &conn).await;
+            let _ = self.cache_set(&self.key_conn_name(name), &conn).await;
+        }
+
+        Ok(id)
     }
 
     async fn add_table(
@@ -252,13 +266,51 @@ impl CatalogManager for CachingCatalogManager {
         table_name: &str,
         arrow_schema_json: &str,
     ) -> Result<i32> {
-        self.inner
+        let id = self
+            .inner
             .add_table(connection_id, schema_name, table_name, arrow_schema_json)
+            .await?;
+
+        // Write-through: update table caches
+        if let Ok(Some(table)) = self
+            .inner
+            .get_table(connection_id, schema_name, table_name)
             .await
+        {
+            let _ = self
+                .cache_set(
+                    &self.key_tbl(connection_id, schema_name, table_name),
+                    &table,
+                )
+                .await;
+        }
+        if let Ok(tables) = self.inner.list_tables(Some(connection_id)).await {
+            let _ = self
+                .cache_set(&self.key_tbl_list(Some(connection_id)), &tables)
+                .await;
+        }
+        if let Ok(tables) = self.inner.list_tables(None).await {
+            let _ = self.cache_set(&self.key_tbl_list(None), &tables).await;
+        }
+        if let Ok(names) = self.inner.list_dataset_table_names(schema_name).await {
+            let _ = self
+                .cache_set(&self.key_tbl_names(schema_name), &names)
+                .await;
+        }
+
+        Ok(id)
     }
 
     async fn update_table_sync(&self, table_id: i32, parquet_path: &str) -> Result<()> {
-        self.inner.update_table_sync(table_id, parquet_path).await
+        self.inner.update_table_sync(table_id, parquet_path).await?;
+
+        // We don't have connection_id/schema/table from just table_id, so invalidate list caches
+        // The individual table cache will be stale but will be refreshed on next read
+        if let Ok(tables) = self.inner.list_tables(None).await {
+            let _ = self.cache_set(&self.key_tbl_list(None), &tables).await;
+        }
+
+        Ok(())
     }
 
     async fn clear_table_cache_metadata(
@@ -267,19 +319,90 @@ impl CatalogManager for CachingCatalogManager {
         schema_name: &str,
         table_name: &str,
     ) -> Result<TableInfo> {
-        self.inner
+        let table = self
+            .inner
             .clear_table_cache_metadata(connection_id, schema_name, table_name)
-            .await
+            .await?;
+
+        // Write-through: update table caches
+        let _ = self
+            .cache_set(
+                &self.key_tbl(connection_id, schema_name, table_name),
+                &table,
+            )
+            .await;
+        if let Ok(tables) = self.inner.list_tables(Some(connection_id)).await {
+            let _ = self
+                .cache_set(&self.key_tbl_list(Some(connection_id)), &tables)
+                .await;
+        }
+        if let Ok(tables) = self.inner.list_tables(None).await {
+            let _ = self.cache_set(&self.key_tbl_list(None), &tables).await;
+        }
+
+        Ok(table)
     }
 
     async fn clear_connection_cache_metadata(&self, connection_id: &str) -> Result<()> {
         self.inner
             .clear_connection_cache_metadata(connection_id)
-            .await
+            .await?;
+
+        // Write-through: update table list caches
+        if let Ok(tables) = self.inner.list_tables(Some(connection_id)).await {
+            let _ = self
+                .cache_set(&self.key_tbl_list(Some(connection_id)), &tables)
+                .await;
+        }
+        if let Ok(tables) = self.inner.list_tables(None).await {
+            let _ = self.cache_set(&self.key_tbl_list(None), &tables).await;
+        }
+
+        // Invalidate individual table caches for this connection
+        let pattern = format!(
+            "{}tbl:{}:*",
+            self.prefix(),
+            encode_key_segment(connection_id)
+        );
+        self.cache_del_pattern(&pattern).await;
+
+        Ok(())
     }
 
     async fn delete_connection(&self, connection_id: &str) -> Result<()> {
-        self.inner.delete_connection(connection_id).await
+        // Fetch connection info before deletion (needed for name-based cache key)
+        let conn_info = self.inner.get_connection(connection_id).await?;
+
+        self.inner.delete_connection(connection_id).await?;
+
+        // Write-through: update connection list cache
+        if let Ok(conns) = self.inner.list_connections().await {
+            let _ = self.cache_set(&self.key_conn_list(), &conns).await;
+        }
+
+        // Delete connection cache keys
+        self.cache_del(&self.key_conn_id(connection_id)).await;
+        if let Some(conn) = conn_info {
+            self.cache_del(&self.key_conn_name(&conn.name)).await;
+        }
+
+        // Write-through: update global table list
+        if let Ok(tables) = self.inner.list_tables(None).await {
+            let _ = self.cache_set(&self.key_tbl_list(None), &tables).await;
+        }
+
+        // Delete all table caches for this connection
+        self.cache_del(&self.key_tbl_list(Some(connection_id)))
+            .await;
+        self.cache_del(&self.key_tbl_names(connection_id)).await;
+        let pattern = format!(
+            "{}tbl:{}:*",
+            self.prefix(),
+            encode_key_segment(connection_id)
+        );
+        self.cache_del_pattern(&pattern).await;
+
+        Ok(())
     }
 
     async fn schedule_file_deletion(&self, path: &str, delete_after: DateTime<Utc>) -> Result<()> {
