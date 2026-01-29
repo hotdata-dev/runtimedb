@@ -2159,17 +2159,23 @@ impl RuntimeEngineBuilder {
         };
 
         // Wrap catalog with caching layer if Redis is configured
+        // Keep a reference to the CachingCatalogManager for warmup loop startup
+        let caching_catalog: Option<Arc<CachingCatalogManager>>;
         let catalog: Arc<dyn CatalogManager> = if let Some(cache_config) = &self.cache_config {
             if let Some(ref redis_url) = cache_config.redis_url {
-                Arc::new(
+                let cm = Arc::new(
                     CachingCatalogManager::new(catalog, redis_url, cache_config.clone())
                         .await
                         .map_err(|e| anyhow::anyhow!("Failed to create caching catalog: {}", e))?,
-                )
+                );
+                caching_catalog = Some(Arc::clone(&cm));
+                cm
             } else {
+                caching_catalog = None;
                 catalog
             }
         } else {
+            caching_catalog = None;
             catalog
         };
 
@@ -2259,17 +2265,29 @@ impl RuntimeEngineBuilder {
         );
 
         // Start cache warmup loop if enabled
-        if let Some(cache_config) = &self.cache_config {
-            if cache_config.warmup_interval_secs > 0 && cache_config.redis_url.is_some() {
-                // Generate a unique node ID for distributed lock
-                let _node_id = format!("runtimedb-{}", uuid::Uuid::new_v4());
-
-                // Need to downcast to CachingCatalogManager to call start_warmup_loop
-                // This is a bit awkward but necessary since we store Arc<dyn CatalogManager>
-                // For now, we'll skip this and document that warmup needs manual start
-                // TODO: Consider storing the CachingCatalogManager separately for warmup
+        let warmup_handle = if let Some(cache_config) = &self.cache_config {
+            if cache_config.warmup_interval_secs > 0 {
+                if let Some(ref cm) = caching_catalog {
+                    // Generate a unique node ID for distributed lock
+                    let node_id = format!("runtimedb-{}", uuid::Uuid::new_v4());
+                    info!(
+                        "Starting cache warmup loop with interval {}s",
+                        cache_config.warmup_interval_secs
+                    );
+                    Some(cm.start_warmup_loop(node_id))
+                } else {
+                    warn!(
+                        "Cache warmup configured (warmup_interval_secs={}) but Redis not available",
+                        cache_config.warmup_interval_secs
+                    );
+                    None
+                }
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
         let mut engine = RuntimeEngine {
             catalog,
@@ -2282,7 +2300,7 @@ impl RuntimeEngineBuilder {
             deletion_grace_period: self.deletion_grace_period,
             deletion_worker_interval: self.deletion_worker_interval,
             parallel_refresh_count: self.parallel_refresh_count,
-            cache_warmup_handle: Mutex::new(None),
+            cache_warmup_handle: Mutex::new(warmup_handle),
         };
 
         // Register all existing connections as DataFusion catalogs
