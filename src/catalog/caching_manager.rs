@@ -270,8 +270,8 @@ impl CachingCatalogManager {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
         // Skip missed ticks to prevent back-to-back refreshes if a cycle exceeds the interval
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // Don't run immediately on first tick
-        interval.tick().await;
+        // Note: We don't skip the first tick - we want to refresh immediately on startup.
+        // The distributed lock prevents multiple nodes from refreshing simultaneously.
 
         let prefix = &state.config.key_prefix;
         let lock_ttl = state.config.refresh_lock_ttl_secs();
