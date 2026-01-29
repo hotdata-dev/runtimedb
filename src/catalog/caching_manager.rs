@@ -582,7 +582,8 @@ impl CatalogManager for CachingCatalogManager {
         // Delete all table caches for this connection
         self.cache_del(&self.key_tbl_list(Some(connection_id)))
             .await;
-        self.cache_del(&self.key_tbl_names(connection_id)).await;
+        // Note: We don't delete key_tbl_names here because it's schema-scoped, not connection-scoped.
+        // Dataset table names cache is keyed by schema_name, not connection_id.
         let pattern = format!(
             "{}tbl:{}:*",
             self.prefix(),
