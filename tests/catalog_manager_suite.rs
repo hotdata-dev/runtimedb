@@ -937,7 +937,39 @@ async fn sqlite_v3_migration_preserves_data() {
         .unwrap();
     assert_eq!(table_count.0, 3, "All 3 tables should be preserved");
 
-    // Verify foreign key works by checking we can join
+    // Verify foreign key constraint exists using PRAGMA foreign_key_list
+    let fk_list: Vec<(i32, i32, String, String, String, String, String, String)> =
+        sqlx::query_as("PRAGMA foreign_key_list(tables)")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(fk_list.len(), 1, "tables should have exactly one FK");
+    assert_eq!(
+        fk_list[0].2, "connections",
+        "FK should reference connections table"
+    );
+    assert_eq!(
+        fk_list[0].3, "connection_id",
+        "FK should be on connection_id column"
+    );
+    assert_eq!(fk_list[0].4, "id", "FK should reference id column");
+
+    // Verify FK is enforced by attempting insert with bogus connection_id
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let bad_insert = sqlx::query(
+        "INSERT INTO tables (connection_id, schema_name, table_name) VALUES ('nonexistent', 'test', 'test')",
+    )
+    .execute(&pool)
+    .await;
+    assert!(
+        bad_insert.is_err(),
+        "Insert with invalid connection_id should fail due to FK constraint"
+    );
+
+    // Verify join still works (data integrity check)
     let joined: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT c.name, t.schema_name, t.table_name
          FROM tables t
@@ -1121,7 +1153,34 @@ async fn postgres_v3_migration_preserves_data() {
         .unwrap();
     assert_eq!(table_count.0, 3, "All 3 tables should be preserved");
 
-    // Verify foreign key works by checking we can join
+    // Verify foreign key constraint exists by querying pg_constraint
+    let fk_exists: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM pg_constraint c
+         JOIN pg_class t ON c.conrelid = t.oid
+         WHERE t.relname = 'tables'
+           AND c.contype = 'f'
+           AND c.conname = 'tables_connection_id_fkey'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        fk_exists.0, 1,
+        "FK constraint tables_connection_id_fkey should exist"
+    );
+
+    // Verify FK is enforced by attempting insert with bogus connection_id
+    let bad_insert = sqlx::query(
+        "INSERT INTO tables (connection_id, schema_name, table_name) VALUES ('nonexistent', 'test', 'test')",
+    )
+    .execute(&pool)
+    .await;
+    assert!(
+        bad_insert.is_err(),
+        "Insert with invalid connection_id should fail due to FK constraint"
+    );
+
+    // Verify join still works (data integrity check)
     let joined: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT c.name, t.schema_name, t.table_name
          FROM tables t
