@@ -2486,8 +2486,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_from_config_sqlite_filesystem() {
         use crate::config::{
-            AppConfig, CatalogConfig, LiquidCacheConfig, PathsConfig, SecretsConfig, ServerConfig,
-            StorageConfig,
+            AppConfig, CacheConfig, CatalogConfig, LiquidCacheConfig, PathsConfig, SecretsConfig,
+            ServerConfig, StorageConfig,
         };
 
         let temp_dir = TempDir::new().unwrap();
@@ -2525,6 +2525,7 @@ mod tests {
                 enabled: false,
                 server_address: None,
             },
+            cache: CacheConfig::default(),
         };
 
         let engine = RuntimeEngine::from_config(&config).await;

@@ -12,6 +12,8 @@ pub struct AppConfig {
     pub secrets: SecretsConfig,
     #[serde(default)]
     pub liquid_cache: LiquidCacheConfig,
+    #[serde(default)]
+    pub cache: CacheConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -77,6 +79,36 @@ pub struct LiquidCacheConfig {
     pub server_address: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct CacheConfig {
+    /// Redis connection URL. None = caching disabled.
+    pub redis_url: Option<String>,
+    /// Hard TTL in seconds. Default: 1800 (30 minutes).
+    #[serde(default = "default_cache_hard_ttl")]
+    pub hard_ttl_secs: u64,
+    /// Background warmup interval in seconds. 0 = disabled. Default: 0.
+    #[serde(default)]
+    pub warmup_interval_secs: u64,
+    /// Distributed lock TTL for warmup. Default: 300 (5 minutes).
+    #[serde(default = "default_warmup_lock_ttl")]
+    pub warmup_lock_ttl_secs: u64,
+    /// Key prefix. Default: "rdb:"
+    #[serde(default = "default_cache_key_prefix")]
+    pub key_prefix: String,
+}
+
+fn default_cache_hard_ttl() -> u64 {
+    1800
+}
+
+fn default_warmup_lock_ttl() -> u64 {
+    300
+}
+
+fn default_cache_key_prefix() -> String {
+    "rdb:".to_string()
+}
+
 impl AppConfig {
     /// Load configuration from file and environment variables
     pub fn load(config_path: &str) -> Result<Self> {
@@ -136,6 +168,17 @@ impl AppConfig {
                 // Filesystem storage uses paths config, no additional validation needed
             }
             _ => anyhow::bail!("Invalid storage type: {}", self.storage.storage_type),
+        }
+
+        // Validate cache config
+        if self.cache.warmup_interval_secs > 0
+            && self.cache.warmup_interval_secs >= self.cache.hard_ttl_secs
+        {
+            anyhow::bail!(
+                "Cache warmup_interval_secs ({}) must be less than hard_ttl_secs ({})",
+                self.cache.warmup_interval_secs,
+                self.cache.hard_ttl_secs
+            );
         }
 
         Ok(())
