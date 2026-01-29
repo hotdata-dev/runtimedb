@@ -89,6 +89,12 @@ pub struct DatasetInfo {
 /// Async interface for catalog operations.
 #[async_trait]
 pub trait CatalogManager: Debug + Send + Sync {
+    /// Initialize the catalog manager. Called after construction to start any background tasks.
+    /// Default implementation does nothing.
+    async fn init(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Close the catalog connection. This is idempotent and can be called multiple times.
     async fn close(&self) -> Result<()> {
         // Default implementation does nothing - sqlx pools handle cleanup automatically

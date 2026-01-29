@@ -79,9 +79,6 @@ pub struct RuntimeEngine {
     #[allow(dead_code)]
     deletion_worker_interval: Duration,
     parallel_refresh_count: usize,
-    /// Stored for potential future warmup loop management; handle is created when warmup starts
-    #[allow(dead_code)]
-    cache_warmup_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl RuntimeEngine {
@@ -2159,23 +2156,17 @@ impl RuntimeEngineBuilder {
         };
 
         // Wrap catalog with caching layer if Redis is configured
-        // Keep a reference to the CachingCatalogManager for warmup loop startup
-        let caching_catalog: Option<Arc<CachingCatalogManager>>;
         let catalog: Arc<dyn CatalogManager> = if let Some(cache_config) = &self.cache_config {
             if let Some(ref redis_url) = cache_config.redis_url {
-                let cm = Arc::new(
+                Arc::new(
                     CachingCatalogManager::new(catalog, redis_url, cache_config.clone())
                         .await
                         .map_err(|e| anyhow::anyhow!("Failed to create caching catalog: {}", e))?,
-                );
-                caching_catalog = Some(Arc::clone(&cm));
-                cm
+                )
             } else {
-                caching_catalog = None;
                 catalog
             }
         } else {
-            caching_catalog = None;
             catalog
         };
 
@@ -2264,30 +2255,8 @@ impl RuntimeEngineBuilder {
             self.deletion_worker_interval,
         );
 
-        // Start cache warmup loop if enabled
-        let warmup_handle = if let Some(cache_config) = &self.cache_config {
-            if cache_config.warmup_interval_secs > 0 {
-                if let Some(ref cm) = caching_catalog {
-                    // Generate a unique node ID for distributed lock
-                    let node_id = format!("runtimedb-{}", uuid::Uuid::new_v4());
-                    info!(
-                        "Starting cache warmup loop with interval {}s",
-                        cache_config.warmup_interval_secs
-                    );
-                    Some(cm.start_warmup_loop(node_id))
-                } else {
-                    warn!(
-                        "Cache warmup configured (warmup_interval_secs={}) but Redis not available",
-                        cache_config.warmup_interval_secs
-                    );
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        // Initialize catalog (starts warmup loop if configured)
+        catalog.init().await?;
 
         let mut engine = RuntimeEngine {
             catalog,
@@ -2300,7 +2269,6 @@ impl RuntimeEngineBuilder {
             deletion_grace_period: self.deletion_grace_period,
             deletion_worker_interval: self.deletion_worker_interval,
             parallel_refresh_count: self.parallel_refresh_count,
-            cache_warmup_handle: Mutex::new(warmup_handle),
         };
 
         // Register all existing connections as DataFusion catalogs

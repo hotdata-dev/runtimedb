@@ -20,6 +20,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 /// Wrapper around cached data with timestamp for TTL tracking.
@@ -34,22 +35,29 @@ fn encode_key_segment(s: &str) -> String {
     urlencoding::encode(s).into_owned()
 }
 
+/// Internal state for CachingCatalogManager.
+struct CachingCatalogManagerInner {
+    inner: Arc<dyn CatalogManager>,
+    redis: ConnectionManager,
+    config: CacheConfig,
+    warmup_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    shutdown_token: tokio_util::sync::CancellationToken,
+}
+
 /// Caching wrapper for CatalogManager implementations.
 ///
 /// Caches metadata calls in Redis with configurable TTL.
 /// Falls through to inner catalog if Redis is unavailable.
 pub struct CachingCatalogManager {
-    inner: Arc<dyn CatalogManager>,
-    redis: ConnectionManager,
-    config: CacheConfig,
+    state: Arc<CachingCatalogManagerInner>,
 }
 
 impl fmt::Debug for CachingCatalogManager {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CachingCatalogManager")
-            .field("inner", &self.inner)
+            .field("inner", &self.state.inner)
             .field("redis", &"<ConnectionManager>")
-            .field("config", &self.config)
+            .field("config", &self.state.config)
             .finish()
     }
 }
@@ -65,15 +73,34 @@ impl CachingCatalogManager {
         let redis = ConnectionManager::new(client).await?;
 
         Ok(Self {
-            inner,
-            redis,
-            config,
+            state: Arc::new(CachingCatalogManagerInner {
+                inner,
+                redis,
+                config,
+                warmup_handle: std::sync::Mutex::new(None),
+                shutdown_token: CancellationToken::new(),
+            }),
         })
     }
 
     /// Get the key prefix from config.
     fn prefix(&self) -> &str {
-        &self.config.key_prefix
+        &self.state.config.key_prefix
+    }
+
+    /// Get the config.
+    fn config(&self) -> &CacheConfig {
+        &self.state.config
+    }
+
+    /// Get a clone of the redis connection manager.
+    fn redis(&self) -> ConnectionManager {
+        self.state.redis.clone()
+    }
+
+    /// Get the inner catalog manager.
+    fn inner(&self) -> &Arc<dyn CatalogManager> {
+        &self.state.inner
     }
 
     /// Build a cache key for connections list.
@@ -127,7 +154,7 @@ impl CachingCatalogManager {
         Fut: std::future::Future<Output = Result<T>>,
     {
         // Try to get from Redis
-        let result: Result<Option<String>, _> = self.redis.clone().get(key).await;
+        let result: Result<Option<String>, _> = self.redis().get(key).await;
         match result {
             Ok(Some(json)) => {
                 // Deserialize cached entry
@@ -171,9 +198,8 @@ impl CachingCatalogManager {
         let json = serde_json::to_string(&entry)?;
 
         let _: () = self
-            .redis
-            .clone()
-            .set_ex(key, json, self.config.hard_ttl_secs)
+            .redis()
+            .set_ex(key, json, self.config().hard_ttl_secs)
             .await
             .map_err(|e| anyhow!("redis set failed: {}", e))?;
 
@@ -182,7 +208,7 @@ impl CachingCatalogManager {
 
     /// Delete a key from the cache.
     async fn cache_del(&self, key: &str) {
-        let result: Result<(), _> = self.redis.clone().del(key).await;
+        let result: Result<(), _> = self.redis().del(key).await;
         if let Err(e) = result {
             warn!("cache: failed to delete {}: {}", key, e);
         }
@@ -198,7 +224,7 @@ impl CachingCatalogManager {
                 .arg(pattern)
                 .arg("COUNT")
                 .arg(100)
-                .query_async(&mut self.redis.clone())
+                .query_async(&mut self.redis())
                 .await;
 
             match result {
@@ -219,68 +245,87 @@ impl CachingCatalogManager {
         }
     }
 
-    /// Start the background warmup loop.
+    /// Start the background warmup loop (internal).
     ///
-    /// Returns a handle that can be used to stop the loop.
-    pub fn start_warmup_loop(self: &Arc<Self>, node_id: String) -> tokio::task::JoinHandle<()> {
-        let this = Arc::clone(self);
-        tokio::spawn(async move {
-            this.warmup_loop(node_id).await;
-        })
+    /// Called from init() when warmup is enabled.
+    fn start_warmup_loop(&self, node_id: String) {
+        let state = Arc::clone(&self.state);
+        let interval_secs = self.config().warmup_interval_secs;
+        let shutdown_token = self.state.shutdown_token.clone();
+
+        let handle = tokio::spawn(async move {
+            Self::warmup_loop_inner(state, node_id, interval_secs, shutdown_token).await;
+        });
+
+        *self.state.warmup_handle.lock().unwrap() = Some(handle);
     }
 
     /// The warmup loop that periodically refreshes all cached metadata.
-    async fn warmup_loop(&self, node_id: String) {
-        if self.config.warmup_interval_secs == 0 {
-            return; // Warmup disabled
-        }
+    async fn warmup_loop_inner(
+        state: Arc<CachingCatalogManagerInner>,
+        node_id: String,
+        interval_secs: u64,
+        shutdown_token: CancellationToken,
+    ) {
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+        // Don't run immediately on first tick
+        interval.tick().await;
 
-        let interval = Duration::from_secs(self.config.warmup_interval_secs);
-        let prefix = &self.config.key_prefix;
+        let prefix = &state.config.key_prefix;
 
         loop {
-            tokio::time::sleep(interval).await;
+            tokio::select! {
+                _ = shutdown_token.cancelled() => {
+                    info!("cache warmup: received shutdown signal");
+                    break;
+                }
+                _ = interval.tick() => {
+                    // Try to acquire distributed lock
+                    let lock_key = format!("{}lock:warmup", prefix);
+                    let acquired = Self::try_acquire_lock_inner(&state, &lock_key, &node_id).await;
+                    if !acquired {
+                        continue;
+                    }
 
-            // Try to acquire distributed lock
-            let lock_key = format!("{}lock:warmup", prefix);
-            let acquired = self.try_acquire_lock(&lock_key, &node_id).await;
-            if !acquired {
-                continue;
+                    // Channel to signal lock loss
+                    let (lock_lost_tx, lock_lost_rx) = watch::channel(false);
+
+                    // Start heartbeat
+                    let heartbeat_handle =
+                        Self::start_heartbeat_inner(&state, lock_key.clone(), node_id.clone(), lock_lost_tx);
+
+                    // Run warmup phases
+                    Self::run_warmup_phases_inner(&state, lock_lost_rx).await;
+
+                    heartbeat_handle.abort();
+
+                    // Release the lock so other nodes can run warmup sooner
+                    Self::release_lock_inner(&state, &lock_key, &node_id).await;
+                }
             }
-
-            // Channel to signal lock loss
-            let (lock_lost_tx, lock_lost_rx) = watch::channel(false);
-
-            // Start heartbeat
-            let heartbeat_handle =
-                self.start_heartbeat(lock_key.clone(), node_id.clone(), lock_lost_tx);
-
-            // Run warmup phases
-            self.run_warmup_phases(lock_lost_rx).await;
-
-            heartbeat_handle.abort();
-
-            // Release the lock so other nodes can run warmup sooner
-            self.release_lock(&lock_key, &node_id).await;
         }
     }
 
     /// Try to acquire the distributed warmup lock.
-    async fn try_acquire_lock(&self, lock_key: &str, node_id: &str) -> bool {
+    async fn try_acquire_lock_inner(
+        state: &CachingCatalogManagerInner,
+        lock_key: &str,
+        node_id: &str,
+    ) -> bool {
         let result: Result<bool, _> = redis::cmd("SET")
             .arg(lock_key)
             .arg(node_id)
             .arg("NX")
             .arg("EX")
-            .arg(self.config.warmup_lock_ttl_secs)
-            .query_async(&mut self.redis.clone())
+            .arg(state.config.warmup_lock_ttl_secs)
+            .query_async(&mut state.redis.clone())
             .await;
 
         result.unwrap_or(false)
     }
 
     /// Release the warmup lock after successful completion.
-    async fn release_lock(&self, lock_key: &str, node_id: &str) {
+    async fn release_lock_inner(state: &CachingCatalogManagerInner, lock_key: &str, node_id: &str) {
         let script = r#"
             if redis.call("GET", KEYS[1]) == ARGV[1] then
                 return redis.call("DEL", KEYS[1])
@@ -293,19 +338,19 @@ impl CachingCatalogManager {
             .arg(1)
             .arg(lock_key)
             .arg(node_id)
-            .query_async(&mut self.redis.clone())
+            .query_async(&mut state.redis.clone())
             .await;
     }
 
     /// Start heartbeat task to extend lock TTL.
-    fn start_heartbeat(
-        &self,
+    fn start_heartbeat_inner(
+        state: &Arc<CachingCatalogManagerInner>,
         lock_key: String,
         node_id: String,
         lock_lost_tx: watch::Sender<bool>,
     ) -> tokio::task::JoinHandle<()> {
-        let redis = self.redis.clone();
-        let ttl = self.config.warmup_lock_ttl_secs;
+        let redis = state.redis.clone();
+        let ttl = state.config.warmup_lock_ttl_secs;
 
         tokio::spawn(async move {
             let extend_script = r#"
@@ -341,7 +386,10 @@ impl CachingCatalogManager {
     }
 
     /// Run all warmup phases with lock-loss checking.
-    async fn run_warmup_phases(&self, lock_lost_rx: watch::Receiver<bool>) {
+    async fn run_warmup_phases_inner(
+        state: &CachingCatalogManagerInner,
+        lock_lost_rx: watch::Receiver<bool>,
+    ) {
         // Helper to check if lock was lost
         macro_rules! check_lock {
             () => {
@@ -352,17 +400,23 @@ impl CachingCatalogManager {
             };
         }
 
+        let prefix = &state.config.key_prefix;
+
         // Phase 1: Refresh connections
-        let conns = match self.inner.list_connections().await {
+        let conns = match state.inner.list_connections().await {
             Ok(conns) => {
                 check_lock!();
-                if let Err(e) = self.cache_set(&self.key_conn_list(), &conns).await {
+                let key = format!("{}conn:list", prefix);
+                if let Err(e) = Self::cache_set_inner(state, &key, &conns).await {
                     warn!("cache warmup: failed to set conn:list: {}", e);
                 }
                 for conn in &conns {
                     check_lock!();
-                    let _ = self.cache_set(&self.key_conn_id(&conn.id), conn).await;
-                    let _ = self.cache_set(&self.key_conn_name(&conn.name), conn).await;
+                    let key_id = format!("{}conn:{}", prefix, encode_key_segment(&conn.id));
+                    let key_name =
+                        format!("{}conn:name:{}", prefix, encode_key_segment(&conn.name));
+                    let _ = Self::cache_set_inner(state, &key_id, conn).await;
+                    let _ = Self::cache_set_inner(state, &key_name, conn).await;
                 }
                 conns
             }
@@ -374,41 +428,98 @@ impl CachingCatalogManager {
 
         // Phase 2: Refresh global table list
         check_lock!();
-        if let Ok(tables) = self.inner.list_tables(None).await {
-            let _ = self.cache_set(&self.key_tbl_list(None), &tables).await;
+        if let Ok(tables) = state.inner.list_tables(None).await {
+            let key = format!("{}tbl:list:all", prefix);
+            let _ = Self::cache_set_inner(state, &key, &tables).await;
         }
 
         // Phase 3: Refresh per-connection tables
         for conn in &conns {
             check_lock!();
-            if let Ok(tables) = self.inner.list_tables(Some(&conn.id)).await {
-                let _ = self
-                    .cache_set(&self.key_tbl_list(Some(&conn.id)), &tables)
-                    .await;
+            if let Ok(tables) = state.inner.list_tables(Some(&conn.id)).await {
+                let key = format!("{}tbl:list:conn:{}", prefix, encode_key_segment(&conn.id));
+                let _ = Self::cache_set_inner(state, &key, &tables).await;
                 for table in &tables {
                     check_lock!();
-                    let key = self.key_tbl(&conn.id, &table.schema_name, &table.table_name);
-                    let _ = self.cache_set(&key, table).await;
+                    let key = format!(
+                        "{}tbl:{}:{}:{}",
+                        prefix,
+                        encode_key_segment(&conn.id),
+                        encode_key_segment(&table.schema_name),
+                        encode_key_segment(&table.table_name)
+                    );
+                    let _ = Self::cache_set_inner(state, &key, table).await;
                 }
             }
         }
 
         info!("cache warmup: completed successfully");
     }
+
+    /// Set a value in the cache with TTL (static version for warmup loop).
+    async fn cache_set_inner<T: Serialize>(
+        state: &CachingCatalogManagerInner,
+        key: &str,
+        data: &T,
+    ) -> Result<()> {
+        let entry = CachedEntry {
+            data,
+            cached_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+        };
+        let json = serde_json::to_string(&entry)?;
+
+        let _: () = state
+            .redis
+            .clone()
+            .set_ex(key, json, state.config.hard_ttl_secs)
+            .await
+            .map_err(|e| anyhow!("redis set failed: {}", e))?;
+
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl CatalogManager for CachingCatalogManager {
     // ─────────────────────────────────────────────────────────────────────────
+    // Lifecycle methods
+    // ─────────────────────────────────────────────────────────────────────────
+
+    async fn init(&self) -> Result<()> {
+        // Start warmup loop if configured
+        if self.config().warmup_interval_secs > 0 {
+            let node_id = format!("runtimedb-{}", uuid::Uuid::new_v4());
+            info!(
+                "Starting cache warmup loop with interval {}s",
+                self.config().warmup_interval_secs
+            );
+            self.start_warmup_loop(node_id);
+        }
+        Ok(())
+    }
+
+    async fn close(&self) -> Result<()> {
+        // Signal shutdown to warmup loop
+        self.state.shutdown_token.cancel();
+
+        // Take the handle out of the mutex (drop the guard before awaiting)
+        let handle = self.state.warmup_handle.lock().unwrap().take();
+        if let Some(h) = handle {
+            let _ = h.await;
+        }
+
+        self.inner().close().await
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Passthrough methods (no caching)
     // ─────────────────────────────────────────────────────────────────────────
 
-    async fn close(&self) -> Result<()> {
-        self.inner.close().await
-    }
-
     async fn run_migrations(&self) -> Result<()> {
-        self.inner.run_migrations().await
+        self.inner().run_migrations().await
     }
 
     async fn add_connection(
@@ -419,17 +530,17 @@ impl CatalogManager for CachingCatalogManager {
         secret_id: Option<&str>,
     ) -> Result<String> {
         let id = self
-            .inner
+            .inner()
             .add_connection(name, source_type, config_json, secret_id)
             .await?;
 
         // Write-through: update connection list cache
-        if let Ok(conns) = self.inner.list_connections().await {
+        if let Ok(conns) = self.inner().list_connections().await {
             let _ = self.cache_set(&self.key_conn_list(), &conns).await;
         }
 
         // Cache the new connection
-        if let Ok(Some(conn)) = self.inner.get_connection(&id).await {
+        if let Ok(Some(conn)) = self.inner().get_connection(&id).await {
             let _ = self.cache_set(&self.key_conn_id(&id), &conn).await;
             let _ = self.cache_set(&self.key_conn_name(name), &conn).await;
         }
@@ -445,13 +556,13 @@ impl CatalogManager for CachingCatalogManager {
         arrow_schema_json: &str,
     ) -> Result<i32> {
         let id = self
-            .inner
+            .inner()
             .add_table(connection_id, schema_name, table_name, arrow_schema_json)
             .await?;
 
         // Write-through: update table caches
         if let Ok(Some(table)) = self
-            .inner
+            .inner()
             .get_table(connection_id, schema_name, table_name)
             .await
         {
@@ -462,15 +573,15 @@ impl CatalogManager for CachingCatalogManager {
                 )
                 .await;
         }
-        if let Ok(tables) = self.inner.list_tables(Some(connection_id)).await {
+        if let Ok(tables) = self.inner().list_tables(Some(connection_id)).await {
             let _ = self
                 .cache_set(&self.key_tbl_list(Some(connection_id)), &tables)
                 .await;
         }
-        if let Ok(tables) = self.inner.list_tables(None).await {
+        if let Ok(tables) = self.inner().list_tables(None).await {
             let _ = self.cache_set(&self.key_tbl_list(None), &tables).await;
         }
-        if let Ok(names) = self.inner.list_dataset_table_names(schema_name).await {
+        if let Ok(names) = self.inner().list_dataset_table_names(schema_name).await {
             let _ = self
                 .cache_set(&self.key_tbl_names(schema_name), &names)
                 .await;
@@ -480,10 +591,12 @@ impl CatalogManager for CachingCatalogManager {
     }
 
     async fn update_table_sync(&self, table_id: i32, parquet_path: &str) -> Result<()> {
-        self.inner.update_table_sync(table_id, parquet_path).await?;
+        self.inner()
+            .update_table_sync(table_id, parquet_path)
+            .await?;
 
         // Refresh global table list and find the updated table to get its identifiers
-        if let Ok(tables) = self.inner.list_tables(None).await {
+        if let Ok(tables) = self.inner().list_tables(None).await {
             let _ = self.cache_set(&self.key_tbl_list(None), &tables).await;
 
             // Find the table by ID to get connection_id/schema/table for cache invalidation
@@ -508,7 +621,7 @@ impl CatalogManager for CachingCatalogManager {
         table_name: &str,
     ) -> Result<TableInfo> {
         let table = self
-            .inner
+            .inner()
             .clear_table_cache_metadata(connection_id, schema_name, table_name)
             .await?;
 
@@ -519,12 +632,12 @@ impl CatalogManager for CachingCatalogManager {
                 &table,
             )
             .await;
-        if let Ok(tables) = self.inner.list_tables(Some(connection_id)).await {
+        if let Ok(tables) = self.inner().list_tables(Some(connection_id)).await {
             let _ = self
                 .cache_set(&self.key_tbl_list(Some(connection_id)), &tables)
                 .await;
         }
-        if let Ok(tables) = self.inner.list_tables(None).await {
+        if let Ok(tables) = self.inner().list_tables(None).await {
             let _ = self.cache_set(&self.key_tbl_list(None), &tables).await;
         }
 
@@ -532,17 +645,17 @@ impl CatalogManager for CachingCatalogManager {
     }
 
     async fn clear_connection_cache_metadata(&self, connection_id: &str) -> Result<()> {
-        self.inner
+        self.inner()
             .clear_connection_cache_metadata(connection_id)
             .await?;
 
         // Write-through: update table list caches
-        if let Ok(tables) = self.inner.list_tables(Some(connection_id)).await {
+        if let Ok(tables) = self.inner().list_tables(Some(connection_id)).await {
             let _ = self
                 .cache_set(&self.key_tbl_list(Some(connection_id)), &tables)
                 .await;
         }
-        if let Ok(tables) = self.inner.list_tables(None).await {
+        if let Ok(tables) = self.inner().list_tables(None).await {
             let _ = self.cache_set(&self.key_tbl_list(None), &tables).await;
         }
 
@@ -559,12 +672,12 @@ impl CatalogManager for CachingCatalogManager {
 
     async fn delete_connection(&self, connection_id: &str) -> Result<()> {
         // Fetch connection info before deletion (needed for name-based cache key)
-        let conn_info = self.inner.get_connection(connection_id).await?;
+        let conn_info = self.inner().get_connection(connection_id).await?;
 
-        self.inner.delete_connection(connection_id).await?;
+        self.inner().delete_connection(connection_id).await?;
 
         // Write-through: update connection list cache
-        if let Ok(conns) = self.inner.list_connections().await {
+        if let Ok(conns) = self.inner().list_connections().await {
             let _ = self.cache_set(&self.key_conn_list(), &conns).await;
         }
 
@@ -575,7 +688,7 @@ impl CatalogManager for CachingCatalogManager {
         }
 
         // Write-through: update global table list
-        if let Ok(tables) = self.inner.list_tables(None).await {
+        if let Ok(tables) = self.inner().list_tables(None).await {
             let _ = self.cache_set(&self.key_tbl_list(None), &tables).await;
         }
 
@@ -595,33 +708,35 @@ impl CatalogManager for CachingCatalogManager {
     }
 
     async fn schedule_file_deletion(&self, path: &str, delete_after: DateTime<Utc>) -> Result<()> {
-        self.inner.schedule_file_deletion(path, delete_after).await
+        self.inner()
+            .schedule_file_deletion(path, delete_after)
+            .await
     }
 
     async fn get_pending_deletions(&self) -> Result<Vec<PendingDeletion>> {
-        self.inner.get_pending_deletions().await
+        self.inner().get_pending_deletions().await
     }
 
     async fn increment_deletion_retry(&self, id: i32) -> Result<i32> {
-        self.inner.increment_deletion_retry(id).await
+        self.inner().increment_deletion_retry(id).await
     }
 
     async fn remove_pending_deletion(&self, id: i32) -> Result<()> {
-        self.inner.remove_pending_deletion(id).await
+        self.inner().remove_pending_deletion(id).await
     }
 
     // Secret management methods - metadata
 
     async fn get_secret_metadata(&self, name: &str) -> Result<Option<SecretMetadata>> {
-        self.inner.get_secret_metadata(name).await
+        self.inner().get_secret_metadata(name).await
     }
 
     async fn get_secret_metadata_any_status(&self, name: &str) -> Result<Option<SecretMetadata>> {
-        self.inner.get_secret_metadata_any_status(name).await
+        self.inner().get_secret_metadata_any_status(name).await
     }
 
     async fn create_secret_metadata(&self, metadata: &SecretMetadata) -> Result<()> {
-        self.inner.create_secret_metadata(metadata).await
+        self.inner().create_secret_metadata(metadata).await
     }
 
     async fn update_secret_metadata(
@@ -629,25 +744,25 @@ impl CatalogManager for CachingCatalogManager {
         metadata: &SecretMetadata,
         lock: Option<OptimisticLock>,
     ) -> Result<bool> {
-        self.inner.update_secret_metadata(metadata, lock).await
+        self.inner().update_secret_metadata(metadata, lock).await
     }
 
     async fn set_secret_status(&self, name: &str, status: SecretStatus) -> Result<bool> {
-        self.inner.set_secret_status(name, status).await
+        self.inner().set_secret_status(name, status).await
     }
 
     async fn delete_secret_metadata(&self, name: &str) -> Result<bool> {
-        self.inner.delete_secret_metadata(name).await
+        self.inner().delete_secret_metadata(name).await
     }
 
     async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
-        self.inner.list_secrets().await
+        self.inner().list_secrets().await
     }
 
     // Secret management methods - encrypted storage
 
     async fn get_encrypted_secret(&self, secret_id: &str) -> Result<Option<Vec<u8>>> {
-        self.inner.get_encrypted_secret(secret_id).await
+        self.inner().get_encrypted_secret(secret_id).await
     }
 
     async fn put_encrypted_secret_value(
@@ -655,67 +770,67 @@ impl CatalogManager for CachingCatalogManager {
         secret_id: &str,
         encrypted_value: &[u8],
     ) -> Result<()> {
-        self.inner
+        self.inner()
             .put_encrypted_secret_value(secret_id, encrypted_value)
             .await
     }
 
     async fn delete_encrypted_secret_value(&self, secret_id: &str) -> Result<bool> {
-        self.inner.delete_encrypted_secret_value(secret_id).await
+        self.inner().delete_encrypted_secret_value(secret_id).await
     }
 
     async fn get_secret_metadata_by_id(&self, id: &str) -> Result<Option<SecretMetadata>> {
-        self.inner.get_secret_metadata_by_id(id).await
+        self.inner().get_secret_metadata_by_id(id).await
     }
 
     async fn count_connections_by_secret_id(&self, secret_id: &str) -> Result<i64> {
-        self.inner.count_connections_by_secret_id(secret_id).await
+        self.inner().count_connections_by_secret_id(secret_id).await
     }
 
     // Query result persistence methods
 
     async fn store_result(&self, result: &QueryResult) -> Result<()> {
-        self.inner.store_result(result).await
+        self.inner().store_result(result).await
     }
 
     async fn get_result(&self, id: &str) -> Result<Option<QueryResult>> {
-        self.inner.get_result(id).await
+        self.inner().get_result(id).await
     }
 
     async fn list_results(&self, limit: usize, offset: usize) -> Result<(Vec<QueryResult>, bool)> {
-        self.inner.list_results(limit, offset).await
+        self.inner().list_results(limit, offset).await
     }
 
     // Upload management methods
 
     async fn create_upload(&self, upload: &UploadInfo) -> Result<()> {
-        self.inner.create_upload(upload).await
+        self.inner().create_upload(upload).await
     }
 
     async fn get_upload(&self, id: &str) -> Result<Option<UploadInfo>> {
-        self.inner.get_upload(id).await
+        self.inner().get_upload(id).await
     }
 
     async fn list_uploads(&self, status: Option<&str>) -> Result<Vec<UploadInfo>> {
-        self.inner.list_uploads(status).await
+        self.inner().list_uploads(status).await
     }
 
     async fn consume_upload(&self, id: &str) -> Result<bool> {
-        self.inner.consume_upload(id).await
+        self.inner().consume_upload(id).await
     }
 
     async fn claim_upload(&self, id: &str) -> Result<bool> {
-        self.inner.claim_upload(id).await
+        self.inner().claim_upload(id).await
     }
 
     async fn release_upload(&self, id: &str) -> Result<bool> {
-        self.inner.release_upload(id).await
+        self.inner().release_upload(id).await
     }
 
     // Dataset management methods (with cache invalidation for list_dataset_table_names)
 
     async fn create_dataset(&self, dataset: &DatasetInfo) -> Result<()> {
-        self.inner.create_dataset(dataset).await?;
+        self.inner().create_dataset(dataset).await?;
 
         // Invalidate dataset table names cache for the affected schema
         self.cache_del(&self.key_tbl_names(&dataset.schema_name))
@@ -725,7 +840,7 @@ impl CatalogManager for CachingCatalogManager {
     }
 
     async fn get_dataset(&self, id: &str) -> Result<Option<DatasetInfo>> {
-        self.inner.get_dataset(id).await
+        self.inner().get_dataset(id).await
     }
 
     async fn get_dataset_by_table_name(
@@ -733,24 +848,24 @@ impl CatalogManager for CachingCatalogManager {
         schema_name: &str,
         table_name: &str,
     ) -> Result<Option<DatasetInfo>> {
-        self.inner
+        self.inner()
             .get_dataset_by_table_name(schema_name, table_name)
             .await
     }
 
     async fn list_datasets(&self, limit: usize, offset: usize) -> Result<(Vec<DatasetInfo>, bool)> {
-        self.inner.list_datasets(limit, offset).await
+        self.inner().list_datasets(limit, offset).await
     }
 
     async fn list_all_datasets(&self) -> Result<Vec<DatasetInfo>> {
-        self.inner.list_all_datasets().await
+        self.inner().list_all_datasets().await
     }
 
     async fn update_dataset(&self, id: &str, label: &str, table_name: &str) -> Result<bool> {
         // Get dataset before update to know which schema to invalidate
-        let dataset = self.inner.get_dataset(id).await?;
+        let dataset = self.inner().get_dataset(id).await?;
 
-        let result = self.inner.update_dataset(id, label, table_name).await?;
+        let result = self.inner().update_dataset(id, label, table_name).await?;
 
         // Invalidate dataset table names cache for the affected schema
         if let Some(ds) = dataset {
@@ -761,7 +876,7 @@ impl CatalogManager for CachingCatalogManager {
     }
 
     async fn delete_dataset(&self, id: &str) -> Result<Option<DatasetInfo>> {
-        let deleted = self.inner.delete_dataset(id).await?;
+        let deleted = self.inner().delete_dataset(id).await?;
 
         // Invalidate dataset table names cache for the affected schema
         if let Some(ref ds) = deleted {
@@ -777,21 +892,21 @@ impl CatalogManager for CachingCatalogManager {
 
     async fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
         let key = self.key_conn_list();
-        self.cached_read(&key, || self.inner.list_connections())
+        self.cached_read(&key, || self.inner().list_connections())
             .await
     }
 
     async fn get_connection(&self, id: &str) -> Result<Option<ConnectionInfo>> {
         let key = self.key_conn_id(id);
         let id_owned = id.to_string();
-        self.cached_read(&key, || self.inner.get_connection(&id_owned))
+        self.cached_read(&key, || self.inner().get_connection(&id_owned))
             .await
     }
 
     async fn get_connection_by_name(&self, name: &str) -> Result<Option<ConnectionInfo>> {
         let key = self.key_conn_name(name);
         let name_owned = name.to_string();
-        self.cached_read(&key, || self.inner.get_connection_by_name(&name_owned))
+        self.cached_read(&key, || self.inner().get_connection_by_name(&name_owned))
             .await
     }
 
@@ -800,7 +915,7 @@ impl CatalogManager for CachingCatalogManager {
         let conn_id = connection_id.map(|s| s.to_string());
         self.cached_read(&key, || {
             let conn_ref = conn_id.as_deref();
-            self.inner.list_tables(conn_ref)
+            self.inner().list_tables(conn_ref)
         })
         .await
     }
@@ -815,14 +930,14 @@ impl CatalogManager for CachingCatalogManager {
         let conn = connection_id.to_string();
         let schema = schema_name.to_string();
         let table = table_name.to_string();
-        self.cached_read(&key, || self.inner.get_table(&conn, &schema, &table))
+        self.cached_read(&key, || self.inner().get_table(&conn, &schema, &table))
             .await
     }
 
     async fn list_dataset_table_names(&self, schema_name: &str) -> Result<Vec<String>> {
         let key = self.key_tbl_names(schema_name);
         let schema = schema_name.to_string();
-        self.cached_read(&key, || self.inner.list_dataset_table_names(&schema))
+        self.cached_read(&key, || self.inner().list_dataset_table_names(&schema))
             .await
     }
 }
