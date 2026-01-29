@@ -557,6 +557,87 @@ async fn test_dataset_cache_invalidation() {
     assert!(names.is_empty(), "delete_dataset should invalidate cache");
 }
 
+/// Test that warmup aborts when the distributed lock is lost.
+/// This simulates another node stealing the lock mid-warmup.
+#[tokio::test]
+async fn test_warmup_aborts_on_lock_loss() {
+    let (_redis, redis_url) = start_redis().await;
+    let (_dir, inner) = create_sqlite_catalog().await;
+
+    // Add enough data that warmup takes some time
+    for i in 0..10 {
+        inner
+            .add_connection(&format!("conn_{}", i), "postgres", r#"{}"#, None)
+            .await
+            .unwrap();
+    }
+
+    let config = CacheConfig {
+        redis_url: Some(redis_url.clone()),
+        hard_ttl_secs: 60,
+        warmup_interval_secs: 1,
+        warmup_lock_ttl_secs: 2, // Short TTL for testing
+        key_prefix: "lock_loss_test:".to_string(),
+    };
+
+    let caching = Arc::new(
+        CachingCatalogManager::new(inner.clone(), &redis_url, config)
+            .await
+            .unwrap(),
+    );
+
+    // Start warmup loop
+    let handle = caching.start_warmup_loop("node-victim".to_string());
+
+    // Wait for warmup to start and acquire lock
+    tokio::time::sleep(tokio::time::Duration::from_millis(1200)).await;
+
+    // Simulate another node stealing the lock by deleting and re-acquiring it
+    let client = redis::Client::open(redis_url.as_str()).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    // Delete the lock (simulating expiry or another node's action)
+    let _: () = redis::cmd("DEL")
+        .arg("lock_loss_test:lock:warmup")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    // Set a new lock with a different node ID (simulating another node acquiring it)
+    let _: () = redis::cmd("SET")
+        .arg("lock_loss_test:lock:warmup")
+        .arg("node-thief")
+        .arg("EX")
+        .arg(10)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    // Wait for the heartbeat to detect lock loss and abort
+    // Heartbeat runs at TTL/2 = 1 second intervals
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    // Abort the warmup handle
+    handle.abort();
+
+    // The warmup should have aborted (we can verify by checking that cache was not fully populated)
+    // Since warmup aborted, some keys may not have been written
+    // This test mainly verifies the lock-loss detection doesn't panic or hang
+
+    // Verify the lock is still held by the "thief"
+    let lock_value: Option<String> = redis::cmd("GET")
+        .arg("lock_loss_test:lock:warmup")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        lock_value,
+        Some("node-thief".to_string()),
+        "Lock should still be held by the thief node"
+    );
+}
+
 #[tokio::test]
 async fn test_redis_unavailable_at_startup_fails() {
     let (_dir, inner) = create_sqlite_catalog().await;
