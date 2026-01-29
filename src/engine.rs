@@ -79,6 +79,8 @@ pub struct RuntimeEngine {
     #[allow(dead_code)]
     deletion_worker_interval: Duration,
     parallel_refresh_count: usize,
+    /// Stored for potential future warmup loop management; handle is created when warmup starts
+    #[allow(dead_code)]
     cache_warmup_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
