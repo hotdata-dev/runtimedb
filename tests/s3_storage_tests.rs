@@ -126,7 +126,7 @@ async fn s3_storage_delete_prefix() {
     assert!(storage.exists(&url2).await.unwrap());
 
     // Delete entire connection prefix
-    let prefix = storage.cache_prefix(2);
+    let prefix = storage.cache_prefix("2");
     storage.delete_prefix(&prefix).await.unwrap();
 
     // Verify both are deleted
@@ -140,14 +140,14 @@ async fn s3_storage_path_construction() {
     let storage = &infra.storage;
 
     // Test cache URL construction (directory path for DLT's multiple parquet files)
-    let cache_url = storage.cache_url(1, "public", "users");
+    let cache_url = storage.cache_url("1", "public", "users");
     assert_eq!(
         cache_url,
         format!("s3://{}/cache/1/public/users", MINIO_BUCKET)
     );
 
     // Test cache prefix construction
-    let cache_prefix = storage.cache_prefix(1);
+    let cache_prefix = storage.cache_prefix("1");
     assert_eq!(cache_prefix, format!("s3://{}/cache/1", MINIO_BUCKET));
 }
 
@@ -160,7 +160,7 @@ async fn s3_storage_delete_prefix_removes_versioned_directory() {
     let storage = &infra.storage;
 
     // Use prepare/finalize to create a versioned cache entry
-    let handle = storage.prepare_cache_write(99, "test_schema", "test_table");
+    let handle = storage.prepare_cache_write("99", "test_schema", "test_table");
 
     // Write the parquet file locally
     std::fs::create_dir_all(handle.local_path.parent().unwrap()).unwrap();

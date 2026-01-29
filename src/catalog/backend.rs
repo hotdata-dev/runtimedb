@@ -355,6 +355,12 @@ where
         fields(runtimedb.connection_id = %connection_id)
     )]
     pub async fn clear_connection_cache_metadata(&self, connection_id: &str) -> Result<()> {
+        // Verify connection exists before clearing
+        let _connection = self
+            .get_connection(connection_id)
+            .await?
+            .ok_or_else(|| anyhow!("Connection '{}' not found", connection_id))?;
+
         let sql = format!(
             "UPDATE tables SET parquet_path = NULL, last_sync = NULL \
              WHERE connection_id = {}",
@@ -372,6 +378,12 @@ where
         fields(runtimedb.connection_id = %connection_id)
     )]
     pub async fn delete_connection(&self, connection_id: &str) -> Result<()> {
+        // Verify connection exists before deleting
+        let _connection = self
+            .get_connection(connection_id)
+            .await?
+            .ok_or_else(|| anyhow!("Connection '{}' not found", connection_id))?;
+
         let delete_tables_sql = format!(
             "DELETE FROM tables WHERE connection_id = {}",
             DB::bind_param(1)

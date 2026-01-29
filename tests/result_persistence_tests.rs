@@ -78,11 +78,11 @@ impl FailingStorage {
 
 #[async_trait]
 impl StorageManager for FailingStorage {
-    fn cache_url(&self, connection_id: i32, schema: &str, table: &str) -> String {
+    fn cache_url(&self, connection_id: &str, schema: &str, table: &str) -> String {
         self.inner.cache_url(connection_id, schema, table)
     }
 
-    fn cache_prefix(&self, connection_id: i32) -> String {
+    fn cache_prefix(&self, connection_id: &str) -> String {
         self.inner.cache_prefix(connection_id)
     }
 
@@ -116,7 +116,7 @@ impl StorageManager for FailingStorage {
 
     fn prepare_cache_write(
         &self,
-        connection_id: i32,
+        connection_id: &str,
         schema: &str,
         table: &str,
     ) -> CacheWriteHandle {

@@ -344,7 +344,7 @@ mod tests {
 
     #[async_trait]
     impl StorageManager for MockStorage {
-        fn cache_url(&self, connection_id: i32, schema: &str, table: &str) -> String {
+        fn cache_url(&self, connection_id: &str, schema: &str, table: &str) -> String {
             format!(
                 "file://{}/{}/{}/{}",
                 self.base_path.display(),
@@ -354,7 +354,7 @@ mod tests {
             )
         }
 
-        fn cache_prefix(&self, connection_id: i32) -> String {
+        fn cache_prefix(&self, connection_id: &str) -> String {
             format!("{}/{}", self.base_path.display(), connection_id)
         }
 
@@ -412,14 +412,14 @@ mod tests {
 
         fn prepare_cache_write(
             &self,
-            connection_id: i32,
+            connection_id: &str,
             schema: &str,
             table: &str,
         ) -> CacheWriteHandle {
             let version = format!("v{}", self.version_counter.fetch_add(1, Ordering::SeqCst));
             let local_path = self
                 .base_path
-                .join(connection_id.to_string())
+                .join(connection_id)
                 .join(schema)
                 .join(table)
                 .join(&version)
@@ -428,7 +428,7 @@ mod tests {
             CacheWriteHandle {
                 local_path,
                 version,
-                connection_id,
+                connection_id: connection_id.to_string(),
                 schema: schema.to_string(),
                 table: table.to_string(),
             }
@@ -437,7 +437,7 @@ mod tests {
         async fn finalize_cache_write(&self, handle: &CacheWriteHandle) -> Result<String> {
             let version_dir = self
                 .base_path
-                .join(handle.connection_id.to_string())
+                .join(&handle.connection_id)
                 .join(&handle.schema)
                 .join(&handle.table)
                 .join(&handle.version);
@@ -521,7 +521,7 @@ mod tests {
         let secret_manager = Arc::new(create_test_secret_manager(temp_dir.path()).await);
 
         // Add a table to the mock catalog
-        catalog.add_table(1, "test", "orders");
+        catalog.add_table_entry("conn_test123", "test", "orders");
 
         // Configure catalog to fail on update
         catalog.set_fail_update(true);
@@ -535,7 +535,7 @@ mod tests {
 
         // This should fail because catalog update is configured to fail
         let result = orchestrator
-            .refresh_table(&source, 1, "test", "orders")
+            .refresh_table(&source, "conn_test123", "test", "orders")
             .await;
 
         assert!(result.is_err(), "refresh_table should fail");
@@ -557,7 +557,7 @@ mod tests {
         // Verify the deleted URL matches the expected pattern
         let deleted_url = &deleted[0];
         assert!(
-            deleted_url.contains("/1/test/orders/"),
+            deleted_url.contains("/conn_test123/test/orders/"),
             "Deleted URL should be for the test table: {}",
             deleted_url
         );
@@ -575,7 +575,7 @@ mod tests {
         let secret_manager = Arc::new(create_test_secret_manager(temp_dir.path()).await);
 
         // Add a table to the mock catalog
-        catalog.add_table(1, "test", "orders");
+        catalog.add_table_entry("conn_test123", "test", "orders");
 
         // Catalog update should succeed (default)
         let orchestrator =
@@ -586,7 +586,7 @@ mod tests {
         };
 
         let result = orchestrator
-            .refresh_table(&source, 1, "test", "orders")
+            .refresh_table(&source, "conn_test123", "test", "orders")
             .await;
 
         assert!(result.is_ok(), "refresh_table should succeed");
@@ -601,7 +601,7 @@ mod tests {
         // Verify the returned URL and row count
         let (new_url, _old_path, row_count) = result.unwrap();
         assert!(
-            new_url.contains("/1/test/orders/"),
+            new_url.contains("/conn_test123/test/orders/"),
             "New URL should be for the test table"
         );
         assert_eq!(row_count, 3, "Should have synced 3 rows from MockFetcher");
@@ -628,7 +628,7 @@ mod tests {
         };
 
         let result = orchestrator
-            .refresh_table(&source, 1, "test", "orders")
+            .refresh_table(&source, "conn_test123", "test", "orders")
             .await;
 
         assert!(result.is_err(), "refresh_table should fail");
@@ -660,7 +660,7 @@ mod tests {
         let secret_manager = Arc::new(create_test_secret_manager(temp_dir.path()).await);
 
         // Add a table to the mock catalog
-        catalog.add_table(1, "test", "orders");
+        catalog.add_table_entry("conn_test123", "test", "orders");
 
         // Configure catalog to fail on update
         catalog.set_fail_update(true);
@@ -673,7 +673,9 @@ mod tests {
         };
 
         // This should fail because catalog update is configured to fail
-        let result = orchestrator.cache_table(&source, 1, "test", "orders").await;
+        let result = orchestrator
+            .cache_table(&source, "conn_test123", "test", "orders")
+            .await;
 
         assert!(result.is_err(), "cache_table should fail");
         let err_msg = result.unwrap_err().to_string();
@@ -694,7 +696,7 @@ mod tests {
         // Verify the deleted URL matches the expected pattern
         let deleted_url = &deleted[0];
         assert!(
-            deleted_url.contains("/1/test/orders/"),
+            deleted_url.contains("/conn_test123/test/orders/"),
             "Deleted URL should be for the test table: {}",
             deleted_url
         );
