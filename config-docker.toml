@@ -10,3 +10,6 @@ type = "filesystem"
 
 [paths]
 cache_dir = "/app/cache"
+
+[liquid_cache]
+enabled = false

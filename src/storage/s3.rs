@@ -1,73 +1,131 @@
 // src/storage/s3.rs
 use anyhow::Result;
 use async_trait::async_trait;
+use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::SessionContext;
 use futures::TryStreamExt;
 use object_store::aws::AmazonS3Builder;
 use object_store::buffered::BufWriter;
 use object_store::{path::Path as ObjectPath, ObjectStore};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tracing::warn;
 use url::Url;
 
-use super::{CacheWriteHandle, DatasetWriteHandle, S3Credentials, StorageManager};
+use super::{CacheWriteHandle, DatasetWriteHandle, StorageManager};
 
+/// Explicit credentials for S3 access (used for MinIO or explicit AWS credentials)
 #[derive(Debug, Clone)]
-struct S3Config {
-    endpoint: String,
+struct S3Creds {
     access_key: String,
     secret_key: String,
+}
+
+/// S3 storage configuration
+#[derive(Debug, Clone)]
+struct S3Config {
+    region: String,
+    /// Custom endpoint for MinIO/S3-compatible storage. None for standard AWS S3.
+    endpoint: Option<String>,
+    /// Whether HTTP is allowed (typically for local MinIO)
+    allow_http: bool,
+    /// Explicit credentials. None means use IAM/automatic credential discovery.
+    credentials: Option<S3Creds>,
 }
 
 #[derive(Debug)]
 pub struct S3Storage {
     bucket: String,
     store: Arc<dyn ObjectStore>,
-    config: Option<S3Config>,
+    config: S3Config,
 }
 
 impl S3Storage {
-    pub fn new(bucket: &str) -> Result<Self> {
+    /// Create S3Storage using IAM/automatic credential discovery (for production).
+    /// Credentials are automatically discovered from:
+    /// - Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+    /// - IAM EC2 instance role
+    pub fn new_with_iam(bucket: &str, region: &str) -> Result<Self> {
         let store = AmazonS3Builder::from_env()
             .with_bucket_name(bucket)
+            .with_region(region)
             .build()?;
 
         Ok(Self {
             bucket: bucket.to_string(),
             store: Arc::new(store),
-            config: None,
+            config: S3Config {
+                region: region.to_string(),
+                endpoint: None,
+                allow_http: false,
+                credentials: None, // Use IAM/automatic discovery
+            },
+        })
+    }
+
+    /// Create S3Storage for AWS S3 with explicit credentials (no custom endpoint)
+    pub fn new_with_credentials(
+        bucket: &str,
+        access_key: &str,
+        secret_key: &str,
+        region: &str,
+    ) -> Result<Self> {
+        let store = AmazonS3Builder::new()
+            .with_bucket_name(bucket)
+            .with_access_key_id(access_key)
+            .with_secret_access_key(secret_key)
+            .with_region(region)
+            .build()?;
+
+        Ok(Self {
+            bucket: bucket.to_string(),
+            store: Arc::new(store),
+            config: S3Config {
+                region: region.to_string(),
+                endpoint: None,
+                allow_http: false,
+                credentials: Some(S3Creds {
+                    access_key: access_key.to_string(),
+                    secret_key: secret_key.to_string(),
+                }),
+            },
         })
     }
 
     /// Create S3Storage with custom endpoint for MinIO/S3-compatible storage
-    pub fn new_with_config(
+    pub fn new_with_endpoint(
         bucket: &str,
         endpoint: &str,
         access_key: &str,
         secret_key: &str,
+        region: &str,
         allow_http: bool,
     ) -> Result<Self> {
-        let mut builder = AmazonS3Builder::new()
+        let builder = AmazonS3Builder::new()
             .with_bucket_name(bucket)
             .with_endpoint(endpoint)
             .with_access_key_id(access_key)
             .with_secret_access_key(secret_key)
-            .with_allow_http(allow_http);
-
-        // For MinIO, we need to use path-style URLs
-        builder = builder.with_virtual_hosted_style_request(false);
+            .with_region(region)
+            .with_allow_http(allow_http)
+            // For MinIO, we need to use path-style URLs
+            .with_virtual_hosted_style_request(false);
 
         let store = builder.build()?;
 
         Ok(Self {
             bucket: bucket.to_string(),
             store: Arc::new(store),
-            config: Some(S3Config {
-                endpoint: endpoint.to_string(),
-                access_key: access_key.to_string(),
-                secret_key: secret_key.to_string(),
-            }),
+            config: S3Config {
+                region: region.to_string(),
+                endpoint: Some(endpoint.to_string()),
+                allow_http,
+                credentials: Some(S3Creds {
+                    access_key: access_key.to_string(),
+                    secret_key: secret_key.to_string(),
+                }),
+            },
         })
     }
 
@@ -181,12 +239,34 @@ impl StorageManager for S3Storage {
         Ok(())
     }
 
-    fn get_s3_credentials(&self) -> Option<S3Credentials> {
-        self.config.as_ref().map(|c| S3Credentials {
-            aws_access_key_id: c.access_key.clone(),
-            aws_secret_access_key: c.secret_key.clone(),
-            endpoint_url: c.endpoint.clone(),
-        })
+    fn get_object_store_config(&self) -> Option<(ObjectStoreUrl, HashMap<String, String>)> {
+        let url = ObjectStoreUrl::parse(format!("s3://{}", self.bucket)).ok()?;
+        let mut options = HashMap::new();
+
+        // Always include region
+        options.insert("aws_region".to_string(), self.config.region.clone());
+
+        // Include credentials if explicitly provided, otherwise liquid-cache
+        // will use IAM/automatic credential discovery
+        if let Some(creds) = &self.config.credentials {
+            options.insert("aws_access_key_id".to_string(), creds.access_key.clone());
+            options.insert(
+                "aws_secret_access_key".to_string(),
+                creds.secret_key.clone(),
+            );
+        }
+
+        // Include custom endpoint if provided (for MinIO/S3-compatible)
+        if let Some(endpoint) = &self.config.endpoint {
+            options.insert("aws_endpoint".to_string(), endpoint.clone());
+        }
+
+        // Set allow_http based on config
+        if self.config.allow_http {
+            options.insert("aws_allow_http".to_string(), "true".to_string());
+        }
+
+        Some((url, options))
     }
 
     #[tracing::instrument(
@@ -367,12 +447,21 @@ impl StorageManager for S3Storage {
 mod tests {
     use super::*;
 
+    fn test_config(_bucket: &str) -> S3Config {
+        S3Config {
+            region: "us-east-1".to_string(),
+            endpoint: None,
+            allow_http: false,
+            credentials: None,
+        }
+    }
+
     #[test]
     fn test_cache_write_handle_unique_versions() {
         let storage = S3Storage {
             bucket: "test-bucket".to_string(),
             store: Arc::new(object_store::memory::InMemory::new()),
-            config: None,
+            config: test_config("test-bucket"),
         };
 
         let handle1 = storage.prepare_cache_write("1", "main", "orders");
@@ -392,7 +481,7 @@ mod tests {
         let storage = S3Storage {
             bucket: "test-bucket".to_string(),
             store: Arc::new(object_store::memory::InMemory::new()),
-            config: None,
+            config: test_config("test-bucket"),
         };
 
         let handle = storage.prepare_cache_write("42", "public", "users");
@@ -427,7 +516,7 @@ mod tests {
         let storage = S3Storage {
             bucket: "test-bucket".to_string(),
             store: Arc::new(object_store::memory::InMemory::new()),
-            config: None,
+            config: test_config("test-bucket"),
         };
 
         let handle1 = storage.prepare_cache_write("1", "main", "orders");
@@ -481,7 +570,7 @@ mod tests {
         let storage = S3Storage {
             bucket: "test-bucket".to_string(),
             store: store.clone(),
-            config: None,
+            config: test_config("test-bucket"),
         };
 
         // Create a handle with known version
@@ -535,7 +624,7 @@ mod tests {
         let storage = S3Storage {
             bucket: "test-bucket".to_string(),
             store: store.clone(),
-            config: None,
+            config: test_config("test-bucket"),
         };
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -580,7 +669,7 @@ mod tests {
         let storage = S3Storage {
             bucket: "test-bucket".to_string(),
             store: store.clone(),
-            config: None,
+            config: test_config("test-bucket"),
         };
 
         let temp_dir = tempfile::tempdir().unwrap();

@@ -4,7 +4,7 @@
 //!
 //! Run these tests with: cargo test --test s3_storage_tests
 
-use runtimedb::storage::{S3Credentials, S3Storage, StorageManager};
+use runtimedb::storage::{S3Storage, StorageManager};
 use std::process::Command;
 use std::time::Duration;
 use testcontainers::{runners::AsyncRunner, ContainerAsync};
@@ -14,6 +14,7 @@ use testcontainers_modules::minio::MinIO;
 const MINIO_ROOT_USER: &str = "minioadmin";
 const MINIO_ROOT_PASSWORD: &str = "minioadmin";
 const MINIO_BUCKET: &str = "test-bucket";
+const MINIO_REGION: &str = "us-east-1";
 
 /// Create a bucket in MinIO using the mc (MinIO Client) via Docker
 async fn create_minio_bucket(endpoint: &str, bucket: &str) {
@@ -72,11 +73,12 @@ impl MinioTestInfra {
         // Create the test bucket
         create_minio_bucket(&minio_endpoint, MINIO_BUCKET).await;
 
-        let storage = S3Storage::new_with_config(
+        let storage = S3Storage::new_with_endpoint(
             MINIO_BUCKET,
             &minio_endpoint,
             MINIO_ROOT_USER,
             MINIO_ROOT_PASSWORD,
+            MINIO_REGION,
             true,
         )
         .expect("Failed to create S3Storage");
@@ -192,47 +194,4 @@ async fn s3_storage_delete_prefix_removes_versioned_directory() {
         !storage.exists(&file_url).await.unwrap(),
         "data.parquet should be deleted when using delete_prefix on directory URL"
     );
-}
-
-/// Test that S3Storage created with new_with_config returns credentials via get_s3_credentials
-#[test]
-fn s3_storage_get_credentials_with_config() {
-    let storage = S3Storage::new_with_config(
-        "test-bucket",
-        "http://localhost:9000",
-        "test-access-key",
-        "test-secret-key",
-        true,
-    )
-    .unwrap();
-
-    let creds = storage.get_s3_credentials();
-    assert!(
-        creds.is_some(),
-        "Credentials should be present when created with new_with_config"
-    );
-
-    let creds = creds.unwrap();
-    assert_eq!(creds.aws_access_key_id, "test-access-key");
-    assert_eq!(creds.aws_secret_access_key, "test-secret-key");
-    assert_eq!(creds.endpoint_url, "http://localhost:9000");
-}
-
-/// Test that S3Credentials serializes to JSON with correct field names
-#[test]
-fn s3_credentials_serializes_for_dlt() {
-    let creds = S3Credentials {
-        aws_access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
-        aws_secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
-        endpoint_url: "https://sfo3.digitaloceanspaces.com".to_string(),
-    };
-
-    let json = serde_json::to_value(&creds).unwrap();
-
-    assert_eq!(json["aws_access_key_id"], "AKIAIOSFODNN7EXAMPLE");
-    assert_eq!(
-        json["aws_secret_access_key"],
-        "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-    );
-    assert_eq!(json["endpoint_url"], "https://sfo3.digitaloceanspaces.com");
 }
