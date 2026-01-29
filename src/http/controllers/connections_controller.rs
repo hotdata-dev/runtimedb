@@ -342,7 +342,7 @@ pub async fn list_connections_handler(
     let connection_infos: Vec<ConnectionInfo> = connections
         .into_iter()
         .map(|c| ConnectionInfo {
-            id: c.external_id,
+            id: c.id,
             name: c.name,
             source_type: c.source_type,
         })
@@ -363,20 +363,20 @@ pub async fn get_connection_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(connection_id): Path<String>,
 ) -> Result<Json<GetConnectionResponse>, ApiError> {
-    // Look up connection by external_id
+    // Look up connection by id
     let conn = engine
         .catalog()
-        .get_connection_by_external_id(&connection_id)
+        .get_connection(&connection_id)
         .await?
         .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", connection_id)))?;
 
-    // Get table counts using connection external_id
+    // Get table counts using connection id
     let tables = engine.list_tables(Some(&connection_id)).await?;
     let table_count = tables.len();
     let synced_table_count = tables.iter().filter(|t| t.parquet_path.is_some()).count();
 
     Ok(Json(GetConnectionResponse {
-        id: conn.external_id,
+        id: conn.id,
         name: conn.name,
         source_type: conn.source_type,
         table_count,
