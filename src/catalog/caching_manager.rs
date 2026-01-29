@@ -18,8 +18,9 @@ use redis::AsyncCommands;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::warn;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::watch;
+use tracing::{info, warn};
 
 /// Wrapper around cached data with timestamp for TTL tracking.
 #[derive(Debug, Serialize, Deserialize)]
@@ -216,6 +217,162 @@ impl CachingCatalogManager {
                 }
             }
         }
+    }
+
+    /// Start the background warmup loop.
+    ///
+    /// Returns a handle that can be used to stop the loop.
+    pub fn start_warmup_loop(self: &Arc<Self>, node_id: String) -> tokio::task::JoinHandle<()> {
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            this.warmup_loop(node_id).await;
+        })
+    }
+
+    /// The warmup loop that periodically refreshes all cached metadata.
+    async fn warmup_loop(&self, node_id: String) {
+        if self.config.warmup_interval_secs == 0 {
+            return; // Warmup disabled
+        }
+
+        let interval = Duration::from_secs(self.config.warmup_interval_secs);
+        let prefix = &self.config.key_prefix;
+
+        loop {
+            tokio::time::sleep(interval).await;
+
+            // Try to acquire distributed lock
+            let lock_key = format!("{}lock:warmup", prefix);
+            let acquired = self.try_acquire_lock(&lock_key, &node_id).await;
+            if !acquired {
+                continue;
+            }
+
+            // Channel to signal lock loss
+            let (lock_lost_tx, lock_lost_rx) = watch::channel(false);
+
+            // Start heartbeat
+            let heartbeat_handle =
+                self.start_heartbeat(lock_key.clone(), node_id.clone(), lock_lost_tx);
+
+            // Run warmup phases
+            self.run_warmup_phases(lock_lost_rx).await;
+
+            heartbeat_handle.abort();
+        }
+    }
+
+    /// Try to acquire the distributed warmup lock.
+    async fn try_acquire_lock(&self, lock_key: &str, node_id: &str) -> bool {
+        let result: Result<bool, _> = redis::cmd("SET")
+            .arg(lock_key)
+            .arg(node_id)
+            .arg("NX")
+            .arg("EX")
+            .arg(self.config.warmup_lock_ttl_secs)
+            .query_async(&mut self.redis.clone())
+            .await;
+
+        result.unwrap_or(false)
+    }
+
+    /// Start heartbeat task to extend lock TTL.
+    fn start_heartbeat(
+        &self,
+        lock_key: String,
+        node_id: String,
+        lock_lost_tx: watch::Sender<bool>,
+    ) -> tokio::task::JoinHandle<()> {
+        let redis = self.redis.clone();
+        let ttl = self.config.warmup_lock_ttl_secs;
+
+        tokio::spawn(async move {
+            let extend_script = r#"
+                if redis.call("GET", KEYS[1]) == ARGV[1] then
+                    return redis.call("EXPIRE", KEYS[1], ARGV[2])
+                else
+                    return 0
+                end
+            "#;
+
+            loop {
+                tokio::time::sleep(Duration::from_secs(ttl / 2)).await;
+
+                let result: Result<i32, _> = redis::cmd("EVAL")
+                    .arg(extend_script)
+                    .arg(1)
+                    .arg(&lock_key)
+                    .arg(&node_id)
+                    .arg(ttl)
+                    .query_async(&mut redis.clone())
+                    .await;
+
+                match result {
+                    Ok(1) => continue,
+                    _ => {
+                        warn!("cache warmup: lock lost or heartbeat failed");
+                        let _ = lock_lost_tx.send(true);
+                        break;
+                    }
+                }
+            }
+        })
+    }
+
+    /// Run all warmup phases with lock-loss checking.
+    async fn run_warmup_phases(&self, lock_lost_rx: watch::Receiver<bool>) {
+        // Helper to check if lock was lost
+        macro_rules! check_lock {
+            () => {
+                if *lock_lost_rx.borrow() {
+                    warn!("cache warmup: aborting due to lock loss");
+                    return;
+                }
+            };
+        }
+
+        // Phase 1: Refresh connections
+        let conns = match self.inner.list_connections().await {
+            Ok(conns) => {
+                check_lock!();
+                if let Err(e) = self.cache_set(&self.key_conn_list(), &conns).await {
+                    warn!("cache warmup: failed to set conn:list: {}", e);
+                }
+                for conn in &conns {
+                    check_lock!();
+                    let _ = self.cache_set(&self.key_conn_id(&conn.id), conn).await;
+                    let _ = self.cache_set(&self.key_conn_name(&conn.name), conn).await;
+                }
+                conns
+            }
+            Err(e) => {
+                warn!("cache warmup: failed to list connections: {}", e);
+                return;
+            }
+        };
+
+        // Phase 2: Refresh global table list
+        check_lock!();
+        if let Ok(tables) = self.inner.list_tables(None).await {
+            let _ = self.cache_set(&self.key_tbl_list(None), &tables).await;
+        }
+
+        // Phase 3: Refresh per-connection tables
+        for conn in &conns {
+            check_lock!();
+            if let Ok(tables) = self.inner.list_tables(Some(&conn.id)).await {
+                let _ = self
+                    .cache_set(&self.key_tbl_list(Some(&conn.id)), &tables)
+                    .await;
+                for table in &tables {
+                    check_lock!();
+                    let key = self.key_tbl(&conn.id, &table.schema_name, &table.table_name);
+                    let _ = self.cache_set(&key, table).await;
+                }
+            }
+        }
+
+        info!("cache warmup: completed successfully");
     }
 }
 
