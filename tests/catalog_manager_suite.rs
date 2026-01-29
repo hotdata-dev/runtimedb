@@ -911,7 +911,7 @@ async fn sqlite_v3_migration_preserves_data() {
         "connections should have 'id' column"
     );
     assert!(
-        !column_names.iter().any(|c| *c == "external_id"),
+        !column_names.contains(&"external_id"),
         "connections should not have 'external_id' column"
     );
 
@@ -938,21 +938,17 @@ async fn sqlite_v3_migration_preserves_data() {
     assert_eq!(table_count.0, 3, "All 3 tables should be preserved");
 
     // Verify foreign key constraint exists using PRAGMA foreign_key_list
-    let fk_list: Vec<(i32, i32, String, String, String, String, String, String)> =
-        sqlx::query_as("PRAGMA foreign_key_list(tables)")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-    assert_eq!(fk_list.len(), 1, "tables should have exactly one FK");
+    // Columns: id, seq, table, from, to, on_update, on_delete, match
+    let fk_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM pragma_foreign_key_list('tables') WHERE \"table\" = 'connections' AND \"from\" = 'connection_id' AND \"to\" = 'id'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(
-        fk_list[0].2, "connections",
-        "FK should reference connections table"
+        fk_count.0, 1,
+        "FK from tables.connection_id to connections.id should exist"
     );
-    assert_eq!(
-        fk_list[0].3, "connection_id",
-        "FK should be on connection_id column"
-    );
-    assert_eq!(fk_list[0].4, "id", "FK should reference id column");
 
     // Verify FK is enforced by attempting insert with bogus connection_id
     sqlx::query("PRAGMA foreign_keys = ON")
@@ -1127,7 +1123,7 @@ async fn postgres_v3_migration_preserves_data() {
         "connections should have 'id' column"
     );
     assert!(
-        !column_names.iter().any(|c| *c == "external_id"),
+        !column_names.contains(&"external_id"),
         "connections should not have 'external_id' column"
     );
 

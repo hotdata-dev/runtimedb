@@ -164,7 +164,7 @@ impl StorageManager for FilesystemStorage {
         // Return the versioned directory URL (for ListingTable compatibility).
         let version_dir = self
             .cache_base
-            .join(handle.connection_id.to_string())
+            .join(&handle.connection_id)
             .join(&handle.schema)
             .join(&handle.table)
             .join(&handle.version);
