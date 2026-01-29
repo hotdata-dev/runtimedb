@@ -29,7 +29,7 @@ pub struct CacheWriteHandle {
     /// Unique version identifier for this write
     pub version: String,
     /// Connection ID
-    pub connection_id: i32,
+    pub connection_id: String,
     /// Schema name
     pub schema: String,
     /// Table name
@@ -50,8 +50,8 @@ pub struct DatasetWriteHandle {
 #[async_trait]
 pub trait StorageManager: Debug + Send + Sync {
     // Path construction
-    fn cache_url(&self, connection_id: i32, schema: &str, table: &str) -> String;
-    fn cache_prefix(&self, connection_id: i32) -> String;
+    fn cache_url(&self, connection_id: &str, schema: &str, table: &str) -> String;
+    fn cache_prefix(&self, connection_id: &str) -> String;
 
     // File operations
     async fn read(&self, url: &str) -> Result<Vec<u8>>;
@@ -91,7 +91,7 @@ pub trait StorageManager: Debug + Send + Sync {
     /// Returns a handle containing the local path and version for finalization.
     fn prepare_cache_write(
         &self,
-        connection_id: i32,
+        connection_id: &str,
         schema: &str,
         table: &str,
     ) -> CacheWriteHandle;

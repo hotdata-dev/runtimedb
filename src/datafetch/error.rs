@@ -36,7 +36,7 @@ pub enum DataFetchError {
     /// Requested table not found in catalog
     #[error("table not found: {schema}.{table} (connection {connection_id})")]
     TableNotFound {
-        connection_id: i32,
+        connection_id: String,
         schema: String,
         table: String,
     },

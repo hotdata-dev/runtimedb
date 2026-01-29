@@ -50,7 +50,7 @@ impl FetchOrchestrator {
     pub async fn cache_table(
         &self,
         source: &Source,
-        connection_id: i32,
+        connection_id: &str,
         schema_name: &str,
         table_name: &str,
     ) -> Result<(String, usize)> {
@@ -146,7 +146,7 @@ impl FetchOrchestrator {
     pub async fn refresh_table(
         &self,
         source: &Source,
-        connection_id: i32,
+        connection_id: &str,
         schema_name: &str,
         table_name: &str,
     ) -> Result<(String, Option<String>, usize)> {
@@ -158,7 +158,7 @@ impl FetchOrchestrator {
             .await?;
 
         let old_info = old_info.ok_or_else(|| DataFetchError::TableNotFound {
-            connection_id,
+            connection_id: connection_id.to_string(),
             schema: schema_name.to_string(),
             table: table_name.to_string(),
         })?;
@@ -227,7 +227,7 @@ impl FetchOrchestrator {
     /// Separated to allow cleanup on failure.
     async fn refresh_table_catalog_update(
         &self,
-        connection_id: i32,
+        connection_id: &str,
         schema_name: &str,
         table_name: &str,
         new_url: &str,
