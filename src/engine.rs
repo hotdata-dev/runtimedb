@@ -61,11 +61,24 @@ pub struct QueryResponse {
 }
 
 /// Result of a query execution with async persistence.
-/// The result_id is returned immediately; persistence happens in background.
+///
+/// This struct is returned by [`RuntimeEngine::execute_query_with_persistence`].
+/// Unlike [`QueryResponse`], this includes a `result_id` that can be used to
+/// retrieve the persisted result later via the `/results/{id}` API endpoint.
+///
+/// The persistence happens asynchronously in a background task after this
+/// struct is returned. The result status can be checked via `GET /results/{id}`:
+/// - `"processing"` - Persistence is still in progress
+/// - `"ready"` - Result is fully persisted and available
+/// - `"failed"` - Persistence failed (check `error_message` for details)
 pub struct QueryResponseWithId {
+    /// Unique identifier for the persisted result.
     pub result_id: String,
+    /// Arrow schema describing the result columns.
     pub schema: Arc<Schema>,
+    /// The query result data (available immediately, regardless of persistence status).
     pub results: Vec<RecordBatch>,
+    /// Time taken to execute the query (excluding persistence).
     pub execution_time: Duration,
 }
 
@@ -476,7 +489,10 @@ impl RuntimeEngine {
             runtimedb.result_id = tracing::field::Empty,
         )
     )]
-    pub async fn execute_query_with_persistence(&self, sql: &str) -> Result<QueryResponseWithId> {
+    pub async fn execute_query_with_persistence(
+        &self,
+        sql: &str,
+    ) -> Result<(QueryResponseWithId, Option<String>)> {
         // Execute the query first
         let query_response = self.execute_query(sql).await?;
 
@@ -486,10 +502,28 @@ impl RuntimeEngine {
 
         tracing::Span::current().record("runtimedb.result_id", &result_id);
 
-        // Insert pending result into catalog
-        self.catalog
+        // Insert pending result into catalog - if this fails, return result with warning
+        if let Err(e) = self
+            .catalog
             .store_result_pending(&result_id, created_at)
-            .await?;
+            .await
+        {
+            tracing::warn!(
+                result_id = %result_id,
+                error = %e,
+                "Failed to register result in catalog, returning without persistence"
+            );
+            // Return results with no persistence (empty result_id signals no persistence)
+            return Ok((
+                QueryResponseWithId {
+                    result_id: String::new(), // Empty signals no persistence available
+                    schema: query_response.schema,
+                    results: query_response.results,
+                    execution_time: query_response.execution_time,
+                },
+                Some(format!("Result persistence unavailable: {}", e)),
+            ));
+        }
 
         // Clone what we need for the background task
         let storage = Arc::clone(&self.storage);
@@ -521,12 +555,15 @@ impl RuntimeEngine {
             .await
         });
 
-        Ok(QueryResponseWithId {
-            result_id,
-            schema: query_response.schema,
-            results: query_response.results,
-            execution_time: query_response.execution_time,
-        })
+        Ok((
+            QueryResponseWithId {
+                result_id,
+                schema: query_response.schema,
+                results: query_response.results,
+                execution_time: query_response.execution_time,
+            },
+            None, // No warning, persistence initiated successfully
+        ))
     }
 
     /// Get result metadata (status, etc.) without loading parquet data.
@@ -2328,6 +2365,9 @@ impl RuntimeEngineBuilder {
     }
 }
 
+/// Schema name for storing query results.
+const RESULTS_SCHEMA_NAME: &str = "runtimedb_results";
+
 /// Background task to persist query results to parquet.
 /// Updates catalog status to "ready" on success or "failed" on error.
 async fn persist_result_background(
@@ -2337,9 +2377,21 @@ async fn persist_result_background(
     storage: Arc<dyn StorageManager>,
     catalog: Arc<dyn CatalogManager>,
 ) -> Result<()> {
+    // Helper to mark result as failed with error message
+    async fn mark_failed(catalog: &dyn CatalogManager, result_id: &str, error: &anyhow::Error) {
+        let error_msg = error.to_string();
+        if let Err(e) = catalog.fail_result(result_id, Some(&error_msg)).await {
+            tracing::warn!(
+                result_id = %result_id,
+                error = %e,
+                "Failed to mark result as failed in catalog"
+            );
+        }
+    }
+
     // Prepare write location
     let handle =
-        storage.prepare_cache_write(INTERNAL_CONNECTION_ID, "runtimedb_results", result_id);
+        storage.prepare_cache_write(INTERNAL_CONNECTION_ID, RESULTS_SCHEMA_NAME, result_id);
 
     // Write parquet file (sync I/O in blocking task to avoid blocking the runtime)
     let local_path = handle.local_path.clone();
@@ -2358,24 +2410,29 @@ async fn persist_result_background(
     .map_err(|e| anyhow::anyhow!("Join error: {}", e))?;
 
     if let Err(e) = write_result {
-        // Mark as failed and return error
-        let _ = catalog.fail_result(result_id).await;
-        return Err(e.into());
+        let error = anyhow::anyhow!("Parquet write failed: {}", e);
+        mark_failed(catalog.as_ref(), result_id, &error).await;
+        return Err(error);
     }
 
     // Finalize storage (uploads to S3 if needed)
     let dir_url = match storage.finalize_cache_write(&handle).await {
         Ok(url) => url,
         Err(e) => {
-            let _ = catalog.fail_result(result_id).await;
-            return Err(e);
+            let error = anyhow::anyhow!("Storage finalization failed: {}", e);
+            mark_failed(catalog.as_ref(), result_id, &error).await;
+            return Err(error);
         }
     };
 
     let file_url = format!("{}/data.parquet", dir_url);
 
     // Update catalog to ready
-    catalog.finalize_result(result_id, &file_url).await?;
+    if let Err(e) = catalog.finalize_result(result_id, &file_url).await {
+        let error = anyhow::anyhow!("Catalog finalize failed: {}", e);
+        mark_failed(catalog.as_ref(), result_id, &error).await;
+        return Err(error);
+    }
 
     Ok(())
 }
