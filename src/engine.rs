@@ -60,6 +60,15 @@ pub struct QueryResponse {
     pub execution_time: Duration,
 }
 
+/// Result of a query execution with async persistence.
+/// The result_id is returned immediately; persistence happens in background.
+pub struct QueryResponseWithId {
+    pub result_id: String,
+    pub schema: Arc<Schema>,
+    pub results: Vec<RecordBatch>,
+    pub execution_time: Duration,
+}
+
 /// Internal result from writing parquet file, containing the handle for finalization.
 struct ParquetWriteResult {
     handle: crate::storage::CacheWriteHandle,
@@ -454,6 +463,85 @@ impl RuntimeEngine {
         })
     }
 
+    /// Execute a SQL query and persist results asynchronously.
+    ///
+    /// This method:
+    /// 1. Executes the query
+    /// 2. Generates a result ID
+    /// 3. Inserts a catalog entry with status "processing"
+    /// 4. Spawns a background task to write parquet and update status
+    /// 5. Returns immediately with the result ID
+    ///
+    /// The result can be retrieved via GET /results/{id}. If status is "processing",
+    /// the client should poll again later.
+    #[tracing::instrument(
+        name = "execute_query_with_persistence",
+        skip(self, sql),
+        fields(
+            runtimedb.result_id = tracing::field::Empty,
+        )
+    )]
+    pub async fn execute_query_with_persistence(&self, sql: &str) -> Result<QueryResponseWithId> {
+        // Execute the query first
+        let query_response = self.execute_query(sql).await?;
+
+        // Generate result ID
+        let result_id = crate::id::generate_result_id();
+        let created_at = Utc::now();
+
+        tracing::Span::current().record("runtimedb.result_id", &result_id);
+
+        // Insert pending result into catalog
+        self.catalog
+            .store_result_pending(&result_id, created_at)
+            .await?;
+
+        // Clone what we need for the background task
+        let storage = Arc::clone(&self.storage);
+        let catalog = Arc::clone(&self.catalog);
+        let result_id_clone = result_id.clone();
+        let schema = Arc::clone(&query_response.schema);
+        let batches = query_response.results.clone();
+
+        // Spawn background persistence task
+        tokio::spawn(async move {
+            let span = tracing::info_span!(
+                "persist_result_async",
+                runtimedb.result_id = %result_id_clone,
+            );
+
+            async {
+                if let Err(e) =
+                    persist_result_background(&result_id_clone, &schema, &batches, storage, catalog)
+                        .await
+                {
+                    tracing::warn!(
+                        result_id = %result_id_clone,
+                        error = %e,
+                        "Background result persistence failed"
+                    );
+                }
+            }
+            .instrument(span)
+            .await
+        });
+
+        Ok(QueryResponseWithId {
+            result_id,
+            schema: query_response.schema,
+            results: query_response.results,
+            execution_time: query_response.execution_time,
+        })
+    }
+
+    /// Get result metadata (status, etc.) without loading parquet data.
+    pub async fn get_result_metadata(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::catalog::QueryResult>> {
+        self.catalog.get_result(id).await
+    }
+
     /// Persist query results to storage and catalog.
     ///
     /// Returns the result ID on success, or an error if persistence fails.
@@ -488,7 +576,8 @@ impl RuntimeEngine {
         // Store in catalog
         let query_result = QueryResult {
             id: result_id.clone(),
-            parquet_path: file_url,
+            parquet_path: Some(file_url),
+            status: "ready".to_string(),
             created_at: Utc::now(),
         };
 
@@ -502,6 +591,7 @@ impl RuntimeEngine {
     /// Retrieve a persisted query result by ID.
     ///
     /// Returns the schema and record batches for the result, or None if not found.
+    /// Returns None if the result is still processing or has failed.
     pub async fn get_result(&self, id: &str) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>> {
         // Look up result in catalog
         let result = match self.catalog.get_result(id).await? {
@@ -509,11 +599,17 @@ impl RuntimeEngine {
             None => return Ok(None),
         };
 
+        // Only load if result is ready (has parquet path)
+        let parquet_path = match &result.parquet_path {
+            Some(path) => path,
+            None => return Ok(None), // Still processing or failed
+        };
+
         // Load results from parquet
         let df = self
             .df_ctx
             .read_parquet(
-                &result.parquet_path,
+                parquet_path,
                 datafusion::prelude::ParquetReadOptions::default(),
             )
             .await?;
@@ -2322,6 +2418,58 @@ impl RuntimeEngineBuilder {
 
         Ok(engine)
     }
+}
+
+/// Background task to persist query results to parquet.
+/// Updates catalog status to "ready" on success or "failed" on error.
+async fn persist_result_background(
+    result_id: &str,
+    schema: &Arc<Schema>,
+    batches: &[RecordBatch],
+    storage: Arc<dyn StorageManager>,
+    catalog: Arc<dyn CatalogManager>,
+) -> Result<()> {
+    // Prepare write location
+    let handle =
+        storage.prepare_cache_write(INTERNAL_CONNECTION_ID, "runtimedb_results", result_id);
+
+    // Write parquet file (sync I/O in blocking task to avoid blocking the runtime)
+    let local_path = handle.local_path.clone();
+    let schema_clone = Arc::clone(schema);
+    let batches_clone: Vec<RecordBatch> = batches.to_vec();
+
+    let write_result = tokio::task::spawn_blocking(move || {
+        let mut writer: Box<dyn BatchWriter> = Box::new(StreamingParquetWriter::new(local_path));
+        writer.init(&schema_clone)?;
+        for batch in &batches_clone {
+            writer.write_batch(batch)?;
+        }
+        writer.close()
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Join error: {}", e))?;
+
+    if let Err(e) = write_result {
+        // Mark as failed and return error
+        let _ = catalog.fail_result(result_id).await;
+        return Err(e.into());
+    }
+
+    // Finalize storage (uploads to S3 if needed)
+    let dir_url = match storage.finalize_cache_write(&handle).await {
+        Ok(url) => url,
+        Err(e) => {
+            let _ = catalog.fail_result(result_id).await;
+            return Err(e);
+        }
+    };
+
+    let file_url = format!("{}/data.parquet", dir_url);
+
+    // Update catalog to ready
+    catalog.finalize_result(result_id, &file_url).await?;
+
+    Ok(())
 }
 
 #[cfg(test)]
