@@ -1,6 +1,6 @@
 use crate::catalog::{
     is_dataset_table_name_conflict, CachingCatalogManager, CatalogManager, ConnectionInfo,
-    QueryResult, SqliteCatalogManager, TableInfo,
+    SqliteCatalogManager, TableInfo,
 };
 use crate::datafetch::native::StreamingParquetWriter;
 use crate::datafetch::{BatchWriter, FetchOrchestrator, NativeFetcher};
@@ -67,11 +67,6 @@ pub struct QueryResponseWithId {
     pub schema: Arc<Schema>,
     pub results: Vec<RecordBatch>,
     pub execution_time: Duration,
-}
-
-/// Internal result from writing parquet file, containing the handle for finalization.
-struct ParquetWriteResult {
-    handle: crate::storage::CacheWriteHandle,
 }
 
 /// The main query engine that manages connections, catalogs, and query execution.
@@ -542,52 +537,6 @@ impl RuntimeEngine {
         self.catalog.get_result(id).await
     }
 
-    /// Persist query results to storage and catalog.
-    ///
-    /// Returns the result ID on success, or an error if persistence fails.
-    /// This is a best-effort operation - callers should handle errors gracefully
-    /// since the query results are still valid even if persistence fails.
-    #[tracing::instrument(
-        name = "persist_result",
-        skip(self, schema, batches),
-        fields(
-            runtimedb.result_id = tracing::field::Empty,
-        )
-    )]
-    pub async fn persist_result(
-        &self,
-        schema: &Arc<Schema>,
-        batches: &[RecordBatch],
-    ) -> Result<String> {
-        let result_id = crate::id::generate_result_id();
-
-        // Write to parquet
-        let parquet_path = self.write_results_to_parquet(&result_id, schema, batches)?;
-
-        // Finalize (uploads to S3 if needed) and get directory URL
-        let dir_url = self
-            .storage
-            .finalize_cache_write(&parquet_path.handle)
-            .await?;
-
-        // Directory URL already includes the version subdirectory, and the file is data.parquet
-        let file_url = format!("{}/data.parquet", dir_url);
-
-        // Store in catalog
-        let query_result = QueryResult {
-            id: result_id.clone(),
-            parquet_path: Some(file_url),
-            status: "ready".to_string(),
-            created_at: Utc::now(),
-        };
-
-        self.catalog.store_result(&query_result).await?;
-
-        tracing::Span::current().record("runtimedb.result_id", &result_id);
-
-        Ok(result_id)
-    }
-
     /// Retrieve a persisted query result by ID.
     ///
     /// Returns the schema and record batches for the result, or None if not found.
@@ -630,47 +579,6 @@ impl RuntimeEngine {
         offset: usize,
     ) -> Result<(Vec<crate::catalog::QueryResult>, bool)> {
         self.catalog.list_results(limit, offset).await
-    }
-
-    /// Write result batches to a parquet file.
-    ///
-    /// Note: Empty results are persisted with schema only. This ensures GET /results/{id}
-    /// works for all result IDs returned by POST /query. A future optimization could avoid
-    /// persisting empty results entirely if storage space becomes a concern.
-    #[tracing::instrument(
-        name = "write_results_to_parquet",
-        skip(self, schema, batches),
-        fields(
-            runtimedb.result_id = %result_id,
-            runtimedb.batch_count = batches.len(),
-        )
-    )]
-    fn write_results_to_parquet(
-        &self,
-        result_id: &str,
-        schema: &Arc<Schema>,
-        batches: &[RecordBatch],
-    ) -> Result<ParquetWriteResult> {
-        // Prepare write location - using result_id as both schema and table
-        // This creates path: {base}/0/runtimedb_results/{result_id}/{version}/data.parquet
-        let handle = self.storage.prepare_cache_write(
-            INTERNAL_CONNECTION_ID,
-            "runtimedb_results",
-            result_id,
-        );
-
-        // Write parquet file
-        let mut writer: Box<dyn BatchWriter> =
-            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
-        writer.init(schema)?;
-
-        for batch in batches {
-            writer.write_batch(batch)?;
-        }
-
-        writer.close()?;
-
-        Ok(ParquetWriteResult { handle })
     }
 
     /// Purge all cached data for a connection (clears parquet files and resets sync state).
