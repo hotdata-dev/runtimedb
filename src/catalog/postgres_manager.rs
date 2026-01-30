@@ -391,6 +391,11 @@ impl CatalogManager for PostgresCatalogManager {
         Ok(row.map(SecretMetadataRow::into_metadata))
     }
 
+    #[tracing::instrument(
+        name = "catalog_store_result",
+        skip(self, result),
+        fields(runtimedb.result_id = %result.id)
+    )]
     async fn store_result(&self, result: &QueryResult) -> Result<()> {
         sqlx::query(
             "INSERT INTO results (id, parquet_path, created_at)
@@ -404,6 +409,11 @@ impl CatalogManager for PostgresCatalogManager {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "catalog_get_result",
+        skip(self),
+        fields(runtimedb.result_id = %id)
+    )]
     async fn get_result(&self, id: &str) -> Result<Option<QueryResult>> {
         let result = sqlx::query_as::<_, QueryResult>(
             "SELECT id, parquet_path, created_at FROM results WHERE id = $1",
@@ -534,6 +544,11 @@ impl CatalogManager for PostgresCatalogManager {
 
     // Dataset management methods
 
+    #[tracing::instrument(
+        name = "catalog_create_dataset",
+        skip(self, dataset),
+        fields(runtimedb.dataset_id = %dataset.id)
+    )]
     async fn create_dataset(&self, dataset: &DatasetInfo) -> Result<()> {
         sqlx::query(
             "INSERT INTO datasets (id, label, schema_name, table_name, parquet_url, arrow_schema_json, source_type, source_config, created_at, updated_at) \
@@ -555,6 +570,11 @@ impl CatalogManager for PostgresCatalogManager {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "catalog_get_dataset",
+        skip(self),
+        fields(runtimedb.dataset_id = %id)
+    )]
     async fn get_dataset(&self, id: &str) -> Result<Option<DatasetInfo>> {
         let row: Option<DatasetInfoRow> = sqlx::query_as(
             "SELECT id, label, schema_name, table_name, parquet_url, arrow_schema_json, source_type, source_config, created_at, updated_at \
@@ -584,6 +604,11 @@ impl CatalogManager for PostgresCatalogManager {
         Ok(row.map(DatasetInfoRow::into_dataset_info))
     }
 
+    #[tracing::instrument(
+        name = "catalog_list_datasets",
+        skip(self),
+        fields(runtimedb.count = tracing::field::Empty)
+    )]
     async fn list_datasets(&self, limit: usize, offset: usize) -> Result<(Vec<DatasetInfo>, bool)> {
         // Fetch one extra to determine if there are more results
         // Use saturating_add to prevent overflow when limit is very large
@@ -604,6 +629,7 @@ impl CatalogManager for PostgresCatalogManager {
             .map(DatasetInfoRow::into_dataset_info)
             .collect();
 
+        tracing::Span::current().record("runtimedb.count", datasets.len());
         Ok((datasets, has_more))
     }
 

@@ -89,13 +89,20 @@ where
     for<'c> &'c Pool<DB>: Executor<'c, Database = DB>,
     usize: ColumnIndex<DB::Row>,
 {
+    #[tracing::instrument(
+        name = "catalog_list_connections",
+        skip(self),
+        fields(runtimedb.count = tracing::field::Empty)
+    )]
     pub async fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
-        query_as::<DB, ConnectionInfo>(
+        let connections = query_as::<DB, ConnectionInfo>(
             "SELECT id, name, source_type, config_json, secret_id FROM connections ORDER BY name",
         )
         .fetch_all(&self.pool)
-        .await
-        .map_err(Into::into)
+        .await?;
+
+        tracing::Span::current().record("runtimedb.count", connections.len());
+        Ok(connections)
     }
 
     #[tracing::instrument(
@@ -179,6 +186,11 @@ where
         ))
     }
 
+    #[tracing::instrument(
+        name = "catalog_get_connection",
+        skip(self),
+        fields(runtimedb.connection_id = %id)
+    )]
     pub async fn get_connection(&self, id: &str) -> Result<Option<ConnectionInfo>> {
         let sql = format!(
             "SELECT id, name, source_type, config_json, secret_id FROM connections WHERE id = {}",
@@ -256,6 +268,14 @@ where
             .map_err(Into::into)
     }
 
+    #[tracing::instrument(
+        name = "catalog_list_tables",
+        skip(self),
+        fields(
+            runtimedb.connection_id = connection_id,
+            runtimedb.count = tracing::field::Empty
+        )
+    )]
     pub async fn list_tables(&self, connection_id: Option<&str>) -> Result<Vec<TableInfo>> {
         let mut sql = String::from(
             "SELECT id, connection_id, schema_name, table_name, parquet_path, \
@@ -275,9 +295,20 @@ where
             stmt = stmt.bind(conn_id);
         }
 
-        stmt.fetch_all(&self.pool).await.map_err(Into::into)
+        let tables = stmt.fetch_all(&self.pool).await?;
+        tracing::Span::current().record("runtimedb.count", tables.len());
+        Ok(tables)
     }
 
+    #[tracing::instrument(
+        name = "catalog_get_table",
+        skip(self),
+        fields(
+            runtimedb.connection_id = %connection_id,
+            runtimedb.schema = %schema_name,
+            runtimedb.table = %table_name,
+        )
+    )]
     pub async fn get_table(
         &self,
         connection_id: &str,
@@ -302,6 +333,11 @@ where
             .map_err(Into::into)
     }
 
+    #[tracing::instrument(
+        name = "catalog_update_table_sync",
+        skip(self, parquet_path),
+        fields(runtimedb.table_id = %table_id)
+    )]
     pub async fn update_table_sync(&self, table_id: i32, parquet_path: &str) -> Result<()> {
         let sql = format!(
             "UPDATE tables SET parquet_path = {}, last_sync = CURRENT_TIMESTAMP \
