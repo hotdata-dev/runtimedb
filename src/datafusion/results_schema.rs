@@ -85,8 +85,8 @@ impl SchemaProvider for ResultsSchemaProvider {
             }
         }
 
-        // Look up result by ID - await directly since we're in an async fn
-        let result = match self.catalog.get_result(name).await {
+        // Look up result by ID - only returns ready results
+        let result = match self.catalog.get_queryable_result(name).await {
             Ok(Some(r)) => r,
             Ok(None) => return Ok(None),
             Err(e) => {
@@ -97,7 +97,12 @@ impl SchemaProvider for ResultsSchemaProvider {
         };
 
         // Create listing table for the parquet file
-        let table_path = ListingTableUrl::parse(&result.parquet_path)?;
+        let parquet_path = result.parquet_path.ok_or_else(|| {
+            datafusion::error::DataFusionError::External(Box::new(std::io::Error::other(
+                "Result has no parquet path",
+            )))
+        })?;
+        let table_path = ListingTableUrl::parse(&parquet_path)?;
 
         // Set up parquet format and listing options
         let file_format = ParquetFormat::default();
@@ -125,6 +130,10 @@ impl SchemaProvider for ResultsSchemaProvider {
 
     fn table_exist(&self, name: &str) -> bool {
         // This is a sync trait method, so block_on is required here
-        matches!(block_on(self.catalog.get_result(name)), Ok(Some(_)))
+        // Only returns true for ready results
+        matches!(
+            block_on(self.catalog.get_queryable_result(name)),
+            Ok(Some(_))
+        )
     }
 }
