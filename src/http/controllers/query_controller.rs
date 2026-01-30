@@ -7,7 +7,6 @@ use datafusion::arrow::datatypes::Schema;
 use datafusion::arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::warn;
 
 /// Result type for serialized batch data: (columns, nullable flags, rows)
 pub(crate) type SerializedBatchData = (Vec<String>, Vec<bool>, Vec<Vec<serde_json::Value>>);
@@ -30,23 +29,13 @@ pub async fn query_handler(
         return Err(ApiError::bad_request("SQL query cannot be empty"));
     }
 
-    // Execute query
+    // Execute query with async persistence
     let start = Instant::now();
-    let result = engine.execute_query(&request.sql).await?;
+    let result = engine.execute_query_with_persistence(&request.sql).await?;
     let execution_time_ms = start.elapsed().as_millis() as u64;
 
     let batches = &result.results;
     let schema = &result.schema;
-
-    // Persist result and get ID (best-effort - don't fail query on persistence error)
-    // todo: this likely should be entirely rolled into the engine (e.g. execute_query_and_persist(..)
-    let (result_id, warning) = match engine.persist_result(schema, batches).await {
-        Ok(id) => (Some(id), None),
-        Err(e) => {
-            warn!("Failed to persist query result: {}", e);
-            (None, Some(format!("Result not persisted: {}", e)))
-        }
-    };
 
     // Serialize results for HTTP response
     let (columns, nullable, rows) = serialize_batches(schema, batches)?;
@@ -54,16 +43,16 @@ pub async fn query_handler(
 
     tracing::Span::current()
         .record("runtimedb.row_count", row_count)
-        .record("runtimedb.result_id", result_id.as_deref().unwrap_or(""));
+        .record("runtimedb.result_id", &result.result_id);
 
     Ok(Json(QueryResponse {
-        result_id,
+        result_id: Some(result.result_id),
         columns,
         nullable,
         rows,
         row_count,
         execution_time_ms,
-        warning,
+        warning: None,
     }))
 }
 
