@@ -53,8 +53,9 @@ pub struct PendingDeletion {
 /// A persisted query result.
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct QueryResult {
-    pub id: String, // nanoid
-    pub parquet_path: String,
+    pub id: String,                   // nanoid
+    pub parquet_path: Option<String>, // Now optional - null during processing
+    pub status: String,               // "processing", "ready", "failed"
     pub created_at: DateTime<Utc>,
 }
 
@@ -224,6 +225,19 @@ pub trait CatalogManager: Debug + Send + Sync {
     /// Results are ordered by created_at descending (newest first).
     /// Returns (results, has_more) where has_more indicates if there are more results after this page.
     async fn list_results(&self, limit: usize, offset: usize) -> Result<(Vec<QueryResult>, bool)>;
+
+    /// Store a result with "processing" status (no parquet path yet).
+    async fn store_result_pending(&self, id: &str, created_at: DateTime<Utc>) -> Result<()>;
+
+    /// Finalize a result: set status to "ready" and store the parquet path.
+    async fn finalize_result(&self, id: &str, parquet_path: &str) -> Result<()>;
+
+    /// Mark a result as failed.
+    async fn fail_result(&self, id: &str) -> Result<()>;
+
+    /// Get a queryable result (status = 'ready' only).
+    /// Used by ResultsSchemaProvider for SQL queries over results.
+    async fn get_queryable_result(&self, id: &str) -> Result<Option<QueryResult>>;
 
     // Upload management methods
 
