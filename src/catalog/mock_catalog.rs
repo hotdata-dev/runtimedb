@@ -13,12 +13,13 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 /// Mock catalog that can be configured to fail for testing error handling.
 #[derive(Debug)]
 pub struct MockCatalog {
     tables: Mutex<HashMap<(String, String, String), TableInfo>>,
+    results: RwLock<HashMap<String, QueryResult>>,
     fail_update: AtomicBool,
     next_id: AtomicUsize,
 }
@@ -27,6 +28,7 @@ impl MockCatalog {
     pub fn new() -> Self {
         Self {
             tables: Mutex::new(HashMap::new()),
+            results: RwLock::new(HashMap::new()),
             fail_update: AtomicBool::new(false),
             next_id: AtomicUsize::new(1),
         }
@@ -218,12 +220,47 @@ impl CatalogManager for MockCatalog {
         Ok(None)
     }
 
-    async fn store_result(&self, _result: &QueryResult) -> Result<()> {
+    async fn store_result(&self, result: &QueryResult) -> Result<()> {
+        self.results
+            .write()
+            .unwrap()
+            .insert(result.id.clone(), result.clone());
         Ok(())
     }
 
-    async fn get_result(&self, _id: &str) -> Result<Option<QueryResult>> {
-        Ok(None)
+    async fn get_result(&self, id: &str) -> Result<Option<QueryResult>> {
+        Ok(self.results.read().unwrap().get(id).cloned())
+    }
+
+    async fn store_result_pending(&self, id: &str, created_at: DateTime<Utc>) -> Result<()> {
+        let result = QueryResult {
+            id: id.to_string(),
+            parquet_path: None,
+            status: "processing".to_string(),
+            created_at,
+        };
+        self.results.write().unwrap().insert(id.to_string(), result);
+        Ok(())
+    }
+
+    async fn finalize_result(&self, id: &str, parquet_path: &str) -> Result<()> {
+        if let Some(result) = self.results.write().unwrap().get_mut(id) {
+            result.parquet_path = Some(parquet_path.to_string());
+            result.status = "ready".to_string();
+        }
+        Ok(())
+    }
+
+    async fn fail_result(&self, id: &str) -> Result<()> {
+        if let Some(result) = self.results.write().unwrap().get_mut(id) {
+            result.status = "failed".to_string();
+        }
+        Ok(())
+    }
+
+    async fn get_queryable_result(&self, id: &str) -> Result<Option<QueryResult>> {
+        let results = self.results.read().unwrap();
+        Ok(results.get(id).filter(|r| r.status == "ready").cloned())
     }
 
     async fn list_results(
