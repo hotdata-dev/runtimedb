@@ -45,6 +45,10 @@ const MAX_DELETION_RETRIES: i32 = 5;
 /// Default number of parallel table refreshes for connection-wide data refresh.
 const DEFAULT_PARALLEL_REFRESH_COUNT: usize = 4;
 
+/// Default maximum number of concurrent result persistence tasks.
+/// This limits how many background tasks can write parquet files simultaneously.
+const DEFAULT_MAX_CONCURRENT_PERSISTENCE: usize = 32;
+
 /// Default interval (in seconds) between deletion worker runs.
 const DEFAULT_DELETION_WORKER_INTERVAL_SECS: u64 = 30;
 
@@ -96,6 +100,11 @@ pub struct RuntimeEngine {
     #[allow(dead_code)]
     deletion_worker_interval: Duration,
     parallel_refresh_count: usize,
+    /// Semaphore to limit concurrent result persistence tasks.
+    /// This prevents unbounded task spawning under burst load.
+    persistence_semaphore: Arc<Semaphore>,
+    /// Handles for in-flight persistence tasks, awaited during graceful shutdown.
+    persistence_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl RuntimeEngine {
@@ -531,9 +540,28 @@ impl RuntimeEngine {
         let result_id_clone = result_id.clone();
         let schema = Arc::clone(&query_response.schema);
         let batches = query_response.results.clone();
+        let semaphore = Arc::clone(&self.persistence_semaphore);
 
-        // Spawn background persistence task
-        tokio::spawn(async move {
+        // Acquire a persistence permit before spawning the background task.
+        // This limits the number of concurrent persistence tasks to prevent unbounded
+        // task spawning under burst load. If all permits are in use, this will block
+        // until one becomes available. The "schedule_result_persistence" span makes
+        // this wait time visible in traces - it should typically be near-zero, but
+        // will show contention if persistence tasks are backing up.
+        let permit = semaphore
+            .acquire_owned()
+            .instrument(tracing::info_span!(
+                "schedule_result_persistence",
+                runtimedb.result_id = %result_id,
+            ))
+            .await
+            .expect("persistence semaphore closed unexpectedly");
+
+        // Spawn background persistence task, tracking the handle for graceful shutdown
+        let handle = tokio::spawn(async move {
+            // Hold the permit for the duration of the persistence task
+            let _permit = permit;
+
             let span = tracing::info_span!(
                 "persist_result_async",
                 runtimedb.result_id = %result_id_clone,
@@ -554,6 +582,9 @@ impl RuntimeEngine {
             .instrument(span)
             .await
         });
+
+        // Track the task handle for graceful shutdown
+        self.persistence_tasks.lock().await.push(handle);
 
         Ok((
             QueryResponseWithId {
@@ -796,6 +827,29 @@ impl RuntimeEngine {
         if let Some(handle) = self.deletion_worker_handle.lock().await.take() {
             // We use a timeout to avoid blocking forever if the worker is stuck
             let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
+
+        // Wait for in-flight persistence tasks to complete
+        let tasks: Vec<_> = self.persistence_tasks.lock().await.drain(..).collect();
+        if !tasks.is_empty() {
+            tracing::info!(
+                count = tasks.len(),
+                "Waiting for in-flight persistence tasks to complete"
+            );
+            // Use a timeout to avoid blocking forever
+            let join_future = async {
+                for handle in tasks {
+                    if let Err(e) = handle.await {
+                        tracing::warn!(error = %e, "Persistence task failed during shutdown");
+                    }
+                }
+            };
+            if tokio::time::timeout(Duration::from_secs(30), join_future)
+                .await
+                .is_err()
+            {
+                tracing::warn!("Timeout waiting for persistence tasks during shutdown");
+            }
         }
 
         self.catalog.close().await
@@ -2070,6 +2124,7 @@ pub struct RuntimeEngineBuilder {
     deletion_grace_period: Duration,
     deletion_worker_interval: Duration,
     parallel_refresh_count: usize,
+    max_concurrent_persistence: usize,
     liquid_cache_builder: Option<LiquidCacheClientBuilder>,
     cache_config: Option<crate::config::CacheConfig>,
 }
@@ -2094,6 +2149,7 @@ impl RuntimeEngineBuilder {
             deletion_grace_period: DEFAULT_DELETION_GRACE_PERIOD,
             deletion_worker_interval: Duration::from_secs(DEFAULT_DELETION_WORKER_INTERVAL_SECS),
             parallel_refresh_count: DEFAULT_PARALLEL_REFRESH_COUNT,
+            max_concurrent_persistence: DEFAULT_MAX_CONCURRENT_PERSISTENCE,
             liquid_cache_builder: None,
             cache_config: None,
         }
@@ -2158,6 +2214,16 @@ impl RuntimeEngineBuilder {
     /// (values less than 1 are clamped to 1 to prevent deadlock).
     pub fn parallel_refresh_count(mut self, count: usize) -> Self {
         self.parallel_refresh_count = count.max(1);
+        self
+    }
+
+    /// Set the maximum number of concurrent result persistence tasks.
+    /// When a query is executed with persistence, a background task is spawned
+    /// to write the results to parquet. This semaphore limits how many of these
+    /// tasks can run concurrently. If all permits are in use, the query will
+    /// block until a permit becomes available. Defaults to 32.
+    pub fn max_concurrent_persistence(mut self, count: usize) -> Self {
+        self.max_concurrent_persistence = count.max(1);
         self
     }
 
@@ -2330,6 +2396,8 @@ impl RuntimeEngineBuilder {
             deletion_grace_period: self.deletion_grace_period,
             deletion_worker_interval: self.deletion_worker_interval,
             parallel_refresh_count: self.parallel_refresh_count,
+            persistence_semaphore: Arc::new(Semaphore::new(self.max_concurrent_persistence)),
+            persistence_tasks: Mutex::new(Vec::new()),
         };
 
         // Register all existing connections as DataFusion catalogs
