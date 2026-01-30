@@ -398,11 +398,12 @@ impl CatalogManager for PostgresCatalogManager {
     )]
     async fn store_result(&self, result: &QueryResult) -> Result<()> {
         sqlx::query(
-            "INSERT INTO results (id, parquet_path, created_at)
-             VALUES ($1, $2, $3)",
+            "INSERT INTO results (id, parquet_path, status, created_at)
+             VALUES ($1, $2, $3, $4)",
         )
         .bind(&result.id)
         .bind(&result.parquet_path)
+        .bind(&result.status)
         .bind(result.created_at)
         .execute(self.backend.pool())
         .await?;
@@ -416,7 +417,66 @@ impl CatalogManager for PostgresCatalogManager {
     )]
     async fn get_result(&self, id: &str) -> Result<Option<QueryResult>> {
         let result = sqlx::query_as::<_, QueryResult>(
-            "SELECT id, parquet_path, created_at FROM results WHERE id = $1",
+            "SELECT id, parquet_path, status, created_at FROM results WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(self.backend.pool())
+        .await?;
+        Ok(result)
+    }
+
+    #[tracing::instrument(
+        name = "catalog_store_result_pending",
+        skip(self),
+        fields(runtimedb.result_id = %id)
+    )]
+    async fn store_result_pending(&self, id: &str, created_at: DateTime<Utc>) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO results (id, parquet_path, status, created_at)
+             VALUES ($1, NULL, 'processing', $2)",
+        )
+        .bind(id)
+        .bind(created_at)
+        .execute(self.backend.pool())
+        .await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(
+        name = "catalog_finalize_result",
+        skip(self),
+        fields(runtimedb.result_id = %id)
+    )]
+    async fn finalize_result(&self, id: &str, parquet_path: &str) -> Result<()> {
+        sqlx::query("UPDATE results SET parquet_path = $1, status = 'ready' WHERE id = $2")
+            .bind(parquet_path)
+            .bind(id)
+            .execute(self.backend.pool())
+            .await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(
+        name = "catalog_fail_result",
+        skip(self),
+        fields(runtimedb.result_id = %id)
+    )]
+    async fn fail_result(&self, id: &str) -> Result<()> {
+        sqlx::query("UPDATE results SET status = 'failed' WHERE id = $1")
+            .bind(id)
+            .execute(self.backend.pool())
+            .await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(
+        name = "catalog_get_queryable_result",
+        skip(self),
+        fields(runtimedb.result_id = %id)
+    )]
+    async fn get_queryable_result(&self, id: &str) -> Result<Option<QueryResult>> {
+        let result = sqlx::query_as::<_, QueryResult>(
+            "SELECT id, parquet_path, status, created_at FROM results WHERE id = $1 AND status = 'ready'",
         )
         .bind(id)
         .fetch_optional(self.backend.pool())
@@ -425,12 +485,9 @@ impl CatalogManager for PostgresCatalogManager {
     }
 
     async fn list_results(&self, limit: usize, offset: usize) -> Result<(Vec<QueryResult>, bool)> {
-        // Fetch one extra to determine if there are more results
         let fetch_limit = limit + 1;
         let results = sqlx::query_as::<_, QueryResult>(
-            "SELECT id, parquet_path, created_at FROM results
-             ORDER BY created_at DESC
-             LIMIT $1 OFFSET $2",
+            "SELECT id, parquet_path, status, created_at FROM results ORDER BY created_at DESC LIMIT $1 OFFSET $2",
         )
         .bind(fetch_limit as i64)
         .bind(offset as i64)
@@ -438,12 +495,7 @@ impl CatalogManager for PostgresCatalogManager {
         .await?;
 
         let has_more = results.len() > limit;
-        let results = if has_more {
-            results.into_iter().take(limit).collect()
-        } else {
-            results
-        };
-
+        let results = results.into_iter().take(limit).collect();
         Ok((results, has_more))
     }
 
