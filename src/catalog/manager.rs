@@ -299,10 +299,12 @@ pub trait CatalogManager: Debug + Send + Sync {
     async fn store_result_pending(&self, id: &str, created_at: DateTime<Utc>) -> Result<()>;
 
     /// Finalize a result: set status to "ready" and store the parquet path.
-    async fn finalize_result(&self, id: &str, parquet_path: &str) -> Result<()>;
+    /// Returns true if a row was updated, false if the result was not found.
+    async fn finalize_result(&self, id: &str, parquet_path: &str) -> Result<bool>;
 
     /// Mark a result as failed with an optional error message.
-    async fn fail_result(&self, id: &str, error_message: Option<&str>) -> Result<()>;
+    /// Returns true if a row was updated, false if the result was not found.
+    async fn fail_result(&self, id: &str, error_message: Option<&str>) -> Result<bool>;
 
     /// Get a queryable result (status = 'ready' only).
     /// Used by ResultsSchemaProvider for SQL queries over results.

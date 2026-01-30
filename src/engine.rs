@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::{info, warn, Instrument};
@@ -106,8 +107,9 @@ pub struct RuntimeEngine {
     /// Semaphore to limit concurrent result persistence tasks.
     /// This prevents unbounded task spawning under burst load.
     persistence_semaphore: Arc<Semaphore>,
-    /// Handles for in-flight persistence tasks, awaited during graceful shutdown.
-    persistence_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Set of in-flight persistence tasks. JoinSet automatically removes completed tasks
+    /// when polled, preventing unbounded memory growth during high load.
+    persistence_tasks: Mutex<JoinSet<()>>,
 }
 
 impl RuntimeEngine {
@@ -512,6 +514,7 @@ impl RuntimeEngine {
         let result_id = crate::id::generate_result_id();
         let created_at = Utc::now();
 
+        // Record result_id in span regardless of success/failure for traceability
         tracing::Span::current().record("runtimedb.result_id", &result_id);
 
         // Insert pending result into catalog - if this fails, return result with warning
@@ -551,43 +554,76 @@ impl RuntimeEngine {
         // until one becomes available. The "schedule_result_persistence" span makes
         // this wait time visible in traces - it should typically be near-zero, but
         // will show contention if persistence tasks are backing up.
-        let permit = semaphore
+        //
+        // If the semaphore is closed (e.g., during shutdown), we gracefully degrade
+        // by marking the result as failed rather than panicking.
+        let permit = match semaphore
             .acquire_owned()
             .instrument(tracing::info_span!(
                 "schedule_result_persistence",
                 runtimedb.result_id = %result_id,
             ))
             .await
-            .expect("persistence semaphore closed unexpectedly");
-
-        // Spawn background persistence task, tracking the handle for graceful shutdown
-        let handle = tokio::spawn(async move {
-            // Hold the permit for the duration of the persistence task
-            let _permit = permit;
-
-            let span = tracing::info_span!(
-                "persist_result_async",
-                runtimedb.result_id = %result_id_clone,
-            );
-
-            async {
-                if let Err(e) =
-                    persist_result_background(&result_id_clone, &schema, &batches, storage, catalog)
-                        .await
-                {
-                    tracing::warn!(
-                        result_id = %result_id_clone,
-                        error = %e,
-                        "Background result persistence failed"
-                    );
-                }
+        {
+            Ok(p) => p,
+            Err(_) => {
+                // Semaphore closed (shutdown in progress) - mark result as failed
+                tracing::warn!(
+                    result_id = %result_id,
+                    "Persistence semaphore closed during shutdown, marking result as failed"
+                );
+                let _ = self
+                    .catalog
+                    .fail_result(&result_id, Some("Server shutting down"))
+                    .await;
+                return Ok((
+                    QueryResponseWithId {
+                        result_id: String::new(),
+                        schema: query_response.schema,
+                        results: query_response.results,
+                        execution_time: query_response.execution_time,
+                    },
+                    Some("Result persistence unavailable: server shutting down".to_string()),
+                ));
             }
-            .instrument(span)
-            .await
-        });
+        };
 
-        // Track the task handle for graceful shutdown
-        self.persistence_tasks.lock().await.push(handle);
+        // Spawn background persistence task via JoinSet, which automatically removes
+        // completed tasks when polled, preventing unbounded memory growth.
+        {
+            let mut tasks = self.persistence_tasks.lock().await;
+            // Poll JoinSet to clean up any completed tasks before spawning new one
+            while tasks.try_join_next().is_some() {}
+            tasks.spawn(async move {
+                // Hold the permit for the duration of the persistence task
+                let _permit = permit;
+
+                let span = tracing::info_span!(
+                    "persist_result_async",
+                    runtimedb.result_id = %result_id_clone,
+                );
+
+                async {
+                    if let Err(e) = persist_result_background(
+                        &result_id_clone,
+                        &schema,
+                        &batches,
+                        storage,
+                        catalog,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            result_id = %result_id_clone,
+                            error = %e,
+                            "Background result persistence failed"
+                        );
+                    }
+                }
+                .instrument(span)
+                .await
+            });
+        }
 
         Ok((
             QueryResponseWithId {
@@ -625,14 +661,35 @@ impl RuntimeEngine {
             None => return Ok(None), // Still processing or failed
         };
 
-        // Load results from parquet
-        let df = self
+        // Load results from parquet. Handle the case where the file was deleted
+        // between the catalog lookup and the file read (e.g., concurrent cleanup).
+        let df = match self
             .df_ctx
             .read_parquet(
                 parquet_path,
                 datafusion::prelude::ParquetReadOptions::default(),
             )
-            .await?;
+            .await
+        {
+            Ok(df) => df,
+            Err(e) => {
+                // Check if this is a file-not-found error
+                let err_str = e.to_string();
+                if err_str.contains("No such file")
+                    || err_str.contains("not found")
+                    || err_str.contains("does not exist")
+                {
+                    tracing::warn!(
+                        result_id = %id,
+                        parquet_path = %parquet_path,
+                        "Result parquet file not found, possibly deleted concurrently"
+                    );
+                    return Ok(None);
+                }
+                // Other errors should be propagated
+                return Err(e.into());
+            }
+        };
 
         let schema: Arc<Schema> = Arc::clone(df.schema().inner());
         let batches = df.collect().await?;
@@ -833,16 +890,17 @@ impl RuntimeEngine {
         }
 
         // Wait for in-flight persistence tasks to complete
-        let tasks: Vec<_> = self.persistence_tasks.lock().await.drain(..).collect();
-        if !tasks.is_empty() {
+        let mut tasks = self.persistence_tasks.lock().await;
+        let task_count = tasks.len();
+        if task_count > 0 {
             tracing::info!(
-                count = tasks.len(),
+                count = task_count,
                 "Waiting for in-flight persistence tasks to complete"
             );
             // Use a timeout to avoid blocking forever
             let join_future = async {
-                for handle in tasks {
-                    if let Err(e) = handle.await {
+                while let Some(result) = tasks.join_next().await {
+                    if let Err(e) = result {
                         tracing::warn!(error = %e, "Persistence task failed during shutdown");
                     }
                 }
@@ -852,8 +910,11 @@ impl RuntimeEngine {
                 .is_err()
             {
                 tracing::warn!("Timeout waiting for persistence tasks during shutdown");
+                // Abort remaining tasks
+                tasks.abort_all();
             }
         }
+        drop(tasks); // Release the lock before closing catalog
 
         self.catalog.close().await
     }
@@ -2400,7 +2461,7 @@ impl RuntimeEngineBuilder {
             deletion_worker_interval: self.deletion_worker_interval,
             parallel_refresh_count: self.parallel_refresh_count,
             persistence_semaphore: Arc::new(Semaphore::new(self.max_concurrent_persistence)),
-            persistence_tasks: Mutex::new(Vec::new()),
+            persistence_tasks: Mutex::new(JoinSet::new()),
         };
 
         // Register all existing connections as DataFusion catalogs

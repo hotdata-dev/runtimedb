@@ -244,20 +244,26 @@ impl CatalogManager for MockCatalog {
         Ok(())
     }
 
-    async fn finalize_result(&self, id: &str, parquet_path: &str) -> Result<()> {
-        if let Some(result) = self.results.write().unwrap().get_mut(id) {
+    async fn finalize_result(&self, id: &str, parquet_path: &str) -> Result<bool> {
+        let mut results = self.results.write().unwrap();
+        if let Some(result) = results.get_mut(id) {
             result.parquet_path = Some(parquet_path.to_string());
             result.status = ResultStatus::Ready;
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        Ok(())
     }
 
-    async fn fail_result(&self, id: &str, error_message: Option<&str>) -> Result<()> {
-        if let Some(result) = self.results.write().unwrap().get_mut(id) {
+    async fn fail_result(&self, id: &str, error_message: Option<&str>) -> Result<bool> {
+        let mut results = self.results.write().unwrap();
+        if let Some(result) = results.get_mut(id) {
             result.status = ResultStatus::Failed;
             result.error_message = error_message.map(String::from);
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        Ok(())
     }
 
     async fn get_queryable_result(&self, id: &str) -> Result<Option<QueryResult>> {

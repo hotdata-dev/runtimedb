@@ -245,14 +245,14 @@ impl CatalogManager for FailingCatalog {
         self.inner.store_result_pending(id, created_at).await
     }
 
-    async fn finalize_result(&self, id: &str, parquet_path: &str) -> Result<()> {
+    async fn finalize_result(&self, id: &str, parquet_path: &str) -> Result<bool> {
         if self.fail_finalize_result.load(Ordering::SeqCst) {
             anyhow::bail!("Injected catalog failure at finalize_result")
         }
         self.inner.finalize_result(id, parquet_path).await
     }
 
-    async fn fail_result(&self, id: &str, error_message: Option<&str>) -> Result<()> {
+    async fn fail_result(&self, id: &str, error_message: Option<&str>) -> Result<bool> {
         self.inner.fail_result(id, error_message).await
     }
 

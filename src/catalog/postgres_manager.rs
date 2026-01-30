@@ -446,29 +446,41 @@ impl CatalogManager for PostgresCatalogManager {
     #[tracing::instrument(
         name = "catalog_finalize_result",
         skip(self),
-        fields(runtimedb.result_id = %id)
+        fields(runtimedb.result_id = %id, rows_affected = tracing::field::Empty)
     )]
-    async fn finalize_result(&self, id: &str, parquet_path: &str) -> Result<()> {
-        sqlx::query("UPDATE results SET parquet_path = $1, status = 'ready' WHERE id = $2")
-            .bind(parquet_path)
-            .bind(id)
-            .execute(self.backend.pool())
-            .await?;
-        Ok(())
+    async fn finalize_result(&self, id: &str, parquet_path: &str) -> Result<bool> {
+        let result =
+            sqlx::query("UPDATE results SET parquet_path = $1, status = 'ready' WHERE id = $2")
+                .bind(parquet_path)
+                .bind(id)
+                .execute(self.backend.pool())
+                .await?;
+        let rows_affected = result.rows_affected();
+        tracing::Span::current().record("rows_affected", rows_affected);
+        if rows_affected == 0 {
+            tracing::warn!(result_id = %id, "finalize_result: no matching result found");
+        }
+        Ok(rows_affected > 0)
     }
 
     #[tracing::instrument(
         name = "catalog_fail_result",
         skip(self),
-        fields(runtimedb.result_id = %id)
+        fields(runtimedb.result_id = %id, rows_affected = tracing::field::Empty)
     )]
-    async fn fail_result(&self, id: &str, error_message: Option<&str>) -> Result<()> {
-        sqlx::query("UPDATE results SET status = 'failed', error_message = $1 WHERE id = $2")
-            .bind(error_message)
-            .bind(id)
-            .execute(self.backend.pool())
-            .await?;
-        Ok(())
+    async fn fail_result(&self, id: &str, error_message: Option<&str>) -> Result<bool> {
+        let result =
+            sqlx::query("UPDATE results SET status = 'failed', error_message = $1 WHERE id = $2")
+                .bind(error_message)
+                .bind(id)
+                .execute(self.backend.pool())
+                .await?;
+        let rows_affected = result.rows_affected();
+        tracing::Span::current().record("rows_affected", rows_affected);
+        if rows_affected == 0 {
+            tracing::warn!(result_id = %id, "fail_result: no matching result found");
+        }
+        Ok(rows_affected > 0)
     }
 
     #[tracing::instrument(
