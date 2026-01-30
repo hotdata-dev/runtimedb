@@ -1,6 +1,6 @@
 use crate::http::controllers::query_controller::serialize_batches;
 use crate::http::error::ApiError;
-use crate::http::models::{ListResultsResponse, QueryResponse, ResultInfo};
+use crate::http::models::{GetResultResponse, ListResultsResponse, ResultInfo};
 use crate::RuntimeEngine;
 use axum::{
     extract::{Path, Query as QueryParams, State},
@@ -69,27 +69,47 @@ pub async fn list_results_handler(
 pub async fn get_result_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(id): Path<String>,
-) -> Result<Json<QueryResponse>, ApiError> {
-    let start = Instant::now();
-
-    // Load result from engine (handles both catalog lookup and parquet loading)
-    let (schema, batches) = engine
-        .get_result(&id)
+) -> Result<Json<GetResultResponse>, ApiError> {
+    // First check the result status in catalog
+    let result_meta = engine
+        .get_result_metadata(&id)
         .await
         .map_err(|e| ApiError::internal_error(format!("Failed to lookup result: {}", e)))?
         .ok_or_else(|| ApiError::not_found(format!("Result '{}' not found", id)))?;
+
+    // If not ready, return status only
+    if result_meta.status != "ready" {
+        return Ok(Json(GetResultResponse {
+            result_id: id,
+            status: result_meta.status,
+            columns: None,
+            nullable: None,
+            rows: None,
+            row_count: None,
+            execution_time_ms: None,
+        }));
+    }
+
+    // Status is ready, load the data
+    let start = Instant::now();
+
+    let (schema, batches) = engine
+        .get_result(&id)
+        .await
+        .map_err(|e| ApiError::internal_error(format!("Failed to load result: {}", e)))?
+        .ok_or_else(|| ApiError::internal_error("Result metadata exists but data not found"))?;
 
     let (columns, nullable, rows) = serialize_batches(&schema, &batches)?;
     let row_count = rows.len();
     let execution_time_ms = start.elapsed().as_millis() as u64;
 
-    Ok(Json(QueryResponse {
-        result_id: Some(id),
-        columns,
-        nullable,
-        rows,
-        row_count,
-        execution_time_ms,
-        warning: None,
+    Ok(Json(GetResultResponse {
+        result_id: id,
+        status: "ready".to_string(),
+        columns: Some(columns),
+        nullable: Some(nullable),
+        rows: Some(rows),
+        row_count: Some(row_count),
+        execution_time_ms: Some(execution_time_ms),
     }))
 }

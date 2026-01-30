@@ -27,6 +27,24 @@ pub struct QueryResponse {
     pub warning: Option<String>,
 }
 
+/// Response body for GET /results/{id}
+/// Returns status and optionally the result data
+#[derive(Debug, Serialize)]
+pub struct GetResultResponse {
+    pub result_id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nullable: Option<Vec<bool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rows: Option<Vec<Vec<serde_json::Value>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_time_ms: Option<u64>,
+}
+
 /// Summary of a persisted query result for listing
 #[derive(Debug, Serialize)]
 pub struct ResultInfo {
