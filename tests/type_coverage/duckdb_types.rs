@@ -664,7 +664,7 @@ async fn run_test_case(
             if let Err(e) = conn.execute_batch(setup_sql) {
                 return TypeTestResult::skipped(
                     &case.db_type,
-                    &format!("Setup SQL failed (extension may not be available): {}", e),
+                    format!("Setup SQL failed (extension may not be available): {}", e),
                 );
             }
 

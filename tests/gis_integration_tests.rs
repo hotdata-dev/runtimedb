@@ -67,15 +67,12 @@ async fn start_postgis_container() -> ContainerAsync<GenericImage> {
 /// Wait for the database to be ready for connections
 async fn wait_for_db(conn_str: &str) -> sqlx::PgPool {
     for attempt in 1..=30 {
-        match sqlx::PgPool::connect(conn_str).await {
-            Ok(pool) => {
-                // Test connection is actually working
-                if sqlx::query("SELECT 1").execute(&pool).await.is_ok() {
-                    return pool;
-                }
-                pool.close().await;
+        if let Ok(pool) = sqlx::PgPool::connect(conn_str).await {
+            // Test connection is actually working
+            if sqlx::query("SELECT 1").execute(&pool).await.is_ok() {
+                return pool;
             }
-            Err(_) => {}
+            pool.close().await;
         }
         if attempt < 30 {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
