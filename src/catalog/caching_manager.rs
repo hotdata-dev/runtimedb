@@ -819,12 +819,16 @@ impl CatalogManager for CachingCatalogManager {
         self.inner().finalize_result(id, parquet_path).await
     }
 
-    async fn fail_result(&self, id: &str) -> Result<()> {
-        self.inner().fail_result(id).await
+    async fn fail_result(&self, id: &str, error_message: Option<&str>) -> Result<()> {
+        self.inner().fail_result(id, error_message).await
     }
 
     async fn get_queryable_result(&self, id: &str) -> Result<Option<QueryResult>> {
         self.inner().get_queryable_result(id).await
+    }
+
+    async fn cleanup_stale_results(&self, cutoff: DateTime<Utc>) -> Result<usize> {
+        self.inner().cleanup_stale_results(cutoff).await
     }
 
     // Upload management methods

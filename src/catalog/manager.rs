@@ -6,6 +6,45 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::fmt::Debug;
 
+/// Status of a persisted query result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResultStatus {
+    /// Result is being processed (persistence in progress)
+    Processing,
+    /// Result is ready for retrieval
+    Ready,
+    /// Result persistence failed
+    Failed,
+}
+
+impl ResultStatus {
+    /// Convert from database string representation.
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "processing" => Self::Processing,
+            "ready" => Self::Ready,
+            "failed" => Self::Failed,
+            _ => Self::Failed, // Unknown status treated as failed
+        }
+    }
+
+    /// Convert to database string representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Processing => "processing",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl std::fmt::Display for ResultStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// Used to conditionally update a secret only if it hasn't been modified.
 #[derive(Debug, Clone, Copy)]
 pub struct OptimisticLock {
@@ -51,12 +90,35 @@ pub struct PendingDeletion {
 }
 
 /// A persisted query result.
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
-    pub id: String,                   // nanoid
-    pub parquet_path: Option<String>, // Now optional - null during processing
-    pub status: String,               // "processing", "ready", "failed"
+    pub id: String,
+    pub parquet_path: Option<String>,
+    pub status: ResultStatus,
+    pub error_message: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+/// Raw database row for query results (used by sqlx).
+#[derive(Debug, Clone, FromRow)]
+pub struct QueryResultRow {
+    pub id: String,
+    pub parquet_path: Option<String>,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<QueryResultRow> for QueryResult {
+    fn from(row: QueryResultRow) -> Self {
+        Self {
+            id: row.id,
+            parquet_path: row.parquet_path,
+            status: ResultStatus::from_str(&row.status),
+            error_message: row.error_message,
+            created_at: row.created_at,
+        }
+    }
 }
 
 /// A pending file upload.
@@ -232,12 +294,17 @@ pub trait CatalogManager: Debug + Send + Sync {
     /// Finalize a result: set status to "ready" and store the parquet path.
     async fn finalize_result(&self, id: &str, parquet_path: &str) -> Result<()>;
 
-    /// Mark a result as failed.
-    async fn fail_result(&self, id: &str) -> Result<()>;
+    /// Mark a result as failed with an optional error message.
+    async fn fail_result(&self, id: &str, error_message: Option<&str>) -> Result<()>;
 
     /// Get a queryable result (status = 'ready' only).
     /// Used by ResultsSchemaProvider for SQL queries over results.
     async fn get_queryable_result(&self, id: &str) -> Result<Option<QueryResult>>;
+
+    /// Mark stale processing results as failed.
+    /// Results that have been "processing" for longer than the cutoff time are marked as failed.
+    /// Returns the number of results cleaned up.
+    async fn cleanup_stale_results(&self, cutoff: DateTime<Utc>) -> Result<usize>;
 
     // Upload management methods
 

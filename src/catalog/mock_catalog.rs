@@ -5,7 +5,7 @@
 
 use super::{
     CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
-    TableInfo, UploadInfo,
+    ResultStatus, TableInfo, UploadInfo,
 };
 use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
@@ -236,7 +236,8 @@ impl CatalogManager for MockCatalog {
         let result = QueryResult {
             id: id.to_string(),
             parquet_path: None,
-            status: "processing".to_string(),
+            status: ResultStatus::Processing,
+            error_message: None,
             created_at,
         };
         self.results.write().unwrap().insert(id.to_string(), result);
@@ -246,21 +247,25 @@ impl CatalogManager for MockCatalog {
     async fn finalize_result(&self, id: &str, parquet_path: &str) -> Result<()> {
         if let Some(result) = self.results.write().unwrap().get_mut(id) {
             result.parquet_path = Some(parquet_path.to_string());
-            result.status = "ready".to_string();
+            result.status = ResultStatus::Ready;
         }
         Ok(())
     }
 
-    async fn fail_result(&self, id: &str) -> Result<()> {
+    async fn fail_result(&self, id: &str, error_message: Option<&str>) -> Result<()> {
         if let Some(result) = self.results.write().unwrap().get_mut(id) {
-            result.status = "failed".to_string();
+            result.status = ResultStatus::Failed;
+            result.error_message = error_message.map(String::from);
         }
         Ok(())
     }
 
     async fn get_queryable_result(&self, id: &str) -> Result<Option<QueryResult>> {
         let results = self.results.read().unwrap();
-        Ok(results.get(id).filter(|r| r.status == "ready").cloned())
+        Ok(results
+            .get(id)
+            .filter(|r| r.status == ResultStatus::Ready)
+            .cloned())
     }
 
     async fn list_results(
@@ -269,6 +274,20 @@ impl CatalogManager for MockCatalog {
         _offset: usize,
     ) -> Result<(Vec<QueryResult>, bool)> {
         Ok((vec![], false))
+    }
+
+    async fn cleanup_stale_results(&self, cutoff: DateTime<Utc>) -> Result<usize> {
+        let mut results = self.results.write().unwrap();
+        let mut count = 0;
+        for result in results.values_mut() {
+            if result.status == ResultStatus::Processing && result.created_at < cutoff {
+                result.status = ResultStatus::Failed;
+                result.error_message =
+                    Some("Cleanup: result timed out during processing".to_string());
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 
     async fn count_connections_by_secret_id(&self, _secret_id: &str) -> Result<i64> {

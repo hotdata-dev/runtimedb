@@ -15,7 +15,7 @@ pub use mock_catalog::MockCatalog;
 
 pub use manager::{
     CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
-    TableInfo, UploadInfo,
+    QueryResultRow, ResultStatus, TableInfo, UploadInfo,
 };
 pub use postgres_manager::PostgresCatalogManager;
 pub use sqlite_manager::SqliteCatalogManager;

@@ -1,7 +1,7 @@
 use crate::catalog::backend::CatalogBackend;
 use crate::catalog::manager::{
     CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
-    TableInfo, UploadInfo,
+    QueryResultRow, TableInfo, UploadInfo,
 };
 use crate::catalog::migrations::{
     run_migrations, wrap_migration_sql, CatalogMigrations, Migration, POSTGRES_MIGRATIONS,
@@ -398,12 +398,13 @@ impl CatalogManager for PostgresCatalogManager {
     )]
     async fn store_result(&self, result: &QueryResult) -> Result<()> {
         sqlx::query(
-            "INSERT INTO results (id, parquet_path, status, created_at)
-             VALUES ($1, $2, $3, $4)",
+            "INSERT INTO results (id, parquet_path, status, error_message, created_at)
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(&result.id)
         .bind(&result.parquet_path)
-        .bind(&result.status)
+        .bind(result.status.as_str())
+        .bind(&result.error_message)
         .bind(result.created_at)
         .execute(self.backend.pool())
         .await?;
@@ -416,13 +417,13 @@ impl CatalogManager for PostgresCatalogManager {
         fields(runtimedb.result_id = %id)
     )]
     async fn get_result(&self, id: &str) -> Result<Option<QueryResult>> {
-        let result = sqlx::query_as::<_, QueryResult>(
-            "SELECT id, parquet_path, status, created_at FROM results WHERE id = $1",
+        let row = sqlx::query_as::<_, QueryResultRow>(
+            "SELECT id, parquet_path, status, error_message, created_at FROM results WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(self.backend.pool())
         .await?;
-        Ok(result)
+        Ok(row.map(QueryResult::from))
     }
 
     #[tracing::instrument(
@@ -461,8 +462,9 @@ impl CatalogManager for PostgresCatalogManager {
         skip(self),
         fields(runtimedb.result_id = %id)
     )]
-    async fn fail_result(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE results SET status = 'failed' WHERE id = $1")
+    async fn fail_result(&self, id: &str, error_message: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE results SET status = 'failed', error_message = $1 WHERE id = $2")
+            .bind(error_message)
             .bind(id)
             .execute(self.backend.pool())
             .await?;
@@ -475,28 +477,43 @@ impl CatalogManager for PostgresCatalogManager {
         fields(runtimedb.result_id = %id)
     )]
     async fn get_queryable_result(&self, id: &str) -> Result<Option<QueryResult>> {
-        let result = sqlx::query_as::<_, QueryResult>(
-            "SELECT id, parquet_path, status, created_at FROM results WHERE id = $1 AND status = 'ready'",
+        let row = sqlx::query_as::<_, QueryResultRow>(
+            "SELECT id, parquet_path, status, error_message, created_at FROM results WHERE id = $1 AND status = 'ready'",
         )
         .bind(id)
         .fetch_optional(self.backend.pool())
         .await?;
-        Ok(result)
+        Ok(row.map(QueryResult::from))
     }
 
     async fn list_results(&self, limit: usize, offset: usize) -> Result<(Vec<QueryResult>, bool)> {
         let fetch_limit = limit + 1;
-        let results = sqlx::query_as::<_, QueryResult>(
-            "SELECT id, parquet_path, status, created_at FROM results ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+        let rows = sqlx::query_as::<_, QueryResultRow>(
+            "SELECT id, parquet_path, status, error_message, created_at FROM results ORDER BY created_at DESC LIMIT $1 OFFSET $2",
         )
         .bind(fetch_limit as i64)
         .bind(offset as i64)
         .fetch_all(self.backend.pool())
         .await?;
 
-        let has_more = results.len() > limit;
-        let results = results.into_iter().take(limit).collect();
+        let has_more = rows.len() > limit;
+        let results = rows
+            .into_iter()
+            .take(limit)
+            .map(QueryResult::from)
+            .collect();
         Ok((results, has_more))
+    }
+
+    async fn cleanup_stale_results(&self, cutoff: DateTime<Utc>) -> Result<usize> {
+        let result = sqlx::query(
+            "UPDATE results SET status = 'failed', error_message = 'Cleanup: result timed out during processing'
+             WHERE status = 'processing' AND created_at < $1",
+        )
+        .bind(cutoff)
+        .execute(self.backend.pool())
+        .await?;
+        Ok(result.rows_affected() as usize)
     }
 
     async fn count_connections_by_secret_id(&self, secret_id: &str) -> Result<i64> {
