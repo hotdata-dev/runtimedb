@@ -5,9 +5,15 @@ use axum::{
     http::{Request, StatusCode},
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
+use chrono::{DateTime, Utc};
 use datafusion::prelude::SessionContext;
 use rand::RngCore;
+use runtimedb::catalog::{
+    CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
+    SqliteCatalogManager, TableInfo, UploadInfo,
+};
 use runtimedb::http::app_server::{AppServer, PATH_QUERY, PATH_RESULT, PATH_RESULTS};
+use runtimedb::secrets::{SecretMetadata, SecretStatus};
 use runtimedb::storage::{CacheWriteHandle, DatasetWriteHandle, FilesystemStorage, StorageManager};
 use runtimedb::RuntimeEngine;
 use serde_json::json;
@@ -21,6 +27,303 @@ fn generate_test_secret_key() -> String {
     let mut key = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut key);
     STANDARD.encode(key)
+}
+
+/// Catalog wrapper that delegates to a real catalog but can be configured to fail at specific points.
+#[derive(Debug)]
+struct FailingCatalog {
+    inner: SqliteCatalogManager,
+    fail_finalize_result: AtomicBool,
+    fail_store_result_pending: AtomicBool,
+}
+
+impl FailingCatalog {
+    async fn new(path: &str) -> Result<Self> {
+        Ok(Self {
+            inner: SqliteCatalogManager::new(path).await?,
+            fail_finalize_result: AtomicBool::new(false),
+            fail_store_result_pending: AtomicBool::new(false),
+        })
+    }
+
+    fn set_fail_finalize_result(&self, should_fail: bool) {
+        self.fail_finalize_result
+            .store(should_fail, Ordering::SeqCst);
+    }
+
+    fn set_fail_store_result_pending(&self, should_fail: bool) {
+        self.fail_store_result_pending
+            .store(should_fail, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl CatalogManager for FailingCatalog {
+    async fn init(&self) -> Result<()> {
+        self.inner.init().await
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.inner.close().await
+    }
+
+    async fn run_migrations(&self) -> Result<()> {
+        self.inner.run_migrations().await
+    }
+
+    async fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
+        self.inner.list_connections().await
+    }
+
+    async fn add_connection(
+        &self,
+        name: &str,
+        source_type: &str,
+        config_json: &str,
+        secret_id: Option<&str>,
+    ) -> Result<String> {
+        self.inner
+            .add_connection(name, source_type, config_json, secret_id)
+            .await
+    }
+
+    async fn get_connection(&self, id: &str) -> Result<Option<ConnectionInfo>> {
+        self.inner.get_connection(id).await
+    }
+
+    async fn get_connection_by_name(&self, name: &str) -> Result<Option<ConnectionInfo>> {
+        self.inner.get_connection_by_name(name).await
+    }
+
+    async fn list_tables(&self, connection_id: Option<&str>) -> Result<Vec<TableInfo>> {
+        self.inner.list_tables(connection_id).await
+    }
+
+    async fn add_table(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+        arrow_schema_json: &str,
+    ) -> Result<i32> {
+        self.inner
+            .add_table(connection_id, schema_name, table_name, arrow_schema_json)
+            .await
+    }
+
+    async fn update_table_sync(&self, table_id: i32, parquet_path: &str) -> Result<()> {
+        self.inner.update_table_sync(table_id, parquet_path).await
+    }
+
+    async fn get_table(
+        &self,
+        connection_id: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Option<TableInfo>> {
+        self.inner.get_table(connection_id, schema, table).await
+    }
+
+    async fn clear_table_cache_metadata(
+        &self,
+        connection_id: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<TableInfo> {
+        self.inner
+            .clear_table_cache_metadata(connection_id, schema, table)
+            .await
+    }
+
+    async fn clear_connection_cache_metadata(&self, connection_id: &str) -> Result<()> {
+        self.inner
+            .clear_connection_cache_metadata(connection_id)
+            .await
+    }
+
+    async fn delete_connection(&self, connection_id: &str) -> Result<()> {
+        self.inner.delete_connection(connection_id).await
+    }
+
+    async fn schedule_file_deletion(&self, path: &str, delete_after: DateTime<Utc>) -> Result<()> {
+        self.inner.schedule_file_deletion(path, delete_after).await
+    }
+
+    async fn get_pending_deletions(&self) -> Result<Vec<PendingDeletion>> {
+        self.inner.get_pending_deletions().await
+    }
+
+    async fn increment_deletion_retry(&self, id: i32) -> Result<i32> {
+        self.inner.increment_deletion_retry(id).await
+    }
+
+    async fn remove_pending_deletion(&self, id: i32) -> Result<()> {
+        self.inner.remove_pending_deletion(id).await
+    }
+
+    async fn get_secret_metadata(&self, name: &str) -> Result<Option<SecretMetadata>> {
+        self.inner.get_secret_metadata(name).await
+    }
+
+    async fn get_secret_metadata_any_status(&self, name: &str) -> Result<Option<SecretMetadata>> {
+        self.inner.get_secret_metadata_any_status(name).await
+    }
+
+    async fn create_secret_metadata(&self, metadata: &SecretMetadata) -> Result<()> {
+        self.inner.create_secret_metadata(metadata).await
+    }
+
+    async fn update_secret_metadata(
+        &self,
+        metadata: &SecretMetadata,
+        lock: Option<OptimisticLock>,
+    ) -> Result<bool> {
+        self.inner.update_secret_metadata(metadata, lock).await
+    }
+
+    async fn set_secret_status(&self, name: &str, status: SecretStatus) -> Result<bool> {
+        self.inner.set_secret_status(name, status).await
+    }
+
+    async fn delete_secret_metadata(&self, name: &str) -> Result<bool> {
+        self.inner.delete_secret_metadata(name).await
+    }
+
+    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
+        self.inner.list_secrets().await
+    }
+
+    async fn get_encrypted_secret(&self, secret_id: &str) -> Result<Option<Vec<u8>>> {
+        self.inner.get_encrypted_secret(secret_id).await
+    }
+
+    async fn put_encrypted_secret_value(
+        &self,
+        secret_id: &str,
+        encrypted_value: &[u8],
+    ) -> Result<()> {
+        self.inner
+            .put_encrypted_secret_value(secret_id, encrypted_value)
+            .await
+    }
+
+    async fn delete_encrypted_secret_value(&self, secret_id: &str) -> Result<bool> {
+        self.inner.delete_encrypted_secret_value(secret_id).await
+    }
+
+    async fn get_secret_metadata_by_id(&self, id: &str) -> Result<Option<SecretMetadata>> {
+        self.inner.get_secret_metadata_by_id(id).await
+    }
+
+    async fn count_connections_by_secret_id(&self, secret_id: &str) -> Result<i64> {
+        self.inner.count_connections_by_secret_id(secret_id).await
+    }
+
+    // Query result persistence methods
+
+    async fn store_result(&self, result: &QueryResult) -> Result<()> {
+        self.inner.store_result(result).await
+    }
+
+    async fn get_result(&self, id: &str) -> Result<Option<QueryResult>> {
+        self.inner.get_result(id).await
+    }
+
+    async fn list_results(&self, limit: usize, offset: usize) -> Result<(Vec<QueryResult>, bool)> {
+        self.inner.list_results(limit, offset).await
+    }
+
+    async fn store_result_pending(&self, id: &str, created_at: DateTime<Utc>) -> Result<()> {
+        if self.fail_store_result_pending.load(Ordering::SeqCst) {
+            anyhow::bail!("Injected catalog failure at store_result_pending")
+        }
+        self.inner.store_result_pending(id, created_at).await
+    }
+
+    async fn finalize_result(&self, id: &str, parquet_path: &str) -> Result<()> {
+        if self.fail_finalize_result.load(Ordering::SeqCst) {
+            anyhow::bail!("Injected catalog failure at finalize_result")
+        }
+        self.inner.finalize_result(id, parquet_path).await
+    }
+
+    async fn fail_result(&self, id: &str, error_message: Option<&str>) -> Result<()> {
+        self.inner.fail_result(id, error_message).await
+    }
+
+    async fn get_queryable_result(&self, id: &str) -> Result<Option<QueryResult>> {
+        self.inner.get_queryable_result(id).await
+    }
+
+    async fn cleanup_stale_results(&self, cutoff: DateTime<Utc>) -> Result<usize> {
+        self.inner.cleanup_stale_results(cutoff).await
+    }
+
+    // Upload management methods
+
+    async fn create_upload(&self, upload: &UploadInfo) -> Result<()> {
+        self.inner.create_upload(upload).await
+    }
+
+    async fn get_upload(&self, id: &str) -> Result<Option<UploadInfo>> {
+        self.inner.get_upload(id).await
+    }
+
+    async fn list_uploads(&self, status: Option<&str>) -> Result<Vec<UploadInfo>> {
+        self.inner.list_uploads(status).await
+    }
+
+    async fn consume_upload(&self, id: &str) -> Result<bool> {
+        self.inner.consume_upload(id).await
+    }
+
+    async fn claim_upload(&self, id: &str) -> Result<bool> {
+        self.inner.claim_upload(id).await
+    }
+
+    async fn release_upload(&self, id: &str) -> Result<bool> {
+        self.inner.release_upload(id).await
+    }
+
+    // Dataset management methods
+
+    async fn create_dataset(&self, dataset: &DatasetInfo) -> Result<()> {
+        self.inner.create_dataset(dataset).await
+    }
+
+    async fn get_dataset(&self, id: &str) -> Result<Option<DatasetInfo>> {
+        self.inner.get_dataset(id).await
+    }
+
+    async fn get_dataset_by_table_name(
+        &self,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<Option<DatasetInfo>> {
+        self.inner
+            .get_dataset_by_table_name(schema_name, table_name)
+            .await
+    }
+
+    async fn list_datasets(&self, limit: usize, offset: usize) -> Result<(Vec<DatasetInfo>, bool)> {
+        self.inner.list_datasets(limit, offset).await
+    }
+
+    async fn list_all_datasets(&self) -> Result<Vec<DatasetInfo>> {
+        self.inner.list_all_datasets().await
+    }
+
+    async fn list_dataset_table_names(&self, schema_name: &str) -> Result<Vec<String>> {
+        self.inner.list_dataset_table_names(schema_name).await
+    }
+
+    async fn update_dataset(&self, id: &str, label: &str, table_name: &str) -> Result<bool> {
+        self.inner.update_dataset(id, label, table_name).await
+    }
+
+    async fn delete_dataset(&self, id: &str) -> Result<Option<DatasetInfo>> {
+        self.inner.delete_dataset(id).await
+    }
 }
 
 async fn setup_test() -> Result<(AppServer, TempDir)> {
@@ -1330,6 +1633,158 @@ async fn test_query_result_with_aggregation() -> Result<()> {
                                               // AVG returns as float, compare loosely
     let avg_value = query_json["rows"][0][1].as_f64().unwrap();
     assert!((avg_value - 20.0).abs() < 0.001); // AVG = 60/3
+
+    Ok(())
+}
+
+/// Test that catalog finalize_result failures mark the result as failed.
+/// This tests the scenario where parquet is successfully written but catalog update fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_catalog_finalize_result_failure_marks_result_failed() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let catalog_path = temp_dir.path().join("catalog.db");
+
+    // Create a catalog that we can make fail on finalize_result
+    let failing_catalog = Arc::new(FailingCatalog::new(catalog_path.to_str().unwrap()).await?);
+    failing_catalog.set_fail_finalize_result(true);
+
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .catalog(failing_catalog.clone())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+
+    let app = AppServer::new(engine);
+
+    // Query returns immediately with result_id (async persistence)
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"sql": "SELECT 1 as num"}).to_string()))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Query always returns result_id with async persistence
+    assert!(
+        json["result_id"].is_string(),
+        "result_id should always be present with async persistence"
+    );
+    let result_id = json["result_id"].as_str().unwrap();
+
+    // Should still have the query results
+    assert_eq!(json["row_count"], 1);
+    assert_eq!(json["rows"][0][0], 1);
+
+    // Wait for async persistence to complete (will fail at catalog.finalize_result)
+    let status = wait_for_result_ready(&app, result_id, 5000).await?;
+    assert_eq!(
+        status, "failed",
+        "Status should be 'failed' after catalog finalize_result failure"
+    );
+
+    // Verify the error message contains useful info
+    let get_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/results/{}", result_id))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    let get_body = axum::body::to_bytes(get_response.into_body(), usize::MAX).await?;
+    let get_json: serde_json::Value = serde_json::from_slice(&get_body)?;
+    assert_eq!(get_json["status"], "failed");
+    assert!(
+        get_json["error_message"].is_string(),
+        "Failed result should have error_message"
+    );
+    let error_msg = get_json["error_message"].as_str().unwrap();
+    assert!(
+        error_msg.contains("Catalog finalize failed"),
+        "Error message should mention catalog finalize: {}",
+        error_msg
+    );
+
+    Ok(())
+}
+
+/// Test that catalog store_result_pending failure returns results with warning (not hard failure).
+/// This ensures query results are still returned even when persistence is unavailable.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_catalog_store_pending_failure_returns_results_with_warning() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let catalog_path = temp_dir.path().join("catalog.db");
+
+    // Create a catalog that we can make fail on store_result_pending
+    let failing_catalog = Arc::new(FailingCatalog::new(catalog_path.to_str().unwrap()).await?);
+    failing_catalog.set_fail_store_result_pending(true);
+
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .catalog(failing_catalog.clone())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+
+    let app = AppServer::new(engine);
+
+    // Query should return results even when catalog registration fails
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"sql": "SELECT 42 as answer"}).to_string(),
+                ))?,
+        )
+        .await?;
+
+    // Should still succeed (not 500 error)
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Should have query results
+    assert_eq!(json["row_count"], 1);
+    assert_eq!(json["rows"][0][0], 42);
+
+    // result_id should be null (not present or null) when persistence failed
+    assert!(
+        json.get("result_id").is_none() || json["result_id"].is_null(),
+        "result_id should be null when persistence failed, got: {:?}",
+        json["result_id"]
+    );
+
+    // Should have a warning message
+    assert!(
+        json["warning"].is_string(),
+        "Should have warning when persistence failed"
+    );
+    let warning = json["warning"].as_str().unwrap();
+    assert!(
+        warning.contains("persistence unavailable"),
+        "Warning should mention persistence unavailable: {}",
+        warning
+    );
 
     Ok(())
 }
