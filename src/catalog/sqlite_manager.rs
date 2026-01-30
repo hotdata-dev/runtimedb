@@ -447,11 +447,12 @@ impl CatalogManager for SqliteCatalogManager {
     )]
     async fn store_result(&self, result: &QueryResult) -> Result<()> {
         sqlx::query(
-            "INSERT INTO results (id, parquet_path, created_at)
-             VALUES (?, ?, ?)",
+            "INSERT INTO results (id, parquet_path, status, created_at)
+             VALUES (?, ?, ?, ?)",
         )
         .bind(&result.id)
         .bind(&result.parquet_path)
+        .bind(&result.status)
         .bind(result.created_at)
         .execute(self.backend.pool())
         .await?;
@@ -465,7 +466,66 @@ impl CatalogManager for SqliteCatalogManager {
     )]
     async fn get_result(&self, id: &str) -> Result<Option<QueryResult>> {
         let result = sqlx::query_as::<_, QueryResult>(
-            "SELECT id, parquet_path, created_at FROM results WHERE id = ?",
+            "SELECT id, parquet_path, status, created_at FROM results WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(self.backend.pool())
+        .await?;
+        Ok(result)
+    }
+
+    #[tracing::instrument(
+        name = "catalog_store_result_pending",
+        skip(self),
+        fields(runtimedb.result_id = %id)
+    )]
+    async fn store_result_pending(&self, id: &str, created_at: DateTime<Utc>) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO results (id, parquet_path, status, created_at)
+             VALUES (?, NULL, 'processing', ?)",
+        )
+        .bind(id)
+        .bind(created_at)
+        .execute(self.backend.pool())
+        .await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(
+        name = "catalog_finalize_result",
+        skip(self),
+        fields(runtimedb.result_id = %id)
+    )]
+    async fn finalize_result(&self, id: &str, parquet_path: &str) -> Result<()> {
+        sqlx::query("UPDATE results SET parquet_path = ?, status = 'ready' WHERE id = ?")
+            .bind(parquet_path)
+            .bind(id)
+            .execute(self.backend.pool())
+            .await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(
+        name = "catalog_fail_result",
+        skip(self),
+        fields(runtimedb.result_id = %id)
+    )]
+    async fn fail_result(&self, id: &str) -> Result<()> {
+        sqlx::query("UPDATE results SET status = 'failed' WHERE id = ?")
+            .bind(id)
+            .execute(self.backend.pool())
+            .await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(
+        name = "catalog_get_queryable_result",
+        skip(self),
+        fields(runtimedb.result_id = %id)
+    )]
+    async fn get_queryable_result(&self, id: &str) -> Result<Option<QueryResult>> {
+        let result = sqlx::query_as::<_, QueryResult>(
+            "SELECT id, parquet_path, status, created_at FROM results WHERE id = ? AND status = 'ready'",
         )
         .bind(id)
         .fetch_optional(self.backend.pool())
@@ -474,12 +534,10 @@ impl CatalogManager for SqliteCatalogManager {
     }
 
     async fn list_results(&self, limit: usize, offset: usize) -> Result<(Vec<QueryResult>, bool)> {
-        // Fetch one extra to determine if there are more results
+        // Fetch one extra to determine has_more
         let fetch_limit = limit + 1;
         let results = sqlx::query_as::<_, QueryResult>(
-            "SELECT id, parquet_path, created_at FROM results
-             ORDER BY created_at DESC
-             LIMIT ? OFFSET ?",
+            "SELECT id, parquet_path, status, created_at FROM results ORDER BY created_at DESC LIMIT ? OFFSET ?",
         )
         .bind(fetch_limit as i64)
         .bind(offset as i64)
@@ -487,12 +545,7 @@ impl CatalogManager for SqliteCatalogManager {
         .await?;
 
         let has_more = results.len() > limit;
-        let results = if has_more {
-            results.into_iter().take(limit).collect()
-        } else {
-            results
-        };
-
+        let results = results.into_iter().take(limit).collect();
         Ok((results, has_more))
     }
 
