@@ -49,6 +49,7 @@ pub struct GetResultResponse {
 #[derive(Debug, Serialize)]
 pub struct ResultInfo {
     pub id: String,
+    pub status: String,
     pub created_at: DateTime<Utc>,
 }
 

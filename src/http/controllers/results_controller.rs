@@ -47,6 +47,7 @@ pub async fn list_results_handler(
         .into_iter()
         .map(|r| ResultInfo {
             id: r.id,
+            status: r.status,
             created_at: r.created_at,
         })
         .collect();
