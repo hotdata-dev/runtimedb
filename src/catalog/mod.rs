@@ -5,6 +5,9 @@ mod sqlite_manager;
 
 mod manager;
 
+mod caching_manager;
+pub use caching_manager::CachingCatalogManager;
+
 #[cfg(test)]
 mod mock_catalog;
 #[cfg(test)]

@@ -12,6 +12,8 @@ pub struct AppConfig {
     pub secrets: SecretsConfig,
     #[serde(default)]
     pub liquid_cache: LiquidCacheConfig,
+    #[serde(default)]
+    pub cache: CacheConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -77,6 +79,39 @@ pub struct LiquidCacheConfig {
     pub server_address: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct CacheConfig {
+    /// Redis connection URL. None = caching disabled.
+    pub redis_url: Option<String>,
+    /// TTL in seconds. How long items should remain cached before removal. Default: 1800 (30 minutes).
+    #[serde(default = "default_cache_ttl")]
+    pub ttl_secs: u64,
+    /// Background refresh interval in seconds. 0 = disabled. Default: 0.
+    /// When enabled, periodically refreshes cached metadata to keep it warm.
+    /// Can be used with ttl_secs to eliminate cache misses.
+    #[serde(default)]
+    pub refresh_interval_secs: u64,
+    /// Key prefix. Default: "rdb:"
+    #[serde(default = "default_cache_key_prefix")]
+    pub key_prefix: String,
+}
+
+impl CacheConfig {
+    /// Compute the distributed lock TTL for cache refresh.
+    /// Clamped to [60, 300] seconds (1-5 minutes).
+    pub fn refresh_lock_ttl_secs(&self) -> u64 {
+        (self.refresh_interval_secs / 2).clamp(60, 300)
+    }
+}
+
+fn default_cache_ttl() -> u64 {
+    1800
+}
+
+fn default_cache_key_prefix() -> String {
+    "rdb:".to_string()
+}
+
 impl AppConfig {
     /// Load configuration from file and environment variables
     pub fn load(config_path: &str) -> Result<Self> {
@@ -136,6 +171,17 @@ impl AppConfig {
                 // Filesystem storage uses paths config, no additional validation needed
             }
             _ => anyhow::bail!("Invalid storage type: {}", self.storage.storage_type),
+        }
+
+        // Validate cache config
+        if self.cache.refresh_interval_secs > 0
+            && self.cache.refresh_interval_secs >= self.cache.ttl_secs
+        {
+            anyhow::bail!(
+                "Cache refresh_interval_secs ({}) must be less than hard_ttl_secs ({})",
+                self.cache.refresh_interval_secs,
+                self.cache.ttl_secs
+            );
         }
 
         Ok(())
