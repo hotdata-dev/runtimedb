@@ -30,6 +30,11 @@ fn generate_test_secret_key() -> String {
 }
 
 /// Catalog wrapper that delegates to a real catalog but can be configured to fail at specific points.
+/// Used to test error handling in the persistence pipeline.
+///
+/// Note: A macro-based delegation approach was considered to reduce boilerplate, but
+/// async_trait's lifetime requirements prevent macro-generated async methods from
+/// matching the trait's lifetime bounds.
 #[derive(Debug)]
 struct FailingCatalog {
     inner: SqliteCatalogManager,
@@ -1714,7 +1719,7 @@ async fn test_catalog_finalize_result_failure_marks_result_failed() -> Result<()
     );
     let error_msg = get_json["error_message"].as_str().unwrap();
     assert!(
-        error_msg.contains("Catalog finalize failed"),
+        error_msg.contains("catalog finalize failed"),
         "Error message should mention catalog finalize: {}",
         error_msg
     );

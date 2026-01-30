@@ -57,6 +57,9 @@ const DEFAULT_DELETION_WORKER_INTERVAL_SECS: u64 = 30;
 /// connection IDs, which use the "conn_" prefix from nanoid generation.
 const INTERNAL_CONNECTION_ID: &str = "_runtimedb_internal";
 
+/// Schema name for storing query results.
+const RESULTS_SCHEMA_NAME: &str = "runtimedb_results";
+
 /// Result of a query execution with optional persistence.
 pub struct QueryResponse {
     pub schema: Arc<Schema>,
@@ -2433,9 +2436,6 @@ impl RuntimeEngineBuilder {
     }
 }
 
-/// Schema name for storing query results.
-const RESULTS_SCHEMA_NAME: &str = "runtimedb_results";
-
 /// Background task to persist query results to parquet.
 /// Updates catalog status to "ready" on success or "failed" on error.
 async fn persist_result_background(
@@ -2475,10 +2475,10 @@ async fn persist_result_background(
         writer.close()
     })
     .await
-    .map_err(|e| anyhow::anyhow!("Join error: {}", e))?;
+    .map_err(|e| anyhow::anyhow!("persist_result: task join failed: {}", e))?;
 
     if let Err(e) = write_result {
-        let error = anyhow::anyhow!("Parquet write failed: {}", e);
+        let error = anyhow::anyhow!("persist_result: parquet write failed: {}", e);
         mark_failed(catalog.as_ref(), result_id, &error).await;
         return Err(error);
     }
@@ -2487,7 +2487,7 @@ async fn persist_result_background(
     let dir_url = match storage.finalize_cache_write(&handle).await {
         Ok(url) => url,
         Err(e) => {
-            let error = anyhow::anyhow!("Storage finalization failed: {}", e);
+            let error = anyhow::anyhow!("persist_result: storage finalization failed: {}", e);
             mark_failed(catalog.as_ref(), result_id, &error).await;
             return Err(error);
         }
@@ -2497,7 +2497,7 @@ async fn persist_result_background(
 
     // Update catalog to ready
     if let Err(e) = catalog.finalize_result(result_id, &file_url).await {
-        let error = anyhow::anyhow!("Catalog finalize failed: {}", e);
+        let error = anyhow::anyhow!("persist_result: catalog finalize failed: {}", e);
         mark_failed(catalog.as_ref(), result_id, &error).await;
         return Err(error);
     }

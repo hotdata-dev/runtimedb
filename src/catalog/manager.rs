@@ -20,12 +20,19 @@ pub enum ResultStatus {
 
 impl ResultStatus {
     /// Convert from database string representation.
+    /// Unknown values are treated as Failed and logged as a warning.
     pub fn from_str(s: &str) -> Self {
         match s {
             "processing" => Self::Processing,
             "ready" => Self::Ready,
             "failed" => Self::Failed,
-            _ => Self::Failed, // Unknown status treated as failed
+            unknown => {
+                tracing::warn!(
+                    status = %unknown,
+                    "Unknown result status in database, treating as failed"
+                );
+                Self::Failed
+            }
         }
     }
 
