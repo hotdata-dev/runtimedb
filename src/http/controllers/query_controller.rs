@@ -31,7 +31,7 @@ pub async fn query_handler(
 
     // Execute query with async persistence
     let start = Instant::now();
-    let result = engine.execute_query_with_persistence(&request.sql).await?;
+    let (result, warning) = engine.execute_query_with_persistence(&request.sql).await?;
     let execution_time_ms = start.elapsed().as_millis() as u64;
 
     let batches = &result.results;
@@ -41,18 +41,24 @@ pub async fn query_handler(
     let (columns, nullable, rows) = serialize_batches(schema, batches)?;
     let row_count = rows.len();
 
-    tracing::Span::current()
-        .record("runtimedb.row_count", row_count)
-        .record("runtimedb.result_id", &result.result_id);
+    // Determine result_id - empty string from engine means persistence failed
+    let result_id = if result.result_id.is_empty() {
+        None
+    } else {
+        tracing::Span::current().record("runtimedb.result_id", &result.result_id);
+        Some(result.result_id)
+    };
+
+    tracing::Span::current().record("runtimedb.row_count", row_count);
 
     Ok(Json(QueryResponse {
-        result_id: Some(result.result_id),
+        result_id,
         columns,
         nullable,
         rows,
         row_count,
         execution_time_ms,
-        warning: None,
+        warning,
     }))
 }
 

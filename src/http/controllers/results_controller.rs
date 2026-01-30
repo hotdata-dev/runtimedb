@@ -1,3 +1,4 @@
+use crate::catalog::ResultStatus;
 use crate::http::controllers::query_controller::serialize_batches;
 use crate::http::error::ApiError;
 use crate::http::models::{GetResultResponse, ListResultsResponse, ResultInfo};
@@ -47,7 +48,8 @@ pub async fn list_results_handler(
         .into_iter()
         .map(|r| ResultInfo {
             id: r.id,
-            status: r.status,
+            status: r.status.to_string(),
+            error_message: r.error_message,
             created_at: r.created_at,
         })
         .collect();
@@ -78,11 +80,12 @@ pub async fn get_result_handler(
         .map_err(|e| ApiError::internal_error(format!("Failed to lookup result: {}", e)))?
         .ok_or_else(|| ApiError::not_found(format!("Result '{}' not found", id)))?;
 
-    // If not ready, return status only
-    if result_meta.status != "ready" {
+    // If not ready, return status only (with error message if failed)
+    if result_meta.status != ResultStatus::Ready {
         return Ok(Json(GetResultResponse {
             result_id: id,
-            status: result_meta.status,
+            status: result_meta.status.to_string(),
+            error_message: result_meta.error_message,
             columns: None,
             nullable: None,
             rows: None,
@@ -106,7 +109,8 @@ pub async fn get_result_handler(
 
     Ok(Json(GetResultResponse {
         result_id: id,
-        status: "ready".to_string(),
+        status: ResultStatus::Ready.to_string(),
+        error_message: None,
         columns: Some(columns),
         nullable: Some(nullable),
         rows: Some(rows),
