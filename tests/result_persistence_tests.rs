@@ -1787,3 +1787,108 @@ async fn test_catalog_store_pending_failure_returns_results_with_warning() -> Re
 
     Ok(())
 }
+
+/// Test that GET /results/{id} returns "failed" status (not 500) when parquet file is missing.
+/// This can happen after concurrent cleanup or partial failure.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_result_missing_parquet_returns_failed_status() -> Result<()> {
+    let temp_dir = tempfile::TempDir::new()?;
+    let base_dir = temp_dir.path().to_path_buf();
+
+    let engine = RuntimeEngine::builder()
+        .base_dir(&base_dir)
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+
+    let app = AppServer::new(engine);
+
+    // Execute a query to create a result
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"sql": "SELECT 1 as x"}).to_string()))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    let result_id = json["result_id"].as_str().unwrap();
+
+    // Wait for persistence to complete
+    let status = wait_for_result_ready(&app, result_id, 5000).await?;
+    assert_eq!(status, "ready", "Result should be ready initially");
+
+    // Now delete the parquet file to simulate cleanup/partial failure
+    let cache_dir = base_dir.join("cache");
+    // Find and delete directories containing parquet files (deletes entire result dir)
+    fn delete_parquet_dirs(dir: &std::path::Path) -> std::io::Result<usize> {
+        let mut deleted = 0;
+        if dir.is_dir() {
+            for entry in std::fs::read_dir(dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    // Check if this dir contains a parquet file
+                    let has_parquet = std::fs::read_dir(&path)?.filter_map(|e| e.ok()).any(|e| {
+                        e.path()
+                            .extension()
+                            .map(|ext| ext == "parquet")
+                            .unwrap_or(false)
+                    });
+                    if has_parquet {
+                        std::fs::remove_dir_all(&path)?;
+                        deleted += 1;
+                    } else {
+                        deleted += delete_parquet_dirs(&path)?;
+                    }
+                }
+            }
+        }
+        Ok(deleted)
+    }
+    let deleted = delete_parquet_dirs(&cache_dir)?;
+    assert!(
+        deleted > 0,
+        "Should have deleted at least one parquet directory"
+    );
+
+    // Now GET /results/{id} should return "failed" status, not 500
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("{}/{}", PATH_RESULTS, result_id))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    // Should NOT be a 500 error - should be 200 with failed status
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "Should return 200 with failed status, not 500"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(
+        json["status"], "failed",
+        "Status should be 'failed' when parquet file is missing"
+    );
+    assert!(
+        json["error_message"].is_string(),
+        "Should have error_message explaining the failure"
+    );
+
+    Ok(())
+}
