@@ -93,11 +93,36 @@ pub async fn get_result_handler(
     }
 
     // Status is ready, load the data
-    let (schema, batches) = engine
-        .get_result(&id)
-        .await
-        .map_err(|e| ApiError::internal_error(format!("Failed to load result: {}", e)))?
-        .ok_or_else(|| ApiError::internal_error("Result metadata exists but data not found"))?;
+    let (schema, batches) = match engine.get_result(&id).await {
+        Ok(Some(data)) => data,
+        Ok(None) => {
+            // Parquet file is missing (deleted concurrently or partial failure).
+            // Mark the result as failed and return the failed status.
+            let error_message = "Result data not found (file may have been deleted)";
+            if let Err(e) = engine.mark_result_failed(&id, error_message).await {
+                tracing::warn!(
+                    result_id = %id,
+                    error = %e,
+                    "Failed to mark result as failed after data not found"
+                );
+            }
+            return Ok(Json(GetResultResponse {
+                result_id: id,
+                status: ResultStatus::Failed.to_string(),
+                error_message: Some(error_message.to_string()),
+                columns: None,
+                nullable: None,
+                rows: None,
+                row_count: None,
+            }));
+        }
+        Err(e) => {
+            return Err(ApiError::internal_error(format!(
+                "Failed to load result: {}",
+                e
+            )));
+        }
+    };
 
     let (columns, nullable, rows) = serialize_batches(&schema, &batches)?;
     let row_count = rows.len();
