@@ -354,7 +354,7 @@ async fn wait_for_result_ready(
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(&format!("/results/{}", result_id))
+                    .uri(format!("/results/{}", result_id))
                     .body(Body::empty())?,
             )
             .await?;
@@ -943,7 +943,7 @@ async fn test_multiple_queries_with_storage_failure() -> Result<()> {
         // Query returns result_id immediately with async persistence
         let result_id = json["result_id"]
             .as_str()
-            .expect(&format!("Query {} should have result_id", i));
+            .unwrap_or_else(|| panic!("Query {} should have result_id", i));
 
         assert_eq!(
             json["rows"][0][0], i,
