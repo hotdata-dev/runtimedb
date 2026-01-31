@@ -9,7 +9,6 @@ use axum::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
-use std::time::Instant;
 
 /// Default limit for listing results
 const DEFAULT_RESULTS_LIMIT: usize = 100;
@@ -90,13 +89,10 @@ pub async fn get_result_handler(
             nullable: None,
             rows: None,
             row_count: None,
-            execution_time_ms: None,
         }));
     }
 
     // Status is ready, load the data
-    let start = Instant::now();
-
     let (schema, batches) = engine
         .get_result(&id)
         .await
@@ -105,7 +101,6 @@ pub async fn get_result_handler(
 
     let (columns, nullable, rows) = serialize_batches(&schema, &batches)?;
     let row_count = rows.len();
-    let execution_time_ms = start.elapsed().as_millis() as u64;
 
     Ok(Json(GetResultResponse {
         result_id: id,
@@ -115,6 +110,5 @@ pub async fn get_result_handler(
         nullable: Some(nullable),
         rows: Some(rows),
         row_count: Some(row_count),
-        execution_time_ms: Some(execution_time_ms),
     }))
 }

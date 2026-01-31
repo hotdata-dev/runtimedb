@@ -53,8 +53,6 @@ pub struct GetResultResponse {
     pub rows: Option<Vec<Vec<serde_json::Value>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub row_count: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub execution_time_ms: Option<u64>,
 }
 
 /// Summary of a persisted query result for listing
