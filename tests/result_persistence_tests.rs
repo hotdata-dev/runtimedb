@@ -10,7 +10,7 @@ use datafusion::prelude::SessionContext;
 use rand::RngCore;
 use runtimedb::catalog::{
     CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
-    SqliteCatalogManager, TableInfo, UploadInfo,
+    ResultStatus, ResultUpdate, SqliteCatalogManager, TableInfo, UploadInfo,
 };
 use runtimedb::http::app_server::{AppServer, PATH_QUERY, PATH_RESULT, PATH_RESULTS};
 use runtimedb::secrets::{SecretMetadata, SecretStatus};
@@ -38,27 +38,26 @@ fn generate_test_secret_key() -> String {
 #[derive(Debug)]
 struct FailingCatalog {
     inner: SqliteCatalogManager,
-    fail_finalize_result: AtomicBool,
-    fail_store_result_pending: AtomicBool,
+    fail_update_result_ready: AtomicBool,
+    fail_create_result: AtomicBool,
 }
 
 impl FailingCatalog {
     async fn new(path: &str) -> Result<Self> {
         Ok(Self {
             inner: SqliteCatalogManager::new(path).await?,
-            fail_finalize_result: AtomicBool::new(false),
-            fail_store_result_pending: AtomicBool::new(false),
+            fail_update_result_ready: AtomicBool::new(false),
+            fail_create_result: AtomicBool::new(false),
         })
     }
 
     fn set_fail_finalize_result(&self, should_fail: bool) {
-        self.fail_finalize_result
+        self.fail_update_result_ready
             .store(should_fail, Ordering::SeqCst);
     }
 
     fn set_fail_store_result_pending(&self, should_fail: bool) {
-        self.fail_store_result_pending
-            .store(should_fail, Ordering::SeqCst);
+        self.fail_create_result.store(should_fail, Ordering::SeqCst);
     }
 }
 
@@ -226,8 +225,21 @@ impl CatalogManager for FailingCatalog {
 
     // Query result persistence methods
 
-    async fn store_result(&self, result: &QueryResult) -> Result<()> {
-        self.inner.store_result(result).await
+    async fn create_result(&self, initial_status: ResultStatus) -> Result<String> {
+        if self.fail_create_result.load(Ordering::SeqCst) {
+            anyhow::bail!("Injected catalog failure at create_result")
+        }
+        self.inner.create_result(initial_status).await
+    }
+
+    async fn update_result(&self, id: &str, update: ResultUpdate<'_>) -> Result<bool> {
+        // Only fail when transitioning to Ready (simulates finalize failure)
+        if matches!(update, ResultUpdate::Ready { .. })
+            && self.fail_update_result_ready.load(Ordering::SeqCst)
+        {
+            anyhow::bail!("Injected catalog failure at update_result (Ready)")
+        }
+        self.inner.update_result(id, update).await
     }
 
     async fn get_result(&self, id: &str) -> Result<Option<QueryResult>> {
@@ -236,24 +248,6 @@ impl CatalogManager for FailingCatalog {
 
     async fn list_results(&self, limit: usize, offset: usize) -> Result<(Vec<QueryResult>, bool)> {
         self.inner.list_results(limit, offset).await
-    }
-
-    async fn store_result_pending(&self, id: &str, created_at: DateTime<Utc>) -> Result<()> {
-        if self.fail_store_result_pending.load(Ordering::SeqCst) {
-            anyhow::bail!("Injected catalog failure at store_result_pending")
-        }
-        self.inner.store_result_pending(id, created_at).await
-    }
-
-    async fn finalize_result(&self, id: &str, parquet_path: &str) -> Result<bool> {
-        if self.fail_finalize_result.load(Ordering::SeqCst) {
-            anyhow::bail!("Injected catalog failure at finalize_result")
-        }
-        self.inner.finalize_result(id, parquet_path).await
-    }
-
-    async fn fail_result(&self, id: &str, error_message: Option<&str>) -> Result<bool> {
-        self.inner.fail_result(id, error_message).await
     }
 
     async fn get_queryable_result(&self, id: &str) -> Result<Option<QueryResult>> {
@@ -1719,8 +1713,8 @@ async fn test_catalog_finalize_result_failure_marks_result_failed() -> Result<()
     );
     let error_msg = get_json["error_message"].as_str().unwrap();
     assert!(
-        error_msg.contains("catalog finalize failed"),
-        "Error message should mention catalog finalize: {}",
+        error_msg.contains("catalog update failed"),
+        "Error message should mention catalog update: {}",
         error_msg
     );
 
