@@ -14,6 +14,8 @@ pub struct AppConfig {
     pub liquid_cache: LiquidCacheConfig,
     #[serde(default)]
     pub cache: CacheConfig,
+    #[serde(default)]
+    pub engine: EngineConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -77,6 +79,27 @@ pub struct LiquidCacheConfig {
     pub enabled: bool,
     /// Liquid cache server address (e.g., "http://localhost:15214")
     pub server_address: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EngineConfig {
+    /// Maximum number of concurrent result persistence tasks.
+    /// When queries are executed, results are persisted to parquet in background tasks.
+    /// This limits how many can run concurrently. Default: 32.
+    #[serde(default = "default_max_concurrent_persistence")]
+    pub max_concurrent_persistence: usize,
+}
+
+impl Default for EngineConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_persistence: default_max_concurrent_persistence(),
+        }
+    }
+}
+
+fn default_max_concurrent_persistence() -> usize {
+    32
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
