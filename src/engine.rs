@@ -53,6 +53,12 @@ const DEFAULT_MAX_CONCURRENT_PERSISTENCE: usize = 32;
 /// Default interval (in seconds) between deletion worker runs.
 const DEFAULT_DELETION_WORKER_INTERVAL_SECS: u64 = 30;
 
+/// Default interval (in seconds) between stale result cleanup runs.
+const DEFAULT_STALE_RESULT_CLEANUP_INTERVAL_SECS: u64 = 60;
+
+/// Default timeout (in seconds) after which pending/processing results are considered stale.
+const DEFAULT_STALE_RESULT_TIMEOUT_SECS: u64 = 300;
+
 /// Connection ID used for internal runtimedb storage (results, etc.)
 /// This uses a leading underscore to ensure it cannot conflict with user-created
 /// connection IDs, which use the "conn_" prefix from nanoid generation.
@@ -110,6 +116,8 @@ pub struct RuntimeEngine {
     /// Set of in-flight persistence tasks. JoinSet automatically removes completed tasks
     /// when polled, preventing unbounded memory growth during high load.
     persistence_tasks: Mutex<JoinSet<()>>,
+    /// Handle for the stale result cleanup worker task.
+    stale_result_cleanup_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl RuntimeEngine {
@@ -177,6 +185,11 @@ impl RuntimeEngine {
 
         // Set engine config
         builder = builder.max_concurrent_persistence(config.engine.max_concurrent_persistence);
+        builder = builder.stale_result_cleanup_interval(Duration::from_secs(
+            config.engine.stale_result_cleanup_interval_secs,
+        ));
+        builder = builder
+            .stale_result_timeout(Duration::from_secs(config.engine.stale_result_timeout_secs));
 
         builder.build().await
     }
@@ -947,12 +960,17 @@ impl RuntimeEngine {
     /// Shutdown the engine and close all connections.
     /// This should be called before the application exits to ensure proper cleanup.
     pub async fn shutdown(&self) -> Result<()> {
-        // Signal the deletion worker to stop
+        // Signal background workers to stop
         self.shutdown_token.cancel();
 
         // Wait for the deletion worker to finish
         if let Some(handle) = self.deletion_worker_handle.lock().await.take() {
             // We use a timeout to avoid blocking forever if the worker is stuck
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
+
+        // Wait for the stale result cleanup worker to finish
+        if let Some(handle) = self.stale_result_cleanup_handle.lock().await.take() {
             let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
         }
 
@@ -2207,11 +2225,56 @@ impl RuntimeEngine {
             }
         })
     }
+
+    /// Start background task that cleans up stale results (stuck in pending/processing) periodically.
+    /// Returns the JoinHandle for the spawned task, or None if cleanup is disabled (interval is zero).
+    fn start_stale_result_cleanup_worker(
+        catalog: Arc<dyn CatalogManager>,
+        shutdown_token: CancellationToken,
+        cleanup_interval: Duration,
+        stale_timeout: Duration,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        // Disable cleanup if interval is zero
+        if cleanup_interval.is_zero() {
+            info!("Stale result cleanup worker disabled (interval is zero)");
+            return None;
+        }
+
+        Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(cleanup_interval);
+            loop {
+                tokio::select! {
+                    _ = shutdown_token.cancelled() => {
+                        info!("Stale result cleanup worker received shutdown signal");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        let cutoff = Utc::now() - chrono::Duration::from_std(stale_timeout).unwrap_or(chrono::Duration::seconds(300));
+                        match catalog.cleanup_stale_results(cutoff).await {
+                            Ok(0) => {
+                                // No stale results - this is the normal case, don't log
+                            }
+                            Ok(count) => {
+                                info!(
+                                    count = count,
+                                    cutoff = %cutoff,
+                                    "Cleaned up stale results"
+                                );
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "Failed to cleanup stale results");
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+    }
 }
 
 impl Drop for RuntimeEngine {
     fn drop(&mut self) {
-        // Signal the deletion worker to stop
+        // Signal workers to stop (deletion worker, stale result cleanup worker)
         self.shutdown_token.cancel();
 
         // Ensure catalog connection is closed when engine is dropped
@@ -2258,6 +2321,8 @@ pub struct RuntimeEngineBuilder {
     max_concurrent_persistence: usize,
     liquid_cache_builder: Option<LiquidCacheClientBuilder>,
     cache_config: Option<crate::config::CacheConfig>,
+    stale_result_cleanup_interval: Duration,
+    stale_result_timeout: Duration,
 }
 
 impl Default for RuntimeEngineBuilder {
@@ -2283,6 +2348,10 @@ impl RuntimeEngineBuilder {
             max_concurrent_persistence: DEFAULT_MAX_CONCURRENT_PERSISTENCE,
             liquid_cache_builder: None,
             cache_config: None,
+            stale_result_cleanup_interval: Duration::from_secs(
+                DEFAULT_STALE_RESULT_CLEANUP_INTERVAL_SECS,
+            ),
+            stale_result_timeout: Duration::from_secs(DEFAULT_STALE_RESULT_TIMEOUT_SECS),
         }
     }
 
@@ -2368,6 +2437,22 @@ impl RuntimeEngineBuilder {
     /// Set the cache configuration for Redis metadata caching.
     pub fn cache_config(mut self, config: crate::config::CacheConfig) -> Self {
         self.cache_config = Some(config);
+        self
+    }
+
+    /// Set the interval for stale result cleanup.
+    /// Results stuck in pending/processing longer than the timeout are marked as failed.
+    /// Set to Duration::ZERO to disable cleanup. Defaults to 60 seconds.
+    pub fn stale_result_cleanup_interval(mut self, interval: Duration) -> Self {
+        self.stale_result_cleanup_interval = interval;
+        self
+    }
+
+    /// Set the timeout after which pending/processing results are considered stale.
+    /// Results older than this are marked as failed during cleanup.
+    /// Defaults to 300 seconds (5 minutes).
+    pub fn stale_result_timeout(mut self, timeout: Duration) -> Self {
+        self.stale_result_timeout = timeout;
         self
     }
 
@@ -2513,6 +2598,14 @@ impl RuntimeEngineBuilder {
             self.deletion_worker_interval,
         );
 
+        // Start background stale result cleanup worker
+        let stale_result_cleanup_handle = RuntimeEngine::start_stale_result_cleanup_worker(
+            catalog.clone(),
+            shutdown_token.clone(),
+            self.stale_result_cleanup_interval,
+            self.stale_result_timeout,
+        );
+
         // Initialize catalog (starts warmup loop if configured)
         catalog.init().await?;
 
@@ -2529,6 +2622,7 @@ impl RuntimeEngineBuilder {
             parallel_refresh_count: self.parallel_refresh_count,
             persistence_semaphore: Arc::new(Semaphore::new(self.max_concurrent_persistence)),
             persistence_tasks: Mutex::new(JoinSet::new()),
+            stale_result_cleanup_handle: Mutex::new(stale_result_cleanup_handle),
         };
 
         // Register all existing connections as DataFusion catalogs
@@ -2953,5 +3047,91 @@ mod tests {
 
         let builder = RuntimeEngineBuilder::new().parallel_refresh_count(1);
         assert_eq!(builder.parallel_refresh_count, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_stale_result_cleanup_worker_cleans_stuck_results() {
+        use crate::catalog::ResultUpdate;
+
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().to_path_buf();
+
+        // Create engine with short cleanup interval and very short timeout for testing
+        let engine = RuntimeEngine::builder()
+            .base_dir(base_dir)
+            .secret_key(test_secret_key())
+            .stale_result_cleanup_interval(Duration::from_millis(50))
+            .stale_result_timeout(Duration::from_millis(100))
+            .build()
+            .await
+            .unwrap();
+
+        // Verify cleanup worker is running
+        assert!(
+            engine.stale_result_cleanup_handle.lock().await.is_some(),
+            "Cleanup worker handle should exist"
+        );
+
+        // Create a result and leave it in Processing state
+        let result_id = engine
+            .catalog
+            .create_result(ResultStatus::Pending)
+            .await
+            .unwrap();
+        engine
+            .catalog
+            .update_result(&result_id, ResultUpdate::Processing)
+            .await
+            .unwrap();
+
+        // Verify it's in processing state
+        let result = engine
+            .catalog
+            .get_result(&result_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.status, ResultStatus::Processing);
+
+        // Wait for the cleanup interval + timeout to pass
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Now the worker should have cleaned it up
+        let result = engine
+            .catalog
+            .get_result(&result_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result.status,
+            ResultStatus::Failed,
+            "Stale result should be marked as failed"
+        );
+        assert!(
+            result.error_message.is_some(),
+            "Failed result should have error message"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_stale_result_cleanup_worker_disabled_when_interval_zero() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().to_path_buf();
+
+        // Create engine with cleanup disabled (interval = 0)
+        let engine = RuntimeEngine::builder()
+            .base_dir(base_dir)
+            .secret_key(test_secret_key())
+            .stale_result_cleanup_interval(Duration::ZERO)
+            .build()
+            .await
+            .unwrap();
+
+        // Verify cleanup worker is NOT running
+        assert!(
+            engine.stale_result_cleanup_handle.lock().await.is_none(),
+            "Cleanup worker handle should be None when disabled"
+        );
     }
 }
