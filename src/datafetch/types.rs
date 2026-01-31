@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Metadata for a discovered table
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TableMetadata {
     pub catalog_name: Option<String>,
     pub schema_name: String,
@@ -33,19 +33,6 @@ pub struct GeometryColumnInfo {
     pub srid: i32,
     /// The geometry type if known (e.g., "Point", "Polygon", "Geometry")
     pub geometry_type: Option<String>,
-}
-
-impl Default for TableMetadata {
-    fn default() -> Self {
-        Self {
-            catalog_name: None,
-            schema_name: String::new(),
-            table_name: String::new(),
-            table_type: String::new(),
-            columns: Vec::new(),
-            geometry_columns: HashMap::new(),
-        }
-    }
 }
 
 /// Key used to store geometry column metadata in Arrow schema metadata
