@@ -6,7 +6,7 @@
 
 use super::{
     CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
-    TableInfo, UploadInfo,
+    ResultStatus, ResultUpdate, TableInfo, UploadInfo,
 };
 use crate::config::CacheConfig;
 use crate::secrets::{SecretMetadata, SecretStatus};
@@ -799,8 +799,12 @@ impl CatalogManager for CachingCatalogManager {
 
     // Query result persistence methods
 
-    async fn store_result(&self, result: &QueryResult) -> Result<()> {
-        self.inner().store_result(result).await
+    async fn create_result(&self, initial_status: ResultStatus) -> Result<String> {
+        self.inner().create_result(initial_status).await
+    }
+
+    async fn update_result(&self, id: &str, update: ResultUpdate<'_>) -> Result<bool> {
+        self.inner().update_result(id, update).await
     }
 
     async fn get_result(&self, id: &str) -> Result<Option<QueryResult>> {
@@ -809,6 +813,14 @@ impl CatalogManager for CachingCatalogManager {
 
     async fn list_results(&self, limit: usize, offset: usize) -> Result<(Vec<QueryResult>, bool)> {
         self.inner().list_results(limit, offset).await
+    }
+
+    async fn get_queryable_result(&self, id: &str) -> Result<Option<QueryResult>> {
+        self.inner().get_queryable_result(id).await
+    }
+
+    async fn cleanup_stale_results(&self, cutoff: DateTime<Utc>) -> Result<usize> {
+        self.inner().cleanup_stale_results(cutoff).await
     }
 
     // Upload management methods

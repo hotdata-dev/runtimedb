@@ -5,14 +5,21 @@ use axum::{
     http::{Request, StatusCode},
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
+use chrono::{DateTime, Utc};
 use datafusion::prelude::SessionContext;
 use rand::RngCore;
+use runtimedb::catalog::{
+    CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
+    ResultStatus, ResultUpdate, SqliteCatalogManager, TableInfo, UploadInfo,
+};
 use runtimedb::http::app_server::{AppServer, PATH_QUERY, PATH_RESULT, PATH_RESULTS};
+use runtimedb::secrets::{SecretMetadata, SecretStatus};
 use runtimedb::storage::{CacheWriteHandle, DatasetWriteHandle, FilesystemStorage, StorageManager};
 use runtimedb::RuntimeEngine;
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::TempDir;
 use tower::util::ServiceExt;
 
@@ -20,6 +27,302 @@ fn generate_test_secret_key() -> String {
     let mut key = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut key);
     STANDARD.encode(key)
+}
+
+/// Catalog wrapper that delegates to a real catalog but can be configured to fail at specific points.
+/// Used to test error handling in the persistence pipeline.
+///
+/// Note: A macro-based delegation approach was considered to reduce boilerplate, but
+/// async_trait's lifetime requirements prevent macro-generated async methods from
+/// matching the trait's lifetime bounds.
+#[derive(Debug)]
+struct FailingCatalog {
+    inner: SqliteCatalogManager,
+    fail_update_result_ready: AtomicBool,
+    fail_create_result: AtomicBool,
+}
+
+impl FailingCatalog {
+    async fn new(path: &str) -> Result<Self> {
+        Ok(Self {
+            inner: SqliteCatalogManager::new(path).await?,
+            fail_update_result_ready: AtomicBool::new(false),
+            fail_create_result: AtomicBool::new(false),
+        })
+    }
+
+    fn set_fail_finalize_result(&self, should_fail: bool) {
+        self.fail_update_result_ready
+            .store(should_fail, Ordering::SeqCst);
+    }
+
+    fn set_fail_store_result_pending(&self, should_fail: bool) {
+        self.fail_create_result.store(should_fail, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl CatalogManager for FailingCatalog {
+    async fn init(&self) -> Result<()> {
+        self.inner.init().await
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.inner.close().await
+    }
+
+    async fn run_migrations(&self) -> Result<()> {
+        self.inner.run_migrations().await
+    }
+
+    async fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
+        self.inner.list_connections().await
+    }
+
+    async fn add_connection(
+        &self,
+        name: &str,
+        source_type: &str,
+        config_json: &str,
+        secret_id: Option<&str>,
+    ) -> Result<String> {
+        self.inner
+            .add_connection(name, source_type, config_json, secret_id)
+            .await
+    }
+
+    async fn get_connection(&self, id: &str) -> Result<Option<ConnectionInfo>> {
+        self.inner.get_connection(id).await
+    }
+
+    async fn get_connection_by_name(&self, name: &str) -> Result<Option<ConnectionInfo>> {
+        self.inner.get_connection_by_name(name).await
+    }
+
+    async fn list_tables(&self, connection_id: Option<&str>) -> Result<Vec<TableInfo>> {
+        self.inner.list_tables(connection_id).await
+    }
+
+    async fn add_table(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+        arrow_schema_json: &str,
+    ) -> Result<i32> {
+        self.inner
+            .add_table(connection_id, schema_name, table_name, arrow_schema_json)
+            .await
+    }
+
+    async fn update_table_sync(&self, table_id: i32, parquet_path: &str) -> Result<()> {
+        self.inner.update_table_sync(table_id, parquet_path).await
+    }
+
+    async fn get_table(
+        &self,
+        connection_id: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Option<TableInfo>> {
+        self.inner.get_table(connection_id, schema, table).await
+    }
+
+    async fn clear_table_cache_metadata(
+        &self,
+        connection_id: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<TableInfo> {
+        self.inner
+            .clear_table_cache_metadata(connection_id, schema, table)
+            .await
+    }
+
+    async fn clear_connection_cache_metadata(&self, connection_id: &str) -> Result<()> {
+        self.inner
+            .clear_connection_cache_metadata(connection_id)
+            .await
+    }
+
+    async fn delete_connection(&self, connection_id: &str) -> Result<()> {
+        self.inner.delete_connection(connection_id).await
+    }
+
+    async fn schedule_file_deletion(&self, path: &str, delete_after: DateTime<Utc>) -> Result<()> {
+        self.inner.schedule_file_deletion(path, delete_after).await
+    }
+
+    async fn get_pending_deletions(&self) -> Result<Vec<PendingDeletion>> {
+        self.inner.get_pending_deletions().await
+    }
+
+    async fn increment_deletion_retry(&self, id: i32) -> Result<i32> {
+        self.inner.increment_deletion_retry(id).await
+    }
+
+    async fn remove_pending_deletion(&self, id: i32) -> Result<()> {
+        self.inner.remove_pending_deletion(id).await
+    }
+
+    async fn get_secret_metadata(&self, name: &str) -> Result<Option<SecretMetadata>> {
+        self.inner.get_secret_metadata(name).await
+    }
+
+    async fn get_secret_metadata_any_status(&self, name: &str) -> Result<Option<SecretMetadata>> {
+        self.inner.get_secret_metadata_any_status(name).await
+    }
+
+    async fn create_secret_metadata(&self, metadata: &SecretMetadata) -> Result<()> {
+        self.inner.create_secret_metadata(metadata).await
+    }
+
+    async fn update_secret_metadata(
+        &self,
+        metadata: &SecretMetadata,
+        lock: Option<OptimisticLock>,
+    ) -> Result<bool> {
+        self.inner.update_secret_metadata(metadata, lock).await
+    }
+
+    async fn set_secret_status(&self, name: &str, status: SecretStatus) -> Result<bool> {
+        self.inner.set_secret_status(name, status).await
+    }
+
+    async fn delete_secret_metadata(&self, name: &str) -> Result<bool> {
+        self.inner.delete_secret_metadata(name).await
+    }
+
+    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
+        self.inner.list_secrets().await
+    }
+
+    async fn get_encrypted_secret(&self, secret_id: &str) -> Result<Option<Vec<u8>>> {
+        self.inner.get_encrypted_secret(secret_id).await
+    }
+
+    async fn put_encrypted_secret_value(
+        &self,
+        secret_id: &str,
+        encrypted_value: &[u8],
+    ) -> Result<()> {
+        self.inner
+            .put_encrypted_secret_value(secret_id, encrypted_value)
+            .await
+    }
+
+    async fn delete_encrypted_secret_value(&self, secret_id: &str) -> Result<bool> {
+        self.inner.delete_encrypted_secret_value(secret_id).await
+    }
+
+    async fn get_secret_metadata_by_id(&self, id: &str) -> Result<Option<SecretMetadata>> {
+        self.inner.get_secret_metadata_by_id(id).await
+    }
+
+    async fn count_connections_by_secret_id(&self, secret_id: &str) -> Result<i64> {
+        self.inner.count_connections_by_secret_id(secret_id).await
+    }
+
+    // Query result persistence methods
+
+    async fn create_result(&self, initial_status: ResultStatus) -> Result<String> {
+        if self.fail_create_result.load(Ordering::SeqCst) {
+            anyhow::bail!("Injected catalog failure at create_result")
+        }
+        self.inner.create_result(initial_status).await
+    }
+
+    async fn update_result(&self, id: &str, update: ResultUpdate<'_>) -> Result<bool> {
+        // Only fail when transitioning to Ready (simulates finalize failure)
+        if matches!(update, ResultUpdate::Ready { .. })
+            && self.fail_update_result_ready.load(Ordering::SeqCst)
+        {
+            anyhow::bail!("Injected catalog failure at update_result (Ready)")
+        }
+        self.inner.update_result(id, update).await
+    }
+
+    async fn get_result(&self, id: &str) -> Result<Option<QueryResult>> {
+        self.inner.get_result(id).await
+    }
+
+    async fn list_results(&self, limit: usize, offset: usize) -> Result<(Vec<QueryResult>, bool)> {
+        self.inner.list_results(limit, offset).await
+    }
+
+    async fn get_queryable_result(&self, id: &str) -> Result<Option<QueryResult>> {
+        self.inner.get_queryable_result(id).await
+    }
+
+    async fn cleanup_stale_results(&self, cutoff: DateTime<Utc>) -> Result<usize> {
+        self.inner.cleanup_stale_results(cutoff).await
+    }
+
+    // Upload management methods
+
+    async fn create_upload(&self, upload: &UploadInfo) -> Result<()> {
+        self.inner.create_upload(upload).await
+    }
+
+    async fn get_upload(&self, id: &str) -> Result<Option<UploadInfo>> {
+        self.inner.get_upload(id).await
+    }
+
+    async fn list_uploads(&self, status: Option<&str>) -> Result<Vec<UploadInfo>> {
+        self.inner.list_uploads(status).await
+    }
+
+    async fn consume_upload(&self, id: &str) -> Result<bool> {
+        self.inner.consume_upload(id).await
+    }
+
+    async fn claim_upload(&self, id: &str) -> Result<bool> {
+        self.inner.claim_upload(id).await
+    }
+
+    async fn release_upload(&self, id: &str) -> Result<bool> {
+        self.inner.release_upload(id).await
+    }
+
+    // Dataset management methods
+
+    async fn create_dataset(&self, dataset: &DatasetInfo) -> Result<()> {
+        self.inner.create_dataset(dataset).await
+    }
+
+    async fn get_dataset(&self, id: &str) -> Result<Option<DatasetInfo>> {
+        self.inner.get_dataset(id).await
+    }
+
+    async fn get_dataset_by_table_name(
+        &self,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<Option<DatasetInfo>> {
+        self.inner
+            .get_dataset_by_table_name(schema_name, table_name)
+            .await
+    }
+
+    async fn list_datasets(&self, limit: usize, offset: usize) -> Result<(Vec<DatasetInfo>, bool)> {
+        self.inner.list_datasets(limit, offset).await
+    }
+
+    async fn list_all_datasets(&self) -> Result<Vec<DatasetInfo>> {
+        self.inner.list_all_datasets().await
+    }
+
+    async fn list_dataset_table_names(&self, schema_name: &str) -> Result<Vec<String>> {
+        self.inner.list_dataset_table_names(schema_name).await
+    }
+
+    async fn update_dataset(&self, id: &str, label: &str, table_name: &str) -> Result<bool> {
+        self.inner.update_dataset(id, label, table_name).await
+    }
+
+    async fn delete_dataset(&self, id: &str) -> Result<Option<DatasetInfo>> {
+        self.inner.delete_dataset(id).await
+    }
 }
 
 async fn setup_test() -> Result<(AppServer, TempDir)> {
@@ -33,6 +336,43 @@ async fn setup_test() -> Result<(AppServer, TempDir)> {
 
     let app = AppServer::new(engine);
     Ok((app, temp_dir))
+}
+
+/// Wait for a result to transition from "processing" to "ready" or "failed".
+async fn wait_for_result_ready(
+    app: &AppServer,
+    result_id: &str,
+    timeout_ms: u64,
+) -> Result<String> {
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+
+    loop {
+        let response = app
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/results/{}", result_id))
+                    .body(Body::empty())?,
+            )
+            .await?;
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+        let status = json["status"].as_str().unwrap_or("unknown");
+        if status != "processing" {
+            return Ok(status.to_string());
+        }
+
+        if start.elapsed() > timeout {
+            anyhow::bail!("Timeout waiting for result to be ready");
+        }
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// Configurable failure points for storage operations.
@@ -221,6 +561,10 @@ async fn test_get_result_by_id() -> Result<()> {
     let json: serde_json::Value = serde_json::from_slice(&body)?;
     let result_id = json["result_id"].as_str().unwrap();
 
+    // Wait for result to be ready (async persistence)
+    let status = wait_for_result_ready(&app, result_id, 5000).await?;
+    assert_eq!(status, "ready");
+
     // Fetch by ID
     let get_uri = PATH_RESULT.replace("{id}", result_id);
     let get_response = app
@@ -240,6 +584,7 @@ async fn test_get_result_by_id() -> Result<()> {
     let get_json: serde_json::Value = serde_json::from_slice(&get_body)?;
 
     assert_eq!(get_json["result_id"], result_id);
+    assert_eq!(get_json["status"], "ready");
     assert_eq!(get_json["rows"][0][0], "hello");
 
     Ok(())
@@ -307,7 +652,13 @@ async fn test_multiple_queries_get_unique_result_ids() -> Result<()> {
     // Result IDs should be different
     assert_ne!(result_id1, result_id2);
 
-    // Both should be retrievable
+    // Wait for both results to be ready
+    let status1 = wait_for_result_ready(&app, result_id1, 5000).await?;
+    assert_eq!(status1, "ready");
+    let status2 = wait_for_result_ready(&app, result_id2, 5000).await?;
+    assert_eq!(status2, "ready");
+
+    // Both should be retrievable with data
     let get_uri1 = PATH_RESULT.replace("{id}", result_id1);
     let get_response1 = app
         .router
@@ -369,6 +720,10 @@ async fn test_empty_result_returns_id() -> Result<()> {
     // But empty rows
     assert_eq!(json["row_count"], 0);
 
+    // Wait for result to be ready (async persistence)
+    let status = wait_for_result_ready(&app, result_id, 5000).await?;
+    assert_eq!(status, "ready");
+
     // Verify we can retrieve the empty result by ID
     let get_response = app
         .router
@@ -388,6 +743,7 @@ async fn test_empty_result_returns_id() -> Result<()> {
 
     // Should have matching result_id
     assert_eq!(get_json["result_id"].as_str().unwrap(), result_id);
+    assert_eq!(get_json["status"], "ready");
     // Should have the column name from the query
     assert_eq!(get_json["columns"].as_array().unwrap().len(), 1);
     assert_eq!(get_json["columns"][0], "x");
@@ -397,9 +753,10 @@ async fn test_empty_result_returns_id() -> Result<()> {
     Ok(())
 }
 
-/// Test that storage failures result in null result_id with warning using injected failing storage.
+/// Test that storage failures result in status="failed" via GET /results/{id}.
+/// With async persistence, query always returns result_id immediately.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_persistence_failure_returns_null_result_id_with_warning() -> Result<()> {
+async fn test_persistence_failure_returns_failed_status() -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
     let cache_dir = temp_dir.path().join("cache");
 
@@ -416,7 +773,7 @@ async fn test_persistence_failure_returns_null_result_id_with_warning() -> Resul
 
     let app = AppServer::new(engine);
 
-    // Query should still succeed, but with warning due to injected storage failure
+    // Query returns immediately with result_id (async persistence)
     let response = app
         .router
         .clone()
@@ -434,29 +791,23 @@ async fn test_persistence_failure_returns_null_result_id_with_warning() -> Resul
     let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
     let json: serde_json::Value = serde_json::from_slice(&body)?;
 
-    // result_id should be null (not missing)
+    // Query always returns result_id with async persistence
     assert!(
-        json.get("result_id").is_some(),
-        "result_id field should be present"
+        json["result_id"].is_string(),
+        "result_id should always be present with async persistence"
     );
-    assert!(
-        json["result_id"].is_null(),
-        "result_id should be null on persistence failure"
-    );
-
-    // Should have warning explaining the failure
-    assert!(
-        json.get("warning").is_some(),
-        "warning field should be present"
-    );
-    assert!(
-        json["warning"].as_str().unwrap().contains("not persisted"),
-        "warning should explain persistence failure"
-    );
+    let result_id = json["result_id"].as_str().unwrap();
 
     // Should still have the query results
     assert_eq!(json["row_count"], 1);
     assert_eq!(json["rows"][0][0], 1);
+
+    // Wait for async persistence to complete (will fail)
+    let status = wait_for_result_ready(&app, result_id, 5000).await?;
+    assert_eq!(
+        status, "failed",
+        "Status should be 'failed' after storage failure"
+    );
 
     Ok(())
 }
@@ -480,7 +831,7 @@ async fn test_storage_recovery_after_failure() -> Result<()> {
 
     let app = AppServer::new(engine);
 
-    // First query - storage is failing
+    // First query - storage is failing (but query returns result_id with async persistence)
     let response1 = app
         .router
         .clone()
@@ -497,13 +848,11 @@ async fn test_storage_recovery_after_failure() -> Result<()> {
     let body1 = axum::body::to_bytes(response1.into_body(), usize::MAX).await?;
     let json1: serde_json::Value = serde_json::from_slice(&body1)?;
 
-    assert!(
-        json1["result_id"].is_null(),
-        "First query should have null result_id"
-    );
-    assert!(
-        json1.get("warning").is_some(),
-        "First query should have warning"
+    let result_id1 = json1["result_id"].as_str().unwrap();
+    let status1 = wait_for_result_ready(&app, result_id1, 5000).await?;
+    assert_eq!(
+        status1, "failed",
+        "First query should have 'failed' status due to storage failure"
     );
 
     // Now fix the storage
@@ -526,34 +875,34 @@ async fn test_storage_recovery_after_failure() -> Result<()> {
     let body2 = axum::body::to_bytes(response2.into_body(), usize::MAX).await?;
     let json2: serde_json::Value = serde_json::from_slice(&body2)?;
 
-    assert!(
-        json2["result_id"].is_string(),
-        "Second query should have valid result_id after storage recovery"
-    );
-    assert!(
-        json2.get("warning").is_none(),
-        "Second query should not have warning after storage recovery"
+    let result_id2 = json2["result_id"].as_str().unwrap();
+    let status2 = wait_for_result_ready(&app, result_id2, 5000).await?;
+    assert_eq!(
+        status2, "ready",
+        "Second query should have 'ready' status after storage recovery"
     );
 
-    // Verify the result can be retrieved
-    let result_id = json2["result_id"].as_str().unwrap();
+    // Verify the result can be retrieved with data
     let get_response = app
         .router
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!("/results/{}", result_id))
+                .uri(format!("/results/{}", result_id2))
                 .body(Body::empty())?,
         )
         .await?;
 
     assert_eq!(get_response.status(), StatusCode::OK);
+    let get_body = axum::body::to_bytes(get_response.into_body(), usize::MAX).await?;
+    let get_json: serde_json::Value = serde_json::from_slice(&get_body)?;
+    assert_eq!(get_json["status"], "ready");
 
     Ok(())
 }
 
-/// Test that multiple queries with storage failures all get proper warnings.
+/// Test that multiple queries with storage failures all get status="failed".
 #[tokio::test(flavor = "multi_thread")]
 async fn test_multiple_queries_with_storage_failure() -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
@@ -591,19 +940,22 @@ async fn test_multiple_queries_with_storage_failure() -> Result<()> {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
         let json: serde_json::Value = serde_json::from_slice(&body)?;
 
-        assert!(
-            json["result_id"].is_null(),
-            "Query {} should have null result_id",
-            i
-        );
-        assert!(
-            json.get("warning").is_some(),
-            "Query {} should have warning",
-            i
-        );
+        // Query returns result_id immediately with async persistence
+        let result_id = json["result_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("Query {} should have result_id", i));
+
         assert_eq!(
             json["rows"][0][0], i,
             "Query {} should return correct data",
+            i
+        );
+
+        // Wait for async persistence to complete (will fail)
+        let status = wait_for_result_ready(&app, result_id, 5000).await?;
+        assert_eq!(
+            status, "failed",
+            "Query {} should have 'failed' status due to storage failure",
             i
         );
     }
@@ -611,10 +963,10 @@ async fn test_multiple_queries_with_storage_failure() -> Result<()> {
     Ok(())
 }
 
-/// Test that parquet writer init failure (bad path) results in null result_id with warning.
+/// Test that parquet writer init failure (bad path) results in status="failed".
 /// This tests the failure path at writer.init() stage.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_writer_init_failure_returns_null_result_id_with_warning() -> Result<()> {
+async fn test_writer_init_failure_returns_failed_status() -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
     let cache_dir = temp_dir.path().join("cache");
 
@@ -631,7 +983,7 @@ async fn test_writer_init_failure_returns_null_result_id_with_warning() -> Resul
 
     let app = AppServer::new(engine);
 
-    // Query should still succeed, but with warning due to writer init failure
+    // Query returns immediately with result_id (async persistence)
     let response = app
         .router
         .clone()
@@ -649,39 +1001,31 @@ async fn test_writer_init_failure_returns_null_result_id_with_warning() -> Resul
     let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
     let json: serde_json::Value = serde_json::from_slice(&body)?;
 
-    // result_id should be null due to writer init failure
+    // Query always returns result_id with async persistence
     assert!(
-        json.get("result_id").is_some(),
-        "result_id field should be present"
+        json["result_id"].is_string(),
+        "result_id should always be present with async persistence"
     );
-    assert!(
-        json["result_id"].is_null(),
-        "result_id should be null on writer init failure"
-    );
-
-    // Should have warning explaining the failure
-    assert!(
-        json.get("warning").is_some(),
-        "warning field should be present"
-    );
-    let warning = json["warning"].as_str().unwrap();
-    assert!(
-        warning.contains("not persisted"),
-        "warning should explain persistence failure: {}",
-        warning
-    );
+    let result_id = json["result_id"].as_str().unwrap();
 
     // Should still have the query results
     assert_eq!(json["row_count"], 1);
     assert_eq!(json["rows"][0][0], 1);
 
+    // Wait for async persistence to complete (will fail due to writer init)
+    let status = wait_for_result_ready(&app, result_id, 5000).await?;
+    assert_eq!(
+        status, "failed",
+        "Status should be 'failed' after writer init failure"
+    );
+
     Ok(())
 }
 
-/// Test that different failure stages all produce consistent error handling.
+/// Test that different failure stages all produce consistent status="failed".
 /// This tests both init failure and finalize failure in the same test.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_different_failure_stages_produce_consistent_warnings() -> Result<()> {
+async fn test_different_failure_stages_produce_consistent_status() -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
     let cache_dir = temp_dir.path().join("cache");
 
@@ -718,17 +1062,16 @@ async fn test_different_failure_stages_produce_consistent_warnings() -> Result<(
     let body1 = axum::body::to_bytes(response1.into_body(), usize::MAX).await?;
     let json1: serde_json::Value = serde_json::from_slice(&body1)?;
 
-    assert!(
-        json1["result_id"].is_null(),
-        "Init failure should have null result_id"
-    );
-    assert!(
-        json1.get("warning").is_some(),
-        "Init failure should have warning"
-    );
+    let result_id1 = json1["result_id"].as_str().unwrap();
     assert_eq!(
         json1["rows"][0][0], "init_fail",
         "Should return correct data despite init failure"
+    );
+
+    let status1 = wait_for_result_ready(&app, result_id1, 5000).await?;
+    assert_eq!(
+        status1, "failed",
+        "Init failure should result in 'failed' status"
     );
 
     // Test 2: Finalize failure
@@ -753,17 +1096,16 @@ async fn test_different_failure_stages_produce_consistent_warnings() -> Result<(
     let body2 = axum::body::to_bytes(response2.into_body(), usize::MAX).await?;
     let json2: serde_json::Value = serde_json::from_slice(&body2)?;
 
-    assert!(
-        json2["result_id"].is_null(),
-        "Finalize failure should have null result_id"
-    );
-    assert!(
-        json2.get("warning").is_some(),
-        "Finalize failure should have warning"
-    );
+    let result_id2 = json2["result_id"].as_str().unwrap();
     assert_eq!(
         json2["rows"][0][0], "finalize_fail",
         "Should return correct data despite finalize failure"
+    );
+
+    let status2 = wait_for_result_ready(&app, result_id2, 5000).await?;
+    assert_eq!(
+        status2, "failed",
+        "Finalize failure should result in 'failed' status"
     );
 
     // Test 3: No failure - should succeed
@@ -788,33 +1130,31 @@ async fn test_different_failure_stages_produce_consistent_warnings() -> Result<(
     let body3 = axum::body::to_bytes(response3.into_body(), usize::MAX).await?;
     let json3: serde_json::Value = serde_json::from_slice(&body3)?;
 
-    assert!(
-        json3["result_id"].is_string(),
-        "Success should have valid result_id"
-    );
-    assert!(
-        json3.get("warning").is_none(),
-        "Success should not have warning"
-    );
+    let result_id3 = json3["result_id"].as_str().unwrap();
     assert_eq!(
         json3["rows"][0][0], "success",
         "Should return correct data on success"
     );
 
-    // Verify we can retrieve the successful result
-    let result_id = json3["result_id"].as_str().unwrap();
+    let status3 = wait_for_result_ready(&app, result_id3, 5000).await?;
+    assert_eq!(status3, "ready", "Success should result in 'ready' status");
+
+    // Verify we can retrieve the successful result with data
     let get_response = app
         .router
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!("/results/{}", result_id))
+                .uri(format!("/results/{}", result_id3))
                 .body(Body::empty())?,
         )
         .await?;
 
     assert_eq!(get_response.status(), StatusCode::OK);
+    let get_body = axum::body::to_bytes(get_response.into_body(), usize::MAX).await?;
+    let get_json: serde_json::Value = serde_json::from_slice(&get_body)?;
+    assert_eq!(get_json["status"], "ready");
 
     Ok(())
 }
@@ -868,7 +1208,7 @@ async fn test_list_results_returns_created_results() -> Result<()> {
     assert_eq!(response1.status(), StatusCode::OK);
     let body1 = axum::body::to_bytes(response1.into_body(), usize::MAX).await?;
     let json1: serde_json::Value = serde_json::from_slice(&body1)?;
-    let result_id1 = json1["result_id"].as_str().unwrap();
+    let result_id1 = json1["result_id"].as_str().unwrap().to_string();
 
     let response2 = app
         .router
@@ -884,7 +1224,11 @@ async fn test_list_results_returns_created_results() -> Result<()> {
     assert_eq!(response2.status(), StatusCode::OK);
     let body2 = axum::body::to_bytes(response2.into_body(), usize::MAX).await?;
     let json2: serde_json::Value = serde_json::from_slice(&body2)?;
-    let result_id2 = json2["result_id"].as_str().unwrap();
+    let result_id2 = json2["result_id"].as_str().unwrap().to_string();
+
+    // Wait for both results to be ready
+    wait_for_result_ready(&app, &result_id1, 5000).await?;
+    wait_for_result_ready(&app, &result_id2, 5000).await?;
 
     // List results
     let list_response = app
@@ -912,12 +1256,13 @@ async fn test_list_results_returns_created_results() -> Result<()> {
     // Results should be ordered by created_at descending (newest first)
     // so result_id2 should be first
     let result_ids: Vec<&str> = results.iter().map(|r| r["id"].as_str().unwrap()).collect();
-    assert!(result_ids.contains(&result_id1));
-    assert!(result_ids.contains(&result_id2));
+    assert!(result_ids.contains(&result_id1.as_str()));
+    assert!(result_ids.contains(&result_id2.as_str()));
 
-    // Each result should have id and created_at
+    // Each result should have id, status, and created_at
     for result in results {
         assert!(result["id"].is_string());
+        assert!(result["status"].is_string());
         assert!(result["created_at"].is_string());
     }
 
@@ -1070,6 +1415,10 @@ async fn test_query_result_via_sql() -> Result<()> {
     let json: serde_json::Value = serde_json::from_slice(&body)?;
     let result_id = json["result_id"].as_str().unwrap();
 
+    // Wait for result to be ready (async persistence)
+    let status = wait_for_result_ready(&app, result_id, 5000).await?;
+    assert_eq!(status, "ready");
+
     // Now query the result via SQL using runtimedb.results schema
     let sql_query = format!("SELECT * FROM runtimedb.results.\"{}\"", result_id);
     let query_response = app
@@ -1120,6 +1469,10 @@ async fn test_query_result_via_sql_multiple_rows() -> Result<()> {
     let json: serde_json::Value = serde_json::from_slice(&body)?;
     let result_id = json["result_id"].as_str().unwrap();
 
+    // Wait for result to be ready (async persistence)
+    let status = wait_for_result_ready(&app, result_id, 5000).await?;
+    assert_eq!(status, "ready");
+
     // Query via SQL
     let sql_query = format!("SELECT * FROM runtimedb.results.\"{}\"", result_id);
     let query_response = app
@@ -1167,6 +1520,10 @@ async fn test_query_result_via_sql_with_filter() -> Result<()> {
     let body = axum::body::to_bytes(create_response.into_body(), usize::MAX).await?;
     let json: serde_json::Value = serde_json::from_slice(&body)?;
     let result_id = json["result_id"].as_str().unwrap();
+
+    // Wait for result to be ready (async persistence)
+    let status = wait_for_result_ready(&app, result_id, 5000).await?;
+    assert_eq!(status, "ready");
 
     // Query with a filter
     let sql_query = format!(
@@ -1244,6 +1601,10 @@ async fn test_query_result_with_aggregation() -> Result<()> {
     let json: serde_json::Value = serde_json::from_slice(&body)?;
     let result_id = json["result_id"].as_str().unwrap();
 
+    // Wait for result to be ready (async persistence)
+    let status = wait_for_result_ready(&app, result_id, 5000).await?;
+    assert_eq!(status, "ready");
+
     // Query with aggregation
     let sql_query = format!(
         "SELECT SUM(value) as total, AVG(value) as avg FROM runtimedb.results.\"{}\"",
@@ -1271,6 +1632,263 @@ async fn test_query_result_with_aggregation() -> Result<()> {
                                               // AVG returns as float, compare loosely
     let avg_value = query_json["rows"][0][1].as_f64().unwrap();
     assert!((avg_value - 20.0).abs() < 0.001); // AVG = 60/3
+
+    Ok(())
+}
+
+/// Test that catalog finalize_result failures mark the result as failed.
+/// This tests the scenario where parquet is successfully written but catalog update fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_catalog_finalize_result_failure_marks_result_failed() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let catalog_path = temp_dir.path().join("catalog.db");
+
+    // Create a catalog that we can make fail on finalize_result
+    let failing_catalog = Arc::new(FailingCatalog::new(catalog_path.to_str().unwrap()).await?);
+    failing_catalog.set_fail_finalize_result(true);
+
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .catalog(failing_catalog.clone())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+
+    let app = AppServer::new(engine);
+
+    // Query returns immediately with result_id (async persistence)
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"sql": "SELECT 1 as num"}).to_string()))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Query always returns result_id with async persistence
+    assert!(
+        json["result_id"].is_string(),
+        "result_id should always be present with async persistence"
+    );
+    let result_id = json["result_id"].as_str().unwrap();
+
+    // Should still have the query results
+    assert_eq!(json["row_count"], 1);
+    assert_eq!(json["rows"][0][0], 1);
+
+    // Wait for async persistence to complete (will fail at catalog.finalize_result)
+    let status = wait_for_result_ready(&app, result_id, 5000).await?;
+    assert_eq!(
+        status, "failed",
+        "Status should be 'failed' after catalog finalize_result failure"
+    );
+
+    // Verify the error message contains useful info
+    let get_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/results/{}", result_id))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    let get_body = axum::body::to_bytes(get_response.into_body(), usize::MAX).await?;
+    let get_json: serde_json::Value = serde_json::from_slice(&get_body)?;
+    assert_eq!(get_json["status"], "failed");
+    assert!(
+        get_json["error_message"].is_string(),
+        "Failed result should have error_message"
+    );
+    let error_msg = get_json["error_message"].as_str().unwrap();
+    assert!(
+        error_msg.contains("catalog update failed"),
+        "Error message should mention catalog update: {}",
+        error_msg
+    );
+
+    Ok(())
+}
+
+/// Test that catalog store_result_pending failure returns results with warning (not hard failure).
+/// This ensures query results are still returned even when persistence is unavailable.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_catalog_store_pending_failure_returns_results_with_warning() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let catalog_path = temp_dir.path().join("catalog.db");
+
+    // Create a catalog that we can make fail on store_result_pending
+    let failing_catalog = Arc::new(FailingCatalog::new(catalog_path.to_str().unwrap()).await?);
+    failing_catalog.set_fail_store_result_pending(true);
+
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .catalog(failing_catalog.clone())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+
+    let app = AppServer::new(engine);
+
+    // Query should return results even when catalog registration fails
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"sql": "SELECT 42 as answer"}).to_string(),
+                ))?,
+        )
+        .await?;
+
+    // Should still succeed (not 500 error)
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Should have query results
+    assert_eq!(json["row_count"], 1);
+    assert_eq!(json["rows"][0][0], 42);
+
+    // result_id should be null (not present or null) when persistence failed
+    assert!(
+        json.get("result_id").is_none() || json["result_id"].is_null(),
+        "result_id should be null when persistence failed, got: {:?}",
+        json["result_id"]
+    );
+
+    // Should have a warning message
+    assert!(
+        json["warning"].is_string(),
+        "Should have warning when persistence failed"
+    );
+    let warning = json["warning"].as_str().unwrap();
+    assert!(
+        warning.contains("persistence unavailable"),
+        "Warning should mention persistence unavailable: {}",
+        warning
+    );
+
+    Ok(())
+}
+
+/// Test that GET /results/{id} returns "failed" status (not 500) when parquet file is missing.
+/// This can happen after concurrent cleanup or partial failure.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_result_missing_parquet_returns_failed_status() -> Result<()> {
+    let temp_dir = tempfile::TempDir::new()?;
+    let base_dir = temp_dir.path().to_path_buf();
+
+    let engine = RuntimeEngine::builder()
+        .base_dir(&base_dir)
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+
+    let app = AppServer::new(engine);
+
+    // Execute a query to create a result
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"sql": "SELECT 1 as x"}).to_string()))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    let result_id = json["result_id"].as_str().unwrap();
+
+    // Wait for persistence to complete
+    let status = wait_for_result_ready(&app, result_id, 5000).await?;
+    assert_eq!(status, "ready", "Result should be ready initially");
+
+    // Now delete the parquet file to simulate cleanup/partial failure
+    let cache_dir = base_dir.join("cache");
+    // Find and delete directories containing parquet files (deletes entire result dir)
+    fn delete_parquet_dirs(dir: &std::path::Path) -> std::io::Result<usize> {
+        let mut deleted = 0;
+        if dir.is_dir() {
+            for entry in std::fs::read_dir(dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    // Check if this dir contains a parquet file
+                    let has_parquet = std::fs::read_dir(&path)?.filter_map(|e| e.ok()).any(|e| {
+                        e.path()
+                            .extension()
+                            .map(|ext| ext == "parquet")
+                            .unwrap_or(false)
+                    });
+                    if has_parquet {
+                        std::fs::remove_dir_all(&path)?;
+                        deleted += 1;
+                    } else {
+                        deleted += delete_parquet_dirs(&path)?;
+                    }
+                }
+            }
+        }
+        Ok(deleted)
+    }
+    let deleted = delete_parquet_dirs(&cache_dir)?;
+    assert!(
+        deleted > 0,
+        "Should have deleted at least one parquet directory"
+    );
+
+    // Now GET /results/{id} should return "failed" status, not 500
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("{}/{}", PATH_RESULTS, result_id))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    // Should NOT be a 500 error - should be 200 with failed status
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "Should return 200 with failed status, not 500"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(
+        json["status"], "failed",
+        "Status should be 'failed' when parquet file is missing"
+    );
+    assert!(
+        json["error_message"].is_string(),
+        "Should have error_message explaining the failure"
+    );
 
     Ok(())
 }

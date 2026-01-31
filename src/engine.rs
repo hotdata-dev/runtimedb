@@ -1,6 +1,6 @@
 use crate::catalog::{
     is_dataset_table_name_conflict, CachingCatalogManager, CatalogManager, ConnectionInfo,
-    QueryResult, SqliteCatalogManager, TableInfo,
+    ResultStatus, ResultUpdate, SqliteCatalogManager, TableInfo,
 };
 use crate::datafetch::native::StreamingParquetWriter;
 use crate::datafetch::{BatchWriter, FetchOrchestrator, NativeFetcher};
@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::{info, warn, Instrument};
@@ -45,13 +46,26 @@ const MAX_DELETION_RETRIES: i32 = 5;
 /// Default number of parallel table refreshes for connection-wide data refresh.
 const DEFAULT_PARALLEL_REFRESH_COUNT: usize = 4;
 
+/// Default maximum number of concurrent result persistence tasks.
+/// This limits how many background tasks can write parquet files simultaneously.
+const DEFAULT_MAX_CONCURRENT_PERSISTENCE: usize = 32;
+
 /// Default interval (in seconds) between deletion worker runs.
 const DEFAULT_DELETION_WORKER_INTERVAL_SECS: u64 = 30;
+
+/// Default interval (in seconds) between stale result cleanup runs.
+const DEFAULT_STALE_RESULT_CLEANUP_INTERVAL_SECS: u64 = 60;
+
+/// Default timeout (in seconds) after which pending/processing results are considered stale.
+const DEFAULT_STALE_RESULT_TIMEOUT_SECS: u64 = 300;
 
 /// Connection ID used for internal runtimedb storage (results, etc.)
 /// This uses a leading underscore to ensure it cannot conflict with user-created
 /// connection IDs, which use the "conn_" prefix from nanoid generation.
 const INTERNAL_CONNECTION_ID: &str = "_runtimedb_internal";
+
+/// Schema name for storing query results.
+const RESULTS_SCHEMA_NAME: &str = "runtimedb_results";
 
 /// Result of a query execution with optional persistence.
 pub struct QueryResponse {
@@ -60,9 +74,26 @@ pub struct QueryResponse {
     pub execution_time: Duration,
 }
 
-/// Internal result from writing parquet file, containing the handle for finalization.
-struct ParquetWriteResult {
-    handle: crate::storage::CacheWriteHandle,
+/// Result of a query execution with async persistence.
+///
+/// This struct is returned by [`RuntimeEngine::execute_query_with_persistence`].
+/// Unlike [`QueryResponse`], this includes a `result_id` that can be used to
+/// retrieve the persisted result later via the `/results/{id}` API endpoint.
+///
+/// The persistence happens asynchronously in a background task after this
+/// struct is returned. The result status can be checked via `GET /results/{id}`:
+/// - `"processing"` - Persistence is still in progress
+/// - `"ready"` - Result is fully persisted and available
+/// - `"failed"` - Persistence failed (check `error_message` for details)
+pub struct QueryResponseWithId {
+    /// Unique identifier for the persisted result.
+    pub result_id: String,
+    /// Arrow schema describing the result columns.
+    pub schema: Arc<Schema>,
+    /// The query result data (available immediately, regardless of persistence status).
+    pub results: Vec<RecordBatch>,
+    /// Time taken to execute the query (excluding persistence).
+    pub execution_time: Duration,
 }
 
 /// The main query engine that manages connections, catalogs, and query execution.
@@ -79,6 +110,14 @@ pub struct RuntimeEngine {
     #[allow(dead_code)]
     deletion_worker_interval: Duration,
     parallel_refresh_count: usize,
+    /// Semaphore to limit concurrent result persistence tasks.
+    /// This prevents unbounded task spawning under burst load.
+    persistence_semaphore: Arc<Semaphore>,
+    /// Set of in-flight persistence tasks. JoinSet automatically removes completed tasks
+    /// when polled, preventing unbounded memory growth during high load.
+    persistence_tasks: Mutex<JoinSet<()>>,
+    /// Handle for the stale result cleanup worker task.
+    stale_result_cleanup_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl RuntimeEngine {
@@ -143,6 +182,14 @@ impl RuntimeEngine {
 
         // Pass cache config to builder
         builder = builder.cache_config(config.cache.clone());
+
+        // Set engine config
+        builder = builder.max_concurrent_persistence(config.engine.max_concurrent_persistence);
+        builder = builder.stale_result_cleanup_interval(Duration::from_secs(
+            config.engine.stale_result_cleanup_interval_secs,
+        ));
+        builder = builder
+            .stale_result_timeout(Duration::from_secs(config.engine.stale_result_timeout_secs));
 
         builder.build().await
     }
@@ -454,54 +501,185 @@ impl RuntimeEngine {
         })
     }
 
-    /// Persist query results to storage and catalog.
+    /// Execute a SQL query and persist results asynchronously.
     ///
-    /// Returns the result ID on success, or an error if persistence fails.
-    /// This is a best-effort operation - callers should handle errors gracefully
-    /// since the query results are still valid even if persistence fails.
+    /// This method:
+    /// 1. Executes the query
+    /// 2. Generates a result ID
+    /// 3. Inserts a catalog entry with status "processing"
+    /// 4. Spawns a background task to write parquet and update status
+    /// 5. Returns immediately with the result ID
+    ///
+    /// The result can be retrieved via GET /results/{id}. If status is "processing",
+    /// the client should poll again later.
     #[tracing::instrument(
-        name = "persist_result",
-        skip(self, schema, batches),
+        name = "execute_query_with_persistence",
+        skip(self, sql),
         fields(
             runtimedb.result_id = tracing::field::Empty,
         )
     )]
-    pub async fn persist_result(
+    pub async fn execute_query_with_persistence(
         &self,
-        schema: &Arc<Schema>,
-        batches: &[RecordBatch],
-    ) -> Result<String> {
-        let result_id = crate::id::generate_result_id();
+        sql: &str,
+    ) -> Result<(QueryResponseWithId, Option<String>)> {
+        // Execute the query first
+        let query_response = self.execute_query(sql).await?;
 
-        // Write to parquet
-        let parquet_path = self.write_results_to_parquet(&result_id, schema, batches)?;
-
-        // Finalize (uploads to S3 if needed) and get directory URL
-        let dir_url = self
-            .storage
-            .finalize_cache_write(&parquet_path.handle)
-            .await?;
-
-        // Directory URL already includes the version subdirectory, and the file is data.parquet
-        let file_url = format!("{}/data.parquet", dir_url);
-
-        // Store in catalog
-        let query_result = QueryResult {
-            id: result_id.clone(),
-            parquet_path: file_url,
-            created_at: Utc::now(),
+        // Create result in catalog - if this fails, return result with warning
+        // Note: create_result generates the ID and records it in the span
+        let result_id = match self.catalog.create_result(ResultStatus::Processing).await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to register result in catalog, returning without persistence"
+                );
+                // Return results with no persistence (empty result_id signals no persistence)
+                return Ok((
+                    QueryResponseWithId {
+                        result_id: String::new(), // Empty signals no persistence available
+                        schema: query_response.schema,
+                        results: query_response.results,
+                        execution_time: query_response.execution_time,
+                    },
+                    Some(format!("Result persistence unavailable: {}", e)),
+                ));
+            }
         };
 
-        self.catalog.store_result(&query_result).await?;
-
+        // Record result_id in span for traceability
         tracing::Span::current().record("runtimedb.result_id", &result_id);
 
-        Ok(result_id)
+        // Clone what we need for the background task
+        let storage = Arc::clone(&self.storage);
+        let catalog = Arc::clone(&self.catalog);
+        let result_id_clone = result_id.clone();
+        let schema = Arc::clone(&query_response.schema);
+        let batches = query_response.results.clone();
+        let semaphore = Arc::clone(&self.persistence_semaphore);
+
+        // Acquire a persistence permit before spawning the background task.
+        // This limits the number of concurrent persistence tasks to prevent unbounded
+        // task spawning under burst load. If all permits are in use, this will block
+        // until one becomes available. The "schedule_result_persistence" span makes
+        // this wait time visible in traces - it should typically be near-zero, but
+        // will show contention if persistence tasks are backing up.
+        //
+        // If the semaphore is closed (e.g., during shutdown), we gracefully degrade
+        // by marking the result as failed rather than panicking.
+        let permit = match semaphore
+            .acquire_owned()
+            .instrument(tracing::info_span!(
+                "schedule_result_persistence",
+                runtimedb.result_id = %result_id,
+            ))
+            .await
+        {
+            Ok(p) => p,
+            Err(_) => {
+                // Semaphore closed (shutdown in progress) - mark result as failed
+                tracing::warn!(
+                    result_id = %result_id,
+                    "Persistence semaphore closed during shutdown, marking result as failed"
+                );
+                match self
+                    .catalog
+                    .update_result(
+                        &result_id,
+                        ResultUpdate::Failed {
+                            error_message: Some("Server shutting down"),
+                        },
+                    )
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::warn!(
+                            result_id = %result_id,
+                            "Result row not found when marking failed during shutdown"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            result_id = %result_id,
+                            error = %e,
+                            "Failed to mark result as failed during shutdown"
+                        );
+                    }
+                }
+                return Ok((
+                    QueryResponseWithId {
+                        result_id: String::new(),
+                        schema: query_response.schema,
+                        results: query_response.results,
+                        execution_time: query_response.execution_time,
+                    },
+                    Some("Result persistence unavailable: server shutting down".to_string()),
+                ));
+            }
+        };
+
+        // Spawn background persistence task via JoinSet, which automatically removes
+        // completed tasks when polled, preventing unbounded memory growth.
+        {
+            let mut tasks = self.persistence_tasks.lock().await;
+            // Poll JoinSet to clean up any completed tasks before spawning new one
+            while tasks.try_join_next().is_some() {}
+            tasks.spawn(async move {
+                // Hold the permit for the duration of the persistence task
+                let _permit = permit;
+
+                let span = tracing::info_span!(
+                    "persist_result_async",
+                    runtimedb.result_id = %result_id_clone,
+                );
+
+                async {
+                    if let Err(e) = persist_result_background(
+                        &result_id_clone,
+                        &schema,
+                        &batches,
+                        storage,
+                        catalog,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            result_id = %result_id_clone,
+                            error = %e,
+                            "Background result persistence failed"
+                        );
+                    }
+                }
+                .instrument(span)
+                .await
+            });
+        }
+
+        Ok((
+            QueryResponseWithId {
+                result_id,
+                schema: query_response.schema,
+                results: query_response.results,
+                execution_time: query_response.execution_time,
+            },
+            None, // No warning, persistence initiated successfully
+        ))
+    }
+
+    /// Get result metadata (status, etc.) without loading parquet data.
+    pub async fn get_result_metadata(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::catalog::QueryResult>> {
+        self.catalog.get_result(id).await
     }
 
     /// Retrieve a persisted query result by ID.
     ///
     /// Returns the schema and record batches for the result, or None if not found.
+    /// Returns None if the result is still processing or has failed.
     pub async fn get_result(&self, id: &str) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>> {
         // Look up result in catalog
         let result = match self.catalog.get_result(id).await? {
@@ -509,17 +687,77 @@ impl RuntimeEngine {
             None => return Ok(None),
         };
 
-        // Load results from parquet
-        let df = self
+        // Only load if result is ready (has parquet path)
+        let parquet_path = match &result.parquet_path {
+            Some(path) => path,
+            None => return Ok(None), // Still processing or failed
+        };
+
+        // Load results from parquet. Handle the case where the file was deleted
+        // between the catalog lookup and the file read (e.g., concurrent cleanup).
+        let df = match self
             .df_ctx
             .read_parquet(
-                &result.parquet_path,
+                parquet_path,
                 datafusion::prelude::ParquetReadOptions::default(),
             )
-            .await?;
+            .await
+        {
+            Ok(df) => df,
+            Err(e) => {
+                // Check if this is a file-not-found error
+                let err_str = e.to_string();
+                if err_str.contains("No such file")
+                    || err_str.contains("not found")
+                    || err_str.contains("does not exist")
+                {
+                    tracing::warn!(
+                        result_id = %id,
+                        parquet_path = %parquet_path,
+                        "Result parquet file not found, possibly deleted concurrently"
+                    );
+                    return Ok(None);
+                }
+                // Other errors should be propagated
+                return Err(e.into());
+            }
+        };
 
         let schema: Arc<Schema> = Arc::clone(df.schema().inner());
-        let batches = df.collect().await?;
+
+        // collect() is when the actual file read happens - handle file-not-found errors
+        let batches = match df.collect().await {
+            Ok(b) => b,
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("No such file")
+                    || err_str.contains("not found")
+                    || err_str.contains("does not exist")
+                    || err_str.contains("Object at location")
+                {
+                    tracing::warn!(
+                        result_id = %id,
+                        parquet_path = %parquet_path,
+                        error = %e,
+                        "Result parquet file not found during read"
+                    );
+                    return Ok(None);
+                }
+                return Err(e.into());
+            }
+        };
+
+        // DataFusion may return empty results when the parquet file is missing (instead of an error).
+        // Check if the result schema is unexpectedly empty, which indicates the file wasn't found.
+        // A valid result should have at least one column in its schema.
+        if schema.fields().is_empty() {
+            tracing::warn!(
+                result_id = %id,
+                parquet_path = %parquet_path,
+                "Result returned empty schema, parquet file may be missing or corrupted"
+            );
+            return Ok(None);
+        }
 
         Ok(Some((schema, batches)))
     }
@@ -536,45 +774,19 @@ impl RuntimeEngine {
         self.catalog.list_results(limit, offset).await
     }
 
-    /// Write result batches to a parquet file.
+    /// Mark a result as failed with the given error message.
     ///
-    /// Note: Empty results are persisted with schema only. This ensures GET /results/{id}
-    /// works for all result IDs returned by POST /query. A future optimization could avoid
-    /// persisting empty results entirely if storage space becomes a concern.
-    #[tracing::instrument(
-        name = "write_results_to_parquet",
-        skip(self, schema, batches),
-        fields(
-            runtimedb.result_id = %result_id,
-            runtimedb.batch_count = batches.len(),
-        )
-    )]
-    fn write_results_to_parquet(
-        &self,
-        result_id: &str,
-        schema: &Arc<Schema>,
-        batches: &[RecordBatch],
-    ) -> Result<ParquetWriteResult> {
-        // Prepare write location - using result_id as both schema and table
-        // This creates path: {base}/0/runtimedb_results/{result_id}/{version}/data.parquet
-        let handle = self.storage.prepare_cache_write(
-            INTERNAL_CONNECTION_ID,
-            "runtimedb_results",
-            result_id,
-        );
-
-        // Write parquet file
-        let mut writer: Box<dyn BatchWriter> =
-            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
-        writer.init(schema)?;
-
-        for batch in batches {
-            writer.write_batch(batch)?;
-        }
-
-        writer.close()?;
-
-        Ok(ParquetWriteResult { handle })
+    /// Used when the result data is no longer available (e.g., parquet file deleted).
+    /// Returns true if the result was found and updated, false if not found.
+    pub async fn mark_result_failed(&self, id: &str, error_message: &str) -> Result<bool> {
+        self.catalog
+            .update_result(
+                id,
+                ResultUpdate::Failed {
+                    error_message: Some(error_message),
+                },
+            )
+            .await
     }
 
     /// Purge all cached data for a connection (clears parquet files and resets sync state).
@@ -748,7 +960,7 @@ impl RuntimeEngine {
     /// Shutdown the engine and close all connections.
     /// This should be called before the application exits to ensure proper cleanup.
     pub async fn shutdown(&self) -> Result<()> {
-        // Signal the deletion worker to stop
+        // Signal background workers to stop
         self.shutdown_token.cancel();
 
         // Wait for the deletion worker to finish
@@ -756,6 +968,38 @@ impl RuntimeEngine {
             // We use a timeout to avoid blocking forever if the worker is stuck
             let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
         }
+
+        // Wait for the stale result cleanup worker to finish
+        if let Some(handle) = self.stale_result_cleanup_handle.lock().await.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
+
+        // Wait for in-flight persistence tasks to complete
+        let mut tasks = self.persistence_tasks.lock().await;
+        let task_count = tasks.len();
+        if task_count > 0 {
+            tracing::info!(
+                count = task_count,
+                "Waiting for in-flight persistence tasks to complete"
+            );
+            // Use a timeout to avoid blocking forever
+            let join_future = async {
+                while let Some(result) = tasks.join_next().await {
+                    if let Err(e) = result {
+                        tracing::warn!(error = %e, "Persistence task failed during shutdown");
+                    }
+                }
+            };
+            if tokio::time::timeout(Duration::from_secs(30), join_future)
+                .await
+                .is_err()
+            {
+                tracing::warn!("Timeout waiting for persistence tasks during shutdown");
+                // Abort remaining tasks
+                tasks.abort_all();
+            }
+        }
+        drop(tasks); // Release the lock before closing catalog
 
         self.catalog.close().await
     }
@@ -1981,11 +2225,56 @@ impl RuntimeEngine {
             }
         })
     }
+
+    /// Start background task that cleans up stale results (stuck in pending/processing) periodically.
+    /// Returns the JoinHandle for the spawned task, or None if cleanup is disabled (interval is zero).
+    fn start_stale_result_cleanup_worker(
+        catalog: Arc<dyn CatalogManager>,
+        shutdown_token: CancellationToken,
+        cleanup_interval: Duration,
+        stale_timeout: Duration,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        // Disable cleanup if interval is zero
+        if cleanup_interval.is_zero() {
+            info!("Stale result cleanup worker disabled (interval is zero)");
+            return None;
+        }
+
+        Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(cleanup_interval);
+            loop {
+                tokio::select! {
+                    _ = shutdown_token.cancelled() => {
+                        info!("Stale result cleanup worker received shutdown signal");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        let cutoff = Utc::now() - chrono::Duration::from_std(stale_timeout).unwrap_or(chrono::Duration::seconds(300));
+                        match catalog.cleanup_stale_results(cutoff).await {
+                            Ok(0) => {
+                                // No stale results - this is the normal case, don't log
+                            }
+                            Ok(count) => {
+                                info!(
+                                    count = count,
+                                    cutoff = %cutoff,
+                                    "Cleaned up stale results"
+                                );
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "Failed to cleanup stale results");
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+    }
 }
 
 impl Drop for RuntimeEngine {
     fn drop(&mut self) {
-        // Signal the deletion worker to stop
+        // Signal workers to stop (deletion worker, stale result cleanup worker)
         self.shutdown_token.cancel();
 
         // Ensure catalog connection is closed when engine is dropped
@@ -2029,8 +2318,11 @@ pub struct RuntimeEngineBuilder {
     deletion_grace_period: Duration,
     deletion_worker_interval: Duration,
     parallel_refresh_count: usize,
+    max_concurrent_persistence: usize,
     liquid_cache_builder: Option<LiquidCacheClientBuilder>,
     cache_config: Option<crate::config::CacheConfig>,
+    stale_result_cleanup_interval: Duration,
+    stale_result_timeout: Duration,
 }
 
 impl Default for RuntimeEngineBuilder {
@@ -2053,8 +2345,13 @@ impl RuntimeEngineBuilder {
             deletion_grace_period: DEFAULT_DELETION_GRACE_PERIOD,
             deletion_worker_interval: Duration::from_secs(DEFAULT_DELETION_WORKER_INTERVAL_SECS),
             parallel_refresh_count: DEFAULT_PARALLEL_REFRESH_COUNT,
+            max_concurrent_persistence: DEFAULT_MAX_CONCURRENT_PERSISTENCE,
             liquid_cache_builder: None,
             cache_config: None,
+            stale_result_cleanup_interval: Duration::from_secs(
+                DEFAULT_STALE_RESULT_CLEANUP_INTERVAL_SECS,
+            ),
+            stale_result_timeout: Duration::from_secs(DEFAULT_STALE_RESULT_TIMEOUT_SECS),
         }
     }
 
@@ -2120,6 +2417,16 @@ impl RuntimeEngineBuilder {
         self
     }
 
+    /// Set the maximum number of concurrent result persistence tasks.
+    /// When a query is executed with persistence, a background task is spawned
+    /// to write the results to parquet. This semaphore limits how many of these
+    /// tasks can run concurrently. If all permits are in use, the query will
+    /// block until a permit becomes available. Defaults to 32.
+    pub fn max_concurrent_persistence(mut self, count: usize) -> Self {
+        self.max_concurrent_persistence = count.max(1);
+        self
+    }
+
     /// Configure liquid cache for distributed query caching.
     /// When enabled, queries are offloaded to a liquid-cache server for caching.
     pub fn liquid_cache_builder(mut self, builder: LiquidCacheClientBuilder) -> Self {
@@ -2130,6 +2437,22 @@ impl RuntimeEngineBuilder {
     /// Set the cache configuration for Redis metadata caching.
     pub fn cache_config(mut self, config: crate::config::CacheConfig) -> Self {
         self.cache_config = Some(config);
+        self
+    }
+
+    /// Set the interval for stale result cleanup.
+    /// Results stuck in pending/processing longer than the timeout are marked as failed.
+    /// Set to Duration::ZERO to disable cleanup. Defaults to 60 seconds.
+    pub fn stale_result_cleanup_interval(mut self, interval: Duration) -> Self {
+        self.stale_result_cleanup_interval = interval;
+        self
+    }
+
+    /// Set the timeout after which pending/processing results are considered stale.
+    /// Results older than this are marked as failed during cleanup.
+    /// Defaults to 300 seconds (5 minutes).
+    pub fn stale_result_timeout(mut self, timeout: Duration) -> Self {
+        self.stale_result_timeout = timeout;
         self
     }
 
@@ -2275,6 +2598,14 @@ impl RuntimeEngineBuilder {
             self.deletion_worker_interval,
         );
 
+        // Start background stale result cleanup worker
+        let stale_result_cleanup_handle = RuntimeEngine::start_stale_result_cleanup_worker(
+            catalog.clone(),
+            shutdown_token.clone(),
+            self.stale_result_cleanup_interval,
+            self.stale_result_timeout,
+        );
+
         // Initialize catalog (starts warmup loop if configured)
         catalog.init().await?;
 
@@ -2289,6 +2620,9 @@ impl RuntimeEngineBuilder {
             deletion_grace_period: self.deletion_grace_period,
             deletion_worker_interval: self.deletion_worker_interval,
             parallel_refresh_count: self.parallel_refresh_count,
+            persistence_semaphore: Arc::new(Semaphore::new(self.max_concurrent_persistence)),
+            persistence_tasks: Mutex::new(JoinSet::new()),
+            stale_result_cleanup_handle: Mutex::new(stale_result_cleanup_handle),
         };
 
         // Register all existing connections as DataFusion catalogs
@@ -2321,6 +2655,111 @@ impl RuntimeEngineBuilder {
         }
 
         Ok(engine)
+    }
+}
+
+/// Background task to persist query results to parquet.
+/// Updates catalog status to "ready" on success or "failed" on error.
+async fn persist_result_background(
+    result_id: &str,
+    schema: &Arc<Schema>,
+    batches: &[RecordBatch],
+    storage: Arc<dyn StorageManager>,
+    catalog: Arc<dyn CatalogManager>,
+) -> Result<()> {
+    // Helper to mark result as failed with error message
+    async fn mark_failed(catalog: &dyn CatalogManager, result_id: &str, error: &anyhow::Error) {
+        let error_msg = error.to_string();
+        match catalog
+            .update_result(
+                result_id,
+                ResultUpdate::Failed {
+                    error_message: Some(&error_msg),
+                },
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(
+                    result_id = %result_id,
+                    "Result row not found when marking as failed, may have been deleted"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    result_id = %result_id,
+                    error = %e,
+                    "Failed to mark result as failed in catalog"
+                );
+            }
+        }
+    }
+
+    // Prepare write location
+    let handle =
+        storage.prepare_cache_write(INTERNAL_CONNECTION_ID, RESULTS_SCHEMA_NAME, result_id);
+
+    // Write parquet file (sync I/O in blocking task to avoid blocking the runtime)
+    let local_path = handle.local_path.clone();
+    let schema_clone = Arc::clone(schema);
+    let batches_clone: Vec<RecordBatch> = batches.to_vec();
+
+    let write_result = tokio::task::spawn_blocking(move || {
+        let mut writer: Box<dyn BatchWriter> = Box::new(StreamingParquetWriter::new(local_path));
+        writer.init(&schema_clone)?;
+        for batch in &batches_clone {
+            writer.write_batch(batch)?;
+        }
+        writer.close()
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("persist_result: task join failed: {}", e))?;
+
+    if let Err(e) = write_result {
+        let error = anyhow::anyhow!("persist_result: parquet write failed: {}", e);
+        mark_failed(catalog.as_ref(), result_id, &error).await;
+        return Err(error);
+    }
+
+    // Finalize storage (uploads to S3 if needed)
+    let dir_url = match storage.finalize_cache_write(&handle).await {
+        Ok(url) => url,
+        Err(e) => {
+            let error = anyhow::anyhow!("persist_result: storage finalization failed: {}", e);
+            mark_failed(catalog.as_ref(), result_id, &error).await;
+            return Err(error);
+        }
+    };
+
+    let file_url = format!("{}/data.parquet", dir_url);
+
+    // Update catalog to ready
+    match catalog
+        .update_result(
+            result_id,
+            ResultUpdate::Ready {
+                parquet_path: &file_url,
+            },
+        )
+        .await
+    {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            // Result row was not found - it may have been deleted concurrently
+            tracing::warn!(
+                result_id = %result_id,
+                "Result row not found when finalizing, may have been deleted concurrently"
+            );
+            Err(anyhow::anyhow!(
+                "persist_result: result row not found when finalizing"
+            ))
+        }
+        Err(e) => {
+            let error = anyhow::anyhow!("persist_result: catalog update failed: {}", e);
+            mark_failed(catalog.as_ref(), result_id, &error).await;
+            Err(error)
+        }
     }
 }
 
@@ -2575,6 +3014,7 @@ mod tests {
                 server_address: None,
             },
             cache: CacheConfig::default(),
+            engine: crate::config::EngineConfig::default(),
         };
 
         let engine = RuntimeEngine::from_config(&config).await;
@@ -2607,5 +3047,91 @@ mod tests {
 
         let builder = RuntimeEngineBuilder::new().parallel_refresh_count(1);
         assert_eq!(builder.parallel_refresh_count, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_stale_result_cleanup_worker_cleans_stuck_results() {
+        use crate::catalog::ResultUpdate;
+
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().to_path_buf();
+
+        // Create engine with short cleanup interval and very short timeout for testing
+        let engine = RuntimeEngine::builder()
+            .base_dir(base_dir)
+            .secret_key(test_secret_key())
+            .stale_result_cleanup_interval(Duration::from_millis(50))
+            .stale_result_timeout(Duration::from_millis(100))
+            .build()
+            .await
+            .unwrap();
+
+        // Verify cleanup worker is running
+        assert!(
+            engine.stale_result_cleanup_handle.lock().await.is_some(),
+            "Cleanup worker handle should exist"
+        );
+
+        // Create a result and leave it in Processing state
+        let result_id = engine
+            .catalog
+            .create_result(ResultStatus::Pending)
+            .await
+            .unwrap();
+        engine
+            .catalog
+            .update_result(&result_id, ResultUpdate::Processing)
+            .await
+            .unwrap();
+
+        // Verify it's in processing state
+        let result = engine
+            .catalog
+            .get_result(&result_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.status, ResultStatus::Processing);
+
+        // Wait for the cleanup interval + timeout to pass
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Now the worker should have cleaned it up
+        let result = engine
+            .catalog
+            .get_result(&result_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result.status,
+            ResultStatus::Failed,
+            "Stale result should be marked as failed"
+        );
+        assert!(
+            result.error_message.is_some(),
+            "Failed result should have error message"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_stale_result_cleanup_worker_disabled_when_interval_zero() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().to_path_buf();
+
+        // Create engine with cleanup disabled (interval = 0)
+        let engine = RuntimeEngine::builder()
+            .base_dir(base_dir)
+            .secret_key(test_secret_key())
+            .stale_result_cleanup_interval(Duration::ZERO)
+            .build()
+            .await
+            .unwrap();
+
+        // Verify cleanup worker is NOT running
+        assert!(
+            engine.stale_result_cleanup_handle.lock().await.is_none(),
+            "Cleanup worker handle should be None when disabled"
+        );
     }
 }

@@ -1,6 +1,7 @@
+use crate::catalog::ResultStatus;
 use crate::http::controllers::query_controller::serialize_batches;
 use crate::http::error::ApiError;
-use crate::http::models::{ListResultsResponse, QueryResponse, ResultInfo};
+use crate::http::models::{GetResultResponse, ListResultsResponse, ResultInfo};
 use crate::RuntimeEngine;
 use axum::{
     extract::{Path, Query as QueryParams, State},
@@ -8,7 +9,6 @@ use axum::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
-use std::time::Instant;
 
 /// Default limit for listing results
 const DEFAULT_RESULTS_LIMIT: usize = 100;
@@ -47,6 +47,8 @@ pub async fn list_results_handler(
         .into_iter()
         .map(|r| ResultInfo {
             id: r.id,
+            status: r.status.to_string(),
+            error_message: r.error_message,
             created_at: r.created_at,
         })
         .collect();
@@ -69,27 +71,69 @@ pub async fn list_results_handler(
 pub async fn get_result_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(id): Path<String>,
-) -> Result<Json<QueryResponse>, ApiError> {
-    let start = Instant::now();
-
-    // Load result from engine (handles both catalog lookup and parquet loading)
-    let (schema, batches) = engine
-        .get_result(&id)
+) -> Result<Json<GetResultResponse>, ApiError> {
+    // First check the result status in catalog
+    let result_meta = engine
+        .get_result_metadata(&id)
         .await
         .map_err(|e| ApiError::internal_error(format!("Failed to lookup result: {}", e)))?
         .ok_or_else(|| ApiError::not_found(format!("Result '{}' not found", id)))?;
 
+    // If not ready, return status only (with error message if failed)
+    if result_meta.status != ResultStatus::Ready {
+        return Ok(Json(GetResultResponse {
+            result_id: id,
+            status: result_meta.status.to_string(),
+            error_message: result_meta.error_message,
+            columns: None,
+            nullable: None,
+            rows: None,
+            row_count: None,
+        }));
+    }
+
+    // Status is ready, load the data
+    let (schema, batches) = match engine.get_result(&id).await {
+        Ok(Some(data)) => data,
+        Ok(None) => {
+            // Parquet file is missing (deleted concurrently or partial failure).
+            // Mark the result as failed and return the failed status.
+            let error_message = "Result data not found (file may have been deleted)";
+            if let Err(e) = engine.mark_result_failed(&id, error_message).await {
+                tracing::warn!(
+                    result_id = %id,
+                    error = %e,
+                    "Failed to mark result as failed after data not found"
+                );
+            }
+            return Ok(Json(GetResultResponse {
+                result_id: id,
+                status: ResultStatus::Failed.to_string(),
+                error_message: Some(error_message.to_string()),
+                columns: None,
+                nullable: None,
+                rows: None,
+                row_count: None,
+            }));
+        }
+        Err(e) => {
+            return Err(ApiError::internal_error(format!(
+                "Failed to load result: {}",
+                e
+            )));
+        }
+    };
+
     let (columns, nullable, rows) = serialize_batches(&schema, &batches)?;
     let row_count = rows.len();
-    let execution_time_ms = start.elapsed().as_millis() as u64;
 
-    Ok(Json(QueryResponse {
-        result_id: Some(id),
-        columns,
-        nullable,
-        rows,
-        row_count,
-        execution_time_ms,
-        warning: None,
+    Ok(Json(GetResultResponse {
+        result_id: id,
+        status: ResultStatus::Ready.to_string(),
+        error_message: None,
+        columns: Some(columns),
+        nullable: Some(nullable),
+        rows: Some(rows),
+        row_count: Some(row_count),
     }))
 }

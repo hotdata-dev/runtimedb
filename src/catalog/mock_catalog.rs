@@ -5,7 +5,7 @@
 
 use super::{
     CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
-    TableInfo, UploadInfo,
+    ResultStatus, ResultUpdate, TableInfo, UploadInfo,
 };
 use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
@@ -13,12 +13,13 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 /// Mock catalog that can be configured to fail for testing error handling.
 #[derive(Debug)]
 pub struct MockCatalog {
     tables: Mutex<HashMap<(String, String, String), TableInfo>>,
+    results: RwLock<HashMap<String, QueryResult>>,
     fail_update: AtomicBool,
     next_id: AtomicUsize,
 }
@@ -27,6 +28,7 @@ impl MockCatalog {
     pub fn new() -> Self {
         Self {
             tables: Mutex::new(HashMap::new()),
+            results: RwLock::new(HashMap::new()),
             fail_update: AtomicBool::new(false),
             next_id: AtomicUsize::new(1),
         }
@@ -218,12 +220,51 @@ impl CatalogManager for MockCatalog {
         Ok(None)
     }
 
-    async fn store_result(&self, _result: &QueryResult) -> Result<()> {
-        Ok(())
+    async fn create_result(&self, initial_status: ResultStatus) -> Result<String> {
+        let id = crate::id::generate_result_id();
+        let result = QueryResult {
+            id: id.clone(),
+            parquet_path: None,
+            status: initial_status,
+            error_message: None,
+            created_at: chrono::Utc::now(),
+        };
+        self.results.write().unwrap().insert(id.clone(), result);
+        Ok(id)
     }
 
-    async fn get_result(&self, _id: &str) -> Result<Option<QueryResult>> {
-        Ok(None)
+    async fn update_result(&self, id: &str, update: ResultUpdate<'_>) -> Result<bool> {
+        let mut results = self.results.write().unwrap();
+        if let Some(result) = results.get_mut(id) {
+            match update {
+                ResultUpdate::Processing => {
+                    result.status = ResultStatus::Processing;
+                }
+                ResultUpdate::Ready { parquet_path } => {
+                    result.parquet_path = Some(parquet_path.to_string());
+                    result.status = ResultStatus::Ready;
+                }
+                ResultUpdate::Failed { error_message } => {
+                    result.status = ResultStatus::Failed;
+                    result.error_message = error_message.map(String::from);
+                }
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn get_result(&self, id: &str) -> Result<Option<QueryResult>> {
+        Ok(self.results.read().unwrap().get(id).cloned())
+    }
+
+    async fn get_queryable_result(&self, id: &str) -> Result<Option<QueryResult>> {
+        let results = self.results.read().unwrap();
+        Ok(results
+            .get(id)
+            .filter(|r| r.status == ResultStatus::Ready)
+            .cloned())
     }
 
     async fn list_results(
@@ -232,6 +273,21 @@ impl CatalogManager for MockCatalog {
         _offset: usize,
     ) -> Result<(Vec<QueryResult>, bool)> {
         Ok((vec![], false))
+    }
+
+    async fn cleanup_stale_results(&self, cutoff: DateTime<Utc>) -> Result<usize> {
+        let mut results = self.results.write().unwrap();
+        let mut count = 0;
+        for result in results.values_mut() {
+            if (result.status == ResultStatus::Pending || result.status == ResultStatus::Processing)
+                && result.created_at < cutoff
+            {
+                result.status = ResultStatus::Failed;
+                result.error_message = Some("Cleanup: result timed out".to_string());
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 
     async fn count_connections_by_secret_id(&self, _secret_id: &str) -> Result<i64> {

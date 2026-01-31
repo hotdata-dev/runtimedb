@@ -8,11 +8,20 @@ pub struct QueryRequest {
     pub sql: String,
 }
 
-/// Response body for POST /query and GET /results/{id}
+/// Response body for POST /query
+///
+/// Query results are returned immediately along with a `result_id` for later retrieval.
+/// The actual persistence to storage happens asynchronously in the background.
+///
+/// To check if a result is ready for SQL queries, poll GET /results/{id} and check `status`:
+/// - `"processing"`: Persistence is still in progress
+/// - `"ready"`: Result is available for retrieval and SQL queries
+/// - `"failed"`: Persistence failed (check `error_message` for details)
 #[derive(Debug, Serialize)]
 pub struct QueryResponse {
     /// Unique identifier for retrieving this result via GET /results/{id}.
-    /// Null if persistence failed (see `warning` field for details).
+    /// Null if catalog registration failed (see `warning` field for details).
+    /// When non-null, the result is being persisted asynchronously.
     pub result_id: Option<String>,
     pub columns: Vec<String>,
     /// Nullable flags for each column (parallel to columns vec).
@@ -21,16 +30,38 @@ pub struct QueryResponse {
     pub rows: Vec<Vec<serde_json::Value>>,
     pub row_count: usize,
     pub execution_time_ms: u64,
-    /// Warning message if result persistence failed.
+    /// Warning message if result persistence could not be initiated.
     /// When present, `result_id` will be null and the result cannot be retrieved later.
+    /// The query results are still returned in this response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+}
+
+/// Response body for GET /results/{id}
+/// Returns status and optionally the result data
+#[derive(Debug, Serialize)]
+pub struct GetResultResponse {
+    pub result_id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nullable: Option<Vec<bool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rows: Option<Vec<Vec<serde_json::Value>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_count: Option<usize>,
 }
 
 /// Summary of a persisted query result for listing
 #[derive(Debug, Serialize)]
 pub struct ResultInfo {
     pub id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

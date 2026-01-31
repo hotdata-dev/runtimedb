@@ -14,6 +14,8 @@ pub struct AppConfig {
     pub liquid_cache: LiquidCacheConfig,
     #[serde(default)]
     pub cache: CacheConfig,
+    #[serde(default)]
+    pub engine: EngineConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -77,6 +79,49 @@ pub struct LiquidCacheConfig {
     pub enabled: bool,
     /// Liquid cache server address (e.g., "http://localhost:15214")
     pub server_address: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EngineConfig {
+    /// Maximum number of concurrent result persistence tasks.
+    /// When queries are executed, results are persisted to parquet in background tasks.
+    /// This limits how many can run concurrently. Default: 32.
+    #[serde(default = "default_max_concurrent_persistence")]
+    pub max_concurrent_persistence: usize,
+
+    /// Interval in seconds for cleaning up stale results stuck in pending/processing.
+    /// Results older than `stale_result_timeout_secs` are marked as failed.
+    /// Set to 0 to disable. Default: 60 (1 minute).
+    #[serde(default = "default_stale_result_cleanup_interval_secs")]
+    pub stale_result_cleanup_interval_secs: u64,
+
+    /// Timeout in seconds after which pending/processing results are considered stale.
+    /// Results stuck longer than this are marked as failed during cleanup.
+    /// Default: 300 (5 minutes).
+    #[serde(default = "default_stale_result_timeout_secs")]
+    pub stale_result_timeout_secs: u64,
+}
+
+impl Default for EngineConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_persistence: default_max_concurrent_persistence(),
+            stale_result_cleanup_interval_secs: default_stale_result_cleanup_interval_secs(),
+            stale_result_timeout_secs: default_stale_result_timeout_secs(),
+        }
+    }
+}
+
+fn default_max_concurrent_persistence() -> usize {
+    32
+}
+
+fn default_stale_result_cleanup_interval_secs() -> u64 {
+    60
+}
+
+fn default_stale_result_timeout_secs() -> u64 {
+    300
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

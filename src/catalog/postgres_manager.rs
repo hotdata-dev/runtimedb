@@ -1,7 +1,7 @@
 use crate::catalog::backend::CatalogBackend;
 use crate::catalog::manager::{
     CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
-    TableInfo, UploadInfo,
+    QueryResultRow, ResultStatus, ResultUpdate, TableInfo, UploadInfo,
 };
 use crate::catalog::migrations::{
     run_migrations, wrap_migration_sql, CatalogMigrations, Migration, POSTGRES_MIGRATIONS,
@@ -392,21 +392,61 @@ impl CatalogManager for PostgresCatalogManager {
     }
 
     #[tracing::instrument(
-        name = "catalog_store_result",
-        skip(self, result),
-        fields(runtimedb.result_id = %result.id)
+        name = "catalog_create_result",
+        skip(self),
+        fields(runtimedb.result_id = tracing::field::Empty)
     )]
-    async fn store_result(&self, result: &QueryResult) -> Result<()> {
+    async fn create_result(&self, initial_status: ResultStatus) -> Result<String> {
+        let id = crate::id::generate_result_id();
+        tracing::Span::current().record("runtimedb.result_id", &id);
         sqlx::query(
-            "INSERT INTO results (id, parquet_path, created_at)
-             VALUES ($1, $2, $3)",
+            "INSERT INTO results (id, parquet_path, status, error_message, created_at)
+             VALUES ($1, NULL, $2, NULL, $3)",
         )
-        .bind(&result.id)
-        .bind(&result.parquet_path)
-        .bind(result.created_at)
+        .bind(&id)
+        .bind(initial_status.as_str())
+        .bind(Utc::now())
         .execute(self.backend.pool())
         .await?;
-        Ok(())
+        Ok(id)
+    }
+
+    #[tracing::instrument(
+        name = "catalog_update_result",
+        skip(self, update),
+        fields(runtimedb.result_id = %id, rows_affected = tracing::field::Empty)
+    )]
+    async fn update_result(&self, id: &str, update: ResultUpdate<'_>) -> Result<bool> {
+        let result = match update {
+            ResultUpdate::Processing => {
+                sqlx::query("UPDATE results SET status = 'processing' WHERE id = $1")
+                    .bind(id)
+                    .execute(self.backend.pool())
+                    .await?
+            }
+            ResultUpdate::Ready { parquet_path } => {
+                sqlx::query("UPDATE results SET parquet_path = $1, status = 'ready' WHERE id = $2")
+                    .bind(parquet_path)
+                    .bind(id)
+                    .execute(self.backend.pool())
+                    .await?
+            }
+            ResultUpdate::Failed { error_message } => {
+                sqlx::query(
+                    "UPDATE results SET status = 'failed', error_message = $1 WHERE id = $2",
+                )
+                .bind(error_message)
+                .bind(id)
+                .execute(self.backend.pool())
+                .await?
+            }
+        };
+        let rows_affected = result.rows_affected();
+        tracing::Span::current().record("rows_affected", rows_affected);
+        if rows_affected == 0 {
+            tracing::warn!(result_id = %id, "update_result: no matching result found");
+        }
+        Ok(rows_affected > 0)
     }
 
     #[tracing::instrument(
@@ -415,36 +455,58 @@ impl CatalogManager for PostgresCatalogManager {
         fields(runtimedb.result_id = %id)
     )]
     async fn get_result(&self, id: &str) -> Result<Option<QueryResult>> {
-        let result = sqlx::query_as::<_, QueryResult>(
-            "SELECT id, parquet_path, created_at FROM results WHERE id = $1",
+        let row = sqlx::query_as::<_, QueryResultRow>(
+            "SELECT id, parquet_path, status, error_message, created_at FROM results WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(self.backend.pool())
         .await?;
-        Ok(result)
+        Ok(row.map(QueryResult::from))
+    }
+
+    #[tracing::instrument(
+        name = "catalog_get_queryable_result",
+        skip(self),
+        fields(runtimedb.result_id = %id)
+    )]
+    async fn get_queryable_result(&self, id: &str) -> Result<Option<QueryResult>> {
+        let row = sqlx::query_as::<_, QueryResultRow>(
+            "SELECT id, parquet_path, status, error_message, created_at FROM results WHERE id = $1 AND status = 'ready'",
+        )
+        .bind(id)
+        .fetch_optional(self.backend.pool())
+        .await?;
+        Ok(row.map(QueryResult::from))
     }
 
     async fn list_results(&self, limit: usize, offset: usize) -> Result<(Vec<QueryResult>, bool)> {
-        // Fetch one extra to determine if there are more results
         let fetch_limit = limit + 1;
-        let results = sqlx::query_as::<_, QueryResult>(
-            "SELECT id, parquet_path, created_at FROM results
-             ORDER BY created_at DESC
-             LIMIT $1 OFFSET $2",
+        let rows = sqlx::query_as::<_, QueryResultRow>(
+            "SELECT id, parquet_path, status, error_message, created_at FROM results ORDER BY created_at DESC LIMIT $1 OFFSET $2",
         )
         .bind(fetch_limit as i64)
         .bind(offset as i64)
         .fetch_all(self.backend.pool())
         .await?;
 
-        let has_more = results.len() > limit;
-        let results = if has_more {
-            results.into_iter().take(limit).collect()
-        } else {
-            results
-        };
-
+        let has_more = rows.len() > limit;
+        let results = rows
+            .into_iter()
+            .take(limit)
+            .map(QueryResult::from)
+            .collect();
         Ok((results, has_more))
+    }
+
+    async fn cleanup_stale_results(&self, cutoff: DateTime<Utc>) -> Result<usize> {
+        let result = sqlx::query(
+            "UPDATE results SET status = 'failed', error_message = 'Cleanup: result timed out'
+             WHERE status IN ('pending', 'processing') AND created_at < $1",
+        )
+        .bind(cutoff)
+        .execute(self.backend.pool())
+        .await?;
+        Ok(result.rows_affected() as usize)
     }
 
     async fn count_connections_by_secret_id(&self, secret_id: &str) -> Result<i64> {

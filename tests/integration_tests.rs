@@ -330,6 +330,10 @@ trait TestExecutor: Send + Sync {
     // Result persistence operations (API-only for now)
     async fn get_result(&self, result_id: &str) -> Option<QueryResult>;
     async fn list_results(&self) -> ResultsListResult;
+
+    /// Wait for a result to reach a non-processing status (ready/failed).
+    /// Returns the final status, or None on timeout.
+    async fn wait_for_result_ready(&self, result_id: &str, timeout_ms: u64) -> Option<String>;
 }
 
 /// Engine-based test executor.
@@ -427,6 +431,11 @@ impl TestExecutor for EngineExecutor {
             has_more: false,
             result_ids: vec![],
         }
+    }
+
+    async fn wait_for_result_ready(&self, _result_id: &str, _timeout_ms: u64) -> Option<String> {
+        // Engine doesn't expose result persistence directly
+        None
     }
 }
 
@@ -691,6 +700,51 @@ impl TestExecutor for ApiExecutor {
             .await
             .unwrap();
         ResultsListResult::from_api(&serde_json::from_slice(&body).unwrap())
+    }
+
+    async fn wait_for_result_ready(&self, result_id: &str, timeout_ms: u64) -> Option<String> {
+        use std::time::{Duration, Instant};
+
+        let start = Instant::now();
+        let timeout = Duration::from_millis(timeout_ms);
+        let uri = PATH_RESULT.replace("{id}", result_id);
+
+        loop {
+            let response = self
+                .router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(&uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            if response.status() != StatusCode::OK {
+                return None;
+            }
+
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let status = json["status"].as_str().unwrap_or("unknown").to_string();
+
+            // Return if not processing (i.e., ready or failed)
+            if status != "processing" {
+                return Some(status);
+            }
+
+            // Check timeout
+            if start.elapsed() > timeout {
+                return None; // Timed out while still processing
+            }
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 }
 
@@ -2099,6 +2153,14 @@ mod result_persistence_tests {
 
         let result_id = query_result.get_result_id().unwrap();
 
+        // Wait for async persistence to complete
+        let status = api.wait_for_result_ready(result_id, 5000).await;
+        assert_eq!(
+            status,
+            Some("ready".to_string()),
+            "Result should become ready"
+        );
+
         // Retrieve the result by ID
         let retrieved = api.get_result(result_id).await;
         assert!(
@@ -2138,6 +2200,20 @@ mod result_persistence_tests {
 
         // IDs should be different
         assert_ne!(id1, id2, "Each query should get a unique result_id");
+
+        // Wait for both results to be ready
+        let status1 = api.wait_for_result_ready(&id1, 5000).await;
+        let status2 = api.wait_for_result_ready(&id2, 5000).await;
+        assert_eq!(
+            status1,
+            Some("ready".to_string()),
+            "Result 1 should become ready"
+        );
+        assert_eq!(
+            status2,
+            Some("ready".to_string()),
+            "Result 2 should become ready"
+        );
 
         // Both should be in the list
         let results_list = api.list_results().await;
