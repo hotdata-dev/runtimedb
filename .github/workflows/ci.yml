@@ -182,3 +182,20 @@ jobs:
             ghcr.io/${{ github.repository }}:${{ github.sha }}-amd64 \
             ghcr.io/${{ github.repository }}:${{ github.sha }}-arm64
           docker manifest push ghcr.io/${{ github.repository }}:latest
+
+  notify:
+    needs: [ manifest ]
+    runs-on: ubuntu-latest
+    name: Announce new build available
+    steps:
+      - name: Announce new build available
+        uses: lasith-kg/dispatch-workflow@v2
+        with:
+          dispatch-method: workflow_dispatch
+          owner: hotdata-dev
+          token: ${{ secrets.DOWNSTREAM_NOTIFY_TOKEN }}
+          repo: ${{ secrets.DOWNSTREAM_NOTIFY_REPO }}
+          ref: main
+          workflow: runtimedb.yml
+          workflow-inputs: '{"image_tag": "${{ github.sha }}"}'
+        continue-on-error: true
