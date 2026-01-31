@@ -23,7 +23,7 @@ pub enum ResultStatus {
 impl ResultStatus {
     /// Convert from database string representation.
     /// Unknown values are treated as Failed and logged as a warning.
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "pending" => Self::Pending,
             "processing" => Self::Processing,
@@ -137,7 +137,7 @@ impl From<QueryResultRow> for QueryResult {
         Self {
             id: row.id,
             parquet_path: row.parquet_path,
-            status: ResultStatus::from_str(&row.status),
+            status: ResultStatus::parse(&row.status),
             error_message: row.error_message,
             created_at: row.created_at,
         }
