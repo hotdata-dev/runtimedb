@@ -570,7 +570,7 @@ impl RuntimeEngine {
                     result_id = %result_id,
                     "Persistence semaphore closed during shutdown, marking result as failed"
                 );
-                let _ = self
+                match self
                     .catalog
                     .update_result(
                         &result_id,
@@ -578,7 +578,23 @@ impl RuntimeEngine {
                             error_message: Some("Server shutting down"),
                         },
                     )
-                    .await;
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::warn!(
+                            result_id = %result_id,
+                            "Result row not found when marking failed during shutdown"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            result_id = %result_id,
+                            error = %e,
+                            "Failed to mark result as failed during shutdown"
+                        );
+                    }
+                }
                 return Ok((
                     QueryResponseWithId {
                         result_id: String::new(),
