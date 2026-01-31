@@ -1,6 +1,6 @@
 use crate::catalog::{
     is_dataset_table_name_conflict, CachingCatalogManager, CatalogManager, ConnectionInfo,
-    SqliteCatalogManager, TableInfo,
+    ResultStatus, ResultUpdate, SqliteCatalogManager, TableInfo,
 };
 use crate::datafetch::native::StreamingParquetWriter;
 use crate::datafetch::{BatchWriter, FetchOrchestrator, NativeFetcher};
@@ -174,6 +174,9 @@ impl RuntimeEngine {
 
         // Pass cache config to builder
         builder = builder.cache_config(config.cache.clone());
+
+        // Set engine config
+        builder = builder.max_concurrent_persistence(config.engine.max_concurrent_persistence);
 
         builder.build().await
     }
@@ -510,35 +513,30 @@ impl RuntimeEngine {
         // Execute the query first
         let query_response = self.execute_query(sql).await?;
 
-        // Generate result ID
-        let result_id = crate::id::generate_result_id();
-        let created_at = Utc::now();
+        // Create result in catalog - if this fails, return result with warning
+        // Note: create_result generates the ID and records it in the span
+        let result_id = match self.catalog.create_result(ResultStatus::Processing).await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to register result in catalog, returning without persistence"
+                );
+                // Return results with no persistence (empty result_id signals no persistence)
+                return Ok((
+                    QueryResponseWithId {
+                        result_id: String::new(), // Empty signals no persistence available
+                        schema: query_response.schema,
+                        results: query_response.results,
+                        execution_time: query_response.execution_time,
+                    },
+                    Some(format!("Result persistence unavailable: {}", e)),
+                ));
+            }
+        };
 
-        // Record result_id in span regardless of success/failure for traceability
+        // Record result_id in span for traceability
         tracing::Span::current().record("runtimedb.result_id", &result_id);
-
-        // Insert pending result into catalog - if this fails, return result with warning
-        if let Err(e) = self
-            .catalog
-            .store_result_pending(&result_id, created_at)
-            .await
-        {
-            tracing::warn!(
-                result_id = %result_id,
-                error = %e,
-                "Failed to register result in catalog, returning without persistence"
-            );
-            // Return results with no persistence (empty result_id signals no persistence)
-            return Ok((
-                QueryResponseWithId {
-                    result_id: String::new(), // Empty signals no persistence available
-                    schema: query_response.schema,
-                    results: query_response.results,
-                    execution_time: query_response.execution_time,
-                },
-                Some(format!("Result persistence unavailable: {}", e)),
-            ));
-        }
 
         // Clone what we need for the background task
         let storage = Arc::clone(&self.storage);
@@ -574,7 +572,12 @@ impl RuntimeEngine {
                 );
                 let _ = self
                     .catalog
-                    .fail_result(&result_id, Some("Server shutting down"))
+                    .update_result(
+                        &result_id,
+                        ResultUpdate::Failed {
+                            error_message: Some("Server shutting down"),
+                        },
+                    )
                     .await;
                 return Ok((
                     QueryResponseWithId {
@@ -2509,7 +2512,15 @@ async fn persist_result_background(
     // Helper to mark result as failed with error message
     async fn mark_failed(catalog: &dyn CatalogManager, result_id: &str, error: &anyhow::Error) {
         let error_msg = error.to_string();
-        if let Err(e) = catalog.fail_result(result_id, Some(&error_msg)).await {
+        if let Err(e) = catalog
+            .update_result(
+                result_id,
+                ResultUpdate::Failed {
+                    error_message: Some(&error_msg),
+                },
+            )
+            .await
+        {
             tracing::warn!(
                 result_id = %result_id,
                 error = %e,
@@ -2557,8 +2568,16 @@ async fn persist_result_background(
     let file_url = format!("{}/data.parquet", dir_url);
 
     // Update catalog to ready
-    if let Err(e) = catalog.finalize_result(result_id, &file_url).await {
-        let error = anyhow::anyhow!("persist_result: catalog finalize failed: {}", e);
+    if let Err(e) = catalog
+        .update_result(
+            result_id,
+            ResultUpdate::Ready {
+                parquet_path: &file_url,
+            },
+        )
+        .await
+    {
+        let error = anyhow::anyhow!("persist_result: catalog update failed: {}", e);
         mark_failed(catalog.as_ref(), result_id, &error).await;
         return Err(error);
     }
@@ -2817,6 +2836,7 @@ mod tests {
                 server_address: None,
             },
             cache: CacheConfig::default(),
+            engine: crate::config::EngineConfig::default(),
         };
 
         let engine = RuntimeEngine::from_config(&config).await;
