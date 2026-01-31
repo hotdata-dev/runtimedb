@@ -6,7 +6,7 @@
 
 use super::{
     CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
-    TableInfo, UploadInfo,
+    ResultStatus, ResultUpdate, TableInfo, UploadInfo,
 };
 use crate::config::CacheConfig;
 use crate::secrets::{SecretMetadata, SecretStatus};
@@ -799,8 +799,12 @@ impl CatalogManager for CachingCatalogManager {
 
     // Query result persistence methods
 
-    async fn store_result(&self, result: &QueryResult) -> Result<()> {
-        self.inner().store_result(result).await
+    async fn create_result(&self, initial_status: ResultStatus) -> Result<String> {
+        self.inner().create_result(initial_status).await
+    }
+
+    async fn update_result(&self, id: &str, update: ResultUpdate<'_>) -> Result<bool> {
+        self.inner().update_result(id, update).await
     }
 
     async fn get_result(&self, id: &str) -> Result<Option<QueryResult>> {
@@ -809,18 +813,6 @@ impl CatalogManager for CachingCatalogManager {
 
     async fn list_results(&self, limit: usize, offset: usize) -> Result<(Vec<QueryResult>, bool)> {
         self.inner().list_results(limit, offset).await
-    }
-
-    async fn store_result_pending(&self, id: &str, created_at: DateTime<Utc>) -> Result<()> {
-        self.inner().store_result_pending(id, created_at).await
-    }
-
-    async fn finalize_result(&self, id: &str, parquet_path: &str) -> Result<bool> {
-        self.inner().finalize_result(id, parquet_path).await
-    }
-
-    async fn fail_result(&self, id: &str, error_message: Option<&str>) -> Result<bool> {
-        self.inner().fail_result(id, error_message).await
     }
 
     async fn get_queryable_result(&self, id: &str) -> Result<Option<QueryResult>> {

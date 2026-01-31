@@ -1,7 +1,7 @@
 use crate::catalog::backend::CatalogBackend;
 use crate::catalog::manager::{
     CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
-    QueryResultRow, TableInfo, UploadInfo,
+    QueryResultRow, ResultStatus, ResultUpdate, TableInfo, UploadInfo,
 };
 use crate::catalog::migrations::{
     run_migrations, wrap_migration_sql, CatalogMigrations, Migration, SQLITE_MIGRATIONS,
@@ -441,23 +441,59 @@ impl CatalogManager for SqliteCatalogManager {
     }
 
     #[tracing::instrument(
-        name = "catalog_store_result",
-        skip(self, result),
-        fields(runtimedb.result_id = %result.id)
+        name = "catalog_create_result",
+        skip(self),
+        fields(runtimedb.result_id = tracing::field::Empty)
     )]
-    async fn store_result(&self, result: &QueryResult) -> Result<()> {
+    async fn create_result(&self, initial_status: ResultStatus) -> Result<String> {
+        let id = crate::id::generate_result_id();
+        tracing::Span::current().record("runtimedb.result_id", &id);
         sqlx::query(
             "INSERT INTO results (id, parquet_path, status, error_message, created_at)
-             VALUES (?, ?, ?, ?, ?)",
+             VALUES (?, NULL, ?, NULL, ?)",
         )
-        .bind(&result.id)
-        .bind(&result.parquet_path)
-        .bind(result.status.as_str())
-        .bind(&result.error_message)
-        .bind(result.created_at)
+        .bind(&id)
+        .bind(initial_status.as_str())
+        .bind(Utc::now())
         .execute(self.backend.pool())
         .await?;
-        Ok(())
+        Ok(id)
+    }
+
+    #[tracing::instrument(
+        name = "catalog_update_result",
+        skip(self, update),
+        fields(runtimedb.result_id = %id, rows_affected = tracing::field::Empty)
+    )]
+    async fn update_result(&self, id: &str, update: ResultUpdate<'_>) -> Result<bool> {
+        let result = match update {
+            ResultUpdate::Processing => {
+                sqlx::query("UPDATE results SET status = 'processing' WHERE id = ?")
+                    .bind(id)
+                    .execute(self.backend.pool())
+                    .await?
+            }
+            ResultUpdate::Ready { parquet_path } => {
+                sqlx::query("UPDATE results SET parquet_path = ?, status = 'ready' WHERE id = ?")
+                    .bind(parquet_path)
+                    .bind(id)
+                    .execute(self.backend.pool())
+                    .await?
+            }
+            ResultUpdate::Failed { error_message } => {
+                sqlx::query("UPDATE results SET status = 'failed', error_message = ? WHERE id = ?")
+                    .bind(error_message)
+                    .bind(id)
+                    .execute(self.backend.pool())
+                    .await?
+            }
+        };
+        let rows_affected = result.rows_affected();
+        tracing::Span::current().record("rows_affected", rows_affected);
+        if rows_affected == 0 {
+            tracing::warn!(result_id = %id, "update_result: no matching result found");
+        }
+        Ok(rows_affected > 0)
     }
 
     #[tracing::instrument(
@@ -473,63 +509,6 @@ impl CatalogManager for SqliteCatalogManager {
         .fetch_optional(self.backend.pool())
         .await?;
         Ok(row.map(QueryResult::from))
-    }
-
-    #[tracing::instrument(
-        name = "catalog_store_result_pending",
-        skip(self),
-        fields(runtimedb.result_id = %id)
-    )]
-    async fn store_result_pending(&self, id: &str, created_at: DateTime<Utc>) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO results (id, parquet_path, status, created_at)
-             VALUES (?, NULL, 'processing', ?)",
-        )
-        .bind(id)
-        .bind(created_at)
-        .execute(self.backend.pool())
-        .await?;
-        Ok(())
-    }
-
-    #[tracing::instrument(
-        name = "catalog_finalize_result",
-        skip(self),
-        fields(runtimedb.result_id = %id, rows_affected = tracing::field::Empty)
-    )]
-    async fn finalize_result(&self, id: &str, parquet_path: &str) -> Result<bool> {
-        let result =
-            sqlx::query("UPDATE results SET parquet_path = ?, status = 'ready' WHERE id = ?")
-                .bind(parquet_path)
-                .bind(id)
-                .execute(self.backend.pool())
-                .await?;
-        let rows_affected = result.rows_affected();
-        tracing::Span::current().record("rows_affected", rows_affected);
-        if rows_affected == 0 {
-            tracing::warn!(result_id = %id, "finalize_result: no matching result found");
-        }
-        Ok(rows_affected > 0)
-    }
-
-    #[tracing::instrument(
-        name = "catalog_fail_result",
-        skip(self),
-        fields(runtimedb.result_id = %id, rows_affected = tracing::field::Empty)
-    )]
-    async fn fail_result(&self, id: &str, error_message: Option<&str>) -> Result<bool> {
-        let result =
-            sqlx::query("UPDATE results SET status = 'failed', error_message = ? WHERE id = ?")
-                .bind(error_message)
-                .bind(id)
-                .execute(self.backend.pool())
-                .await?;
-        let rows_affected = result.rows_affected();
-        tracing::Span::current().record("rows_affected", rows_affected);
-        if rows_affected == 0 {
-            tracing::warn!(result_id = %id, "fail_result: no matching result found");
-        }
-        Ok(rows_affected > 0)
     }
 
     #[tracing::instrument(
@@ -569,8 +548,8 @@ impl CatalogManager for SqliteCatalogManager {
 
     async fn cleanup_stale_results(&self, cutoff: DateTime<Utc>) -> Result<usize> {
         let result = sqlx::query(
-            "UPDATE results SET status = 'failed', error_message = 'Cleanup: result timed out during processing'
-             WHERE status = 'processing' AND created_at < ?",
+            "UPDATE results SET status = 'failed', error_message = 'Cleanup: result timed out'
+             WHERE status IN ('pending', 'processing') AND created_at < ?",
         )
         .bind(cutoff)
         .execute(self.backend.pool())

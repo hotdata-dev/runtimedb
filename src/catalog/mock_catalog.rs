@@ -5,7 +5,7 @@
 
 use super::{
     CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
-    ResultStatus, TableInfo, UploadInfo,
+    ResultStatus, ResultUpdate, TableInfo, UploadInfo,
 };
 use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
@@ -220,50 +220,43 @@ impl CatalogManager for MockCatalog {
         Ok(None)
     }
 
-    async fn store_result(&self, result: &QueryResult) -> Result<()> {
-        self.results
-            .write()
-            .unwrap()
-            .insert(result.id.clone(), result.clone());
-        Ok(())
+    async fn create_result(&self, initial_status: ResultStatus) -> Result<String> {
+        let id = crate::id::generate_result_id();
+        let result = QueryResult {
+            id: id.clone(),
+            parquet_path: None,
+            status: initial_status,
+            error_message: None,
+            created_at: chrono::Utc::now(),
+        };
+        self.results.write().unwrap().insert(id.clone(), result);
+        Ok(id)
+    }
+
+    async fn update_result(&self, id: &str, update: ResultUpdate<'_>) -> Result<bool> {
+        let mut results = self.results.write().unwrap();
+        if let Some(result) = results.get_mut(id) {
+            match update {
+                ResultUpdate::Processing => {
+                    result.status = ResultStatus::Processing;
+                }
+                ResultUpdate::Ready { parquet_path } => {
+                    result.parquet_path = Some(parquet_path.to_string());
+                    result.status = ResultStatus::Ready;
+                }
+                ResultUpdate::Failed { error_message } => {
+                    result.status = ResultStatus::Failed;
+                    result.error_message = error_message.map(String::from);
+                }
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     async fn get_result(&self, id: &str) -> Result<Option<QueryResult>> {
         Ok(self.results.read().unwrap().get(id).cloned())
-    }
-
-    async fn store_result_pending(&self, id: &str, created_at: DateTime<Utc>) -> Result<()> {
-        let result = QueryResult {
-            id: id.to_string(),
-            parquet_path: None,
-            status: ResultStatus::Processing,
-            error_message: None,
-            created_at,
-        };
-        self.results.write().unwrap().insert(id.to_string(), result);
-        Ok(())
-    }
-
-    async fn finalize_result(&self, id: &str, parquet_path: &str) -> Result<bool> {
-        let mut results = self.results.write().unwrap();
-        if let Some(result) = results.get_mut(id) {
-            result.parquet_path = Some(parquet_path.to_string());
-            result.status = ResultStatus::Ready;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    async fn fail_result(&self, id: &str, error_message: Option<&str>) -> Result<bool> {
-        let mut results = self.results.write().unwrap();
-        if let Some(result) = results.get_mut(id) {
-            result.status = ResultStatus::Failed;
-            result.error_message = error_message.map(String::from);
-            Ok(true)
-        } else {
-            Ok(false)
-        }
     }
 
     async fn get_queryable_result(&self, id: &str) -> Result<Option<QueryResult>> {
@@ -286,10 +279,11 @@ impl CatalogManager for MockCatalog {
         let mut results = self.results.write().unwrap();
         let mut count = 0;
         for result in results.values_mut() {
-            if result.status == ResultStatus::Processing && result.created_at < cutoff {
+            if (result.status == ResultStatus::Pending || result.status == ResultStatus::Processing)
+                && result.created_at < cutoff
+            {
                 result.status = ResultStatus::Failed;
-                result.error_message =
-                    Some("Cleanup: result timed out during processing".to_string());
+                result.error_message = Some("Cleanup: result timed out".to_string());
                 count += 1;
             }
         }

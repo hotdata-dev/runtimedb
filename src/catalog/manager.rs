@@ -10,11 +10,13 @@ use std::fmt::Debug;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ResultStatus {
-    /// Result is being processed (persistence in progress)
+    /// Result is reserved but query hasn't started yet (for future async query API)
+    Pending,
+    /// Result is being processed (query executing or persistence in progress)
     Processing,
     /// Result is ready for retrieval
     Ready,
-    /// Result persistence failed
+    /// Result failed (query or persistence error)
     Failed,
 }
 
@@ -23,6 +25,7 @@ impl ResultStatus {
     /// Unknown values are treated as Failed and logged as a warning.
     pub fn from_str(s: &str) -> Self {
         match s {
+            "pending" => Self::Pending,
             "processing" => Self::Processing,
             "ready" => Self::Ready,
             "failed" => Self::Failed,
@@ -39,6 +42,7 @@ impl ResultStatus {
     /// Convert to database string representation.
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Pending => "pending",
             Self::Processing => "processing",
             Self::Ready => "ready",
             Self::Failed => "failed",
@@ -50,6 +54,18 @@ impl std::fmt::Display for ResultStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
     }
+}
+
+/// State update for an existing query result.
+/// Used with [`CatalogManager::update_result`] to transition result state.
+#[derive(Debug, Clone)]
+pub enum ResultUpdate<'a> {
+    /// Transition to processing state (query executing or persistence in progress)
+    Processing,
+    /// Transition to ready state with the parquet file path
+    Ready { parquet_path: &'a str },
+    /// Transition to failed state with an optional error message
+    Failed { error_message: Option<&'a str> },
 }
 
 /// Used to conditionally update a secret only if it hasn't been modified.
@@ -284,8 +300,16 @@ pub trait CatalogManager: Debug + Send + Sync {
 
     // Query result persistence methods
 
-    /// Store a query result. The result is persisted permanently until explicitly deleted.
-    async fn store_result(&self, result: &QueryResult) -> Result<()>;
+    /// Create a new query result with the given initial status.
+    /// Returns the generated result ID.
+    ///
+    /// For the current sync-query-with-async-persistence flow, use `ResultStatus::Processing`.
+    /// For a future fully-async query API, use `ResultStatus::Pending` initially.
+    async fn create_result(&self, initial_status: ResultStatus) -> Result<String>;
+
+    /// Update an existing result's state.
+    /// Returns true if the result was found and updated, false if not found.
+    async fn update_result(&self, id: &str, update: ResultUpdate<'_>) -> Result<bool>;
 
     /// Get a query result by ID. Returns None if not found.
     async fn get_result(&self, id: &str) -> Result<Option<QueryResult>>;
@@ -295,23 +319,12 @@ pub trait CatalogManager: Debug + Send + Sync {
     /// Returns (results, has_more) where has_more indicates if there are more results after this page.
     async fn list_results(&self, limit: usize, offset: usize) -> Result<(Vec<QueryResult>, bool)>;
 
-    /// Store a result with "processing" status (no parquet path yet).
-    async fn store_result_pending(&self, id: &str, created_at: DateTime<Utc>) -> Result<()>;
-
-    /// Finalize a result: set status to "ready" and store the parquet path.
-    /// Returns true if a row was updated, false if the result was not found.
-    async fn finalize_result(&self, id: &str, parquet_path: &str) -> Result<bool>;
-
-    /// Mark a result as failed with an optional error message.
-    /// Returns true if a row was updated, false if the result was not found.
-    async fn fail_result(&self, id: &str, error_message: Option<&str>) -> Result<bool>;
-
     /// Get a queryable result (status = 'ready' only).
     /// Used by ResultsSchemaProvider for SQL queries over results.
     async fn get_queryable_result(&self, id: &str) -> Result<Option<QueryResult>>;
 
-    /// Mark stale processing results as failed.
-    /// Results that have been "processing" for longer than the cutoff time are marked as failed.
+    /// Mark stale processing/pending results as failed.
+    /// Results that have been in a non-terminal state for longer than the cutoff time are marked as failed.
     /// Returns the number of results cleaned up.
     async fn cleanup_stale_results(&self, cutoff: DateTime<Utc>) -> Result<usize>;
 
