@@ -695,7 +695,40 @@ impl RuntimeEngine {
         };
 
         let schema: Arc<Schema> = Arc::clone(df.schema().inner());
-        let batches = df.collect().await?;
+
+        // collect() is when the actual file read happens - handle file-not-found errors
+        let batches = match df.collect().await {
+            Ok(b) => b,
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("No such file")
+                    || err_str.contains("not found")
+                    || err_str.contains("does not exist")
+                    || err_str.contains("Object at location")
+                {
+                    tracing::warn!(
+                        result_id = %id,
+                        parquet_path = %parquet_path,
+                        error = %e,
+                        "Result parquet file not found during read"
+                    );
+                    return Ok(None);
+                }
+                return Err(e.into());
+            }
+        };
+
+        // DataFusion may return empty results when the parquet file is missing (instead of an error).
+        // Check if the result schema is unexpectedly empty, which indicates the file wasn't found.
+        // A valid result should have at least one column in its schema.
+        if schema.fields().is_empty() {
+            tracing::warn!(
+                result_id = %id,
+                parquet_path = %parquet_path,
+                "Result returned empty schema, parquet file may be missing or corrupted"
+            );
+            return Ok(None);
+        }
 
         Ok(Some((schema, batches)))
     }
@@ -710,6 +743,21 @@ impl RuntimeEngine {
         offset: usize,
     ) -> Result<(Vec<crate::catalog::QueryResult>, bool)> {
         self.catalog.list_results(limit, offset).await
+    }
+
+    /// Mark a result as failed with the given error message.
+    ///
+    /// Used when the result data is no longer available (e.g., parquet file deleted).
+    /// Returns true if the result was found and updated, false if not found.
+    pub async fn mark_result_failed(&self, id: &str, error_message: &str) -> Result<bool> {
+        self.catalog
+            .update_result(
+                id,
+                ResultUpdate::Failed {
+                    error_message: Some(error_message),
+                },
+            )
+            .await
     }
 
     /// Purge all cached data for a connection (clears parquet files and resets sync state).
@@ -2512,7 +2560,7 @@ async fn persist_result_background(
     // Helper to mark result as failed with error message
     async fn mark_failed(catalog: &dyn CatalogManager, result_id: &str, error: &anyhow::Error) {
         let error_msg = error.to_string();
-        if let Err(e) = catalog
+        match catalog
             .update_result(
                 result_id,
                 ResultUpdate::Failed {
@@ -2521,11 +2569,20 @@ async fn persist_result_background(
             )
             .await
         {
-            tracing::warn!(
-                result_id = %result_id,
-                error = %e,
-                "Failed to mark result as failed in catalog"
-            );
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(
+                    result_id = %result_id,
+                    "Result row not found when marking as failed, may have been deleted"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    result_id = %result_id,
+                    error = %e,
+                    "Failed to mark result as failed in catalog"
+                );
+            }
         }
     }
 
@@ -2568,7 +2625,7 @@ async fn persist_result_background(
     let file_url = format!("{}/data.parquet", dir_url);
 
     // Update catalog to ready
-    if let Err(e) = catalog
+    match catalog
         .update_result(
             result_id,
             ResultUpdate::Ready {
@@ -2577,12 +2634,23 @@ async fn persist_result_background(
         )
         .await
     {
-        let error = anyhow::anyhow!("persist_result: catalog update failed: {}", e);
-        mark_failed(catalog.as_ref(), result_id, &error).await;
-        return Err(error);
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            // Result row was not found - it may have been deleted concurrently
+            tracing::warn!(
+                result_id = %result_id,
+                "Result row not found when finalizing, may have been deleted concurrently"
+            );
+            Err(anyhow::anyhow!(
+                "persist_result: result row not found when finalizing"
+            ))
+        }
+        Err(e) => {
+            let error = anyhow::anyhow!("persist_result: catalog update failed: {}", e);
+            mark_failed(catalog.as_ref(), result_id, &error).await;
+            Err(error)
+        }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
