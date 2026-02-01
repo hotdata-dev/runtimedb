@@ -162,14 +162,21 @@ impl SqliteCatalogManager {
 
 #[async_trait]
 impl CatalogManager for SqliteCatalogManager {
+    #[tracing::instrument(name = "catalog_run_migrations", skip(self), fields(db = "sqlite"))]
     async fn run_migrations(&self) -> Result<()> {
         run_migrations::<SqliteMigrationBackend>(self.backend.pool()).await
     }
 
+    #[tracing::instrument(name = "catalog_list_connections", skip(self), fields(db = "sqlite"))]
     async fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
         self.backend.list_connections().await
     }
 
+    #[tracing::instrument(
+        name = "catalog_add_connection",
+        skip(self, config_json),
+        fields(db = "sqlite")
+    )]
     async fn add_connection(
         &self,
         name: &str,
@@ -182,14 +189,25 @@ impl CatalogManager for SqliteCatalogManager {
             .await
     }
 
+    #[tracing::instrument(name = "catalog_get_connection", skip(self), fields(db = "sqlite"))]
     async fn get_connection(&self, id: &str) -> Result<Option<ConnectionInfo>> {
         self.backend.get_connection(id).await
     }
 
+    #[tracing::instrument(
+        name = "catalog_get_connection_by_name",
+        skip(self),
+        fields(db = "sqlite")
+    )]
     async fn get_connection_by_name(&self, name: &str) -> Result<Option<ConnectionInfo>> {
         self.backend.get_connection_by_name(name).await
     }
 
+    #[tracing::instrument(
+        name = "catalog_add_table",
+        skip(self, arrow_schema_json),
+        fields(db = "sqlite")
+    )]
     async fn add_table(
         &self,
         connection_id: &str,
@@ -202,10 +220,12 @@ impl CatalogManager for SqliteCatalogManager {
             .await
     }
 
+    #[tracing::instrument(name = "catalog_list_tables", skip(self), fields(db = "sqlite"))]
     async fn list_tables(&self, connection_id: Option<&str>) -> Result<Vec<TableInfo>> {
         self.backend.list_tables(connection_id).await
     }
 
+    #[tracing::instrument(name = "catalog_get_table", skip(self), fields(db = "sqlite"))]
     async fn get_table(
         &self,
         connection_id: &str,
@@ -217,10 +237,16 @@ impl CatalogManager for SqliteCatalogManager {
             .await
     }
 
+    #[tracing::instrument(name = "catalog_update_table_sync", skip(self), fields(db = "sqlite"))]
     async fn update_table_sync(&self, table_id: i32, parquet_path: &str) -> Result<()> {
         self.backend.update_table_sync(table_id, parquet_path).await
     }
 
+    #[tracing::instrument(
+        name = "catalog_clear_table_cache_metadata",
+        skip(self),
+        fields(db = "sqlite")
+    )]
     async fn clear_table_cache_metadata(
         &self,
         connection_id: &str,
@@ -232,16 +258,27 @@ impl CatalogManager for SqliteCatalogManager {
             .await
     }
 
+    #[tracing::instrument(
+        name = "catalog_clear_connection_cache_metadata",
+        skip(self),
+        fields(db = "sqlite")
+    )]
     async fn clear_connection_cache_metadata(&self, connection_id: &str) -> Result<()> {
         self.backend
             .clear_connection_cache_metadata(connection_id)
             .await
     }
 
+    #[tracing::instrument(name = "catalog_delete_connection", skip(self), fields(db = "sqlite"))]
     async fn delete_connection(&self, connection_id: &str) -> Result<()> {
         self.backend.delete_connection(connection_id).await
     }
 
+    #[tracing::instrument(
+        name = "catalog_get_secret_metadata",
+        skip(self),
+        fields(db = "sqlite")
+    )]
     async fn get_secret_metadata(&self, name: &str) -> Result<Option<SecretMetadata>> {
         let row: Option<SecretMetadataRow> = sqlx::query_as(
             "SELECT id, name, provider, provider_ref, status, created_at, updated_at \
@@ -254,6 +291,11 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(row.map(SecretMetadataRow::into_metadata))
     }
 
+    #[tracing::instrument(
+        name = "catalog_get_secret_metadata_any_status",
+        skip(self),
+        fields(db = "sqlite")
+    )]
     async fn get_secret_metadata_any_status(&self, name: &str) -> Result<Option<SecretMetadata>> {
         let row: Option<SecretMetadataRow> = sqlx::query_as(
             "SELECT id, name, provider, provider_ref, status, created_at, updated_at \
@@ -266,6 +308,11 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(row.map(SecretMetadataRow::into_metadata))
     }
 
+    #[tracing::instrument(
+        name = "catalog_create_secret_metadata",
+        skip(self, metadata),
+        fields(db = "sqlite")
+    )]
     async fn create_secret_metadata(&self, metadata: &SecretMetadata) -> Result<()> {
         let created_at = metadata.created_at.to_rfc3339();
         let updated_at = metadata.updated_at.to_rfc3339();
@@ -287,6 +334,11 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "catalog_update_secret_metadata",
+        skip(self, metadata, lock),
+        fields(db = "sqlite")
+    )]
     async fn update_secret_metadata(
         &self,
         metadata: &SecretMetadata,
@@ -317,6 +369,7 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(result.rows_affected() > 0)
     }
 
+    #[tracing::instrument(name = "catalog_set_secret_status", skip(self), fields(db = "sqlite"))]
     async fn set_secret_status(&self, name: &str, status: SecretStatus) -> Result<bool> {
         let result = sqlx::query("UPDATE secrets SET status = ? WHERE name = ?")
             .bind(status.as_str())
@@ -327,6 +380,11 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(result.rows_affected() > 0)
     }
 
+    #[tracing::instrument(
+        name = "catalog_delete_secret_metadata",
+        skip(self),
+        fields(db = "sqlite")
+    )]
     async fn delete_secret_metadata(&self, name: &str) -> Result<bool> {
         let result = sqlx::query("DELETE FROM secrets WHERE name = ?")
             .bind(name)
@@ -336,6 +394,11 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(result.rows_affected() > 0)
     }
 
+    #[tracing::instrument(
+        name = "catalog_get_encrypted_secret",
+        skip(self),
+        fields(db = "sqlite")
+    )]
     async fn get_encrypted_secret(&self, secret_id: &str) -> Result<Option<Vec<u8>>> {
         sqlx::query_scalar(
             "SELECT encrypted_value FROM encrypted_secret_values WHERE secret_id = ?",
@@ -346,6 +409,11 @@ impl CatalogManager for SqliteCatalogManager {
         .map_err(Into::into)
     }
 
+    #[tracing::instrument(
+        name = "catalog_put_encrypted_secret_value",
+        skip(self, encrypted_value),
+        fields(db = "sqlite")
+    )]
     async fn put_encrypted_secret_value(
         &self,
         secret_id: &str,
@@ -365,6 +433,11 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "catalog_delete_encrypted_secret_value",
+        skip(self),
+        fields(db = "sqlite")
+    )]
     async fn delete_encrypted_secret_value(&self, secret_id: &str) -> Result<bool> {
         let result = sqlx::query("DELETE FROM encrypted_secret_values WHERE secret_id = ?")
             .bind(secret_id)
@@ -374,6 +447,7 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(result.rows_affected() > 0)
     }
 
+    #[tracing::instrument(name = "catalog_list_secrets", skip(self), fields(db = "sqlite"))]
     async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
         let rows: Vec<SecretMetadataRow> = sqlx::query_as(
             "SELECT id, name, provider, provider_ref, status, created_at, updated_at \
@@ -388,6 +462,11 @@ impl CatalogManager for SqliteCatalogManager {
             .collect())
     }
 
+    #[tracing::instrument(
+        name = "catalog_get_secret_metadata_by_id",
+        skip(self),
+        fields(db = "sqlite")
+    )]
     async fn get_secret_metadata_by_id(&self, id: &str) -> Result<Option<SecretMetadata>> {
         let row: Option<SecretMetadataRow> = sqlx::query_as(
             "SELECT id, name, provider, provider_ref, status, created_at, updated_at \
@@ -400,6 +479,11 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(row.map(SecretMetadataRow::into_metadata))
     }
 
+    #[tracing::instrument(
+        name = "catalog_schedule_file_deletion",
+        skip(self),
+        fields(db = "sqlite")
+    )]
     async fn schedule_file_deletion(&self, path: &str, delete_after: DateTime<Utc>) -> Result<()> {
         // Use RFC3339 string for SQLite TEXT column
         // INSERT OR IGNORE silently ignores duplicates when path already exists
@@ -411,6 +495,11 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "catalog_get_pending_deletions",
+        skip(self),
+        fields(db = "sqlite")
+    )]
     async fn get_pending_deletions(&self) -> Result<Vec<PendingDeletion>> {
         // Use RFC3339 string comparison for SQLite TEXT column
         let rows: Vec<PendingDeletionRow> = sqlx::query_as(
@@ -426,6 +515,11 @@ impl CatalogManager for SqliteCatalogManager {
             .collect())
     }
 
+    #[tracing::instrument(
+        name = "catalog_increment_deletion_retry",
+        skip(self),
+        fields(db = "sqlite")
+    )]
     async fn increment_deletion_retry(&self, id: i32) -> Result<i32> {
         let new_count: (i32,) = sqlx::query_as(
             "UPDATE pending_deletions SET retry_count = retry_count + 1 WHERE id = ? RETURNING retry_count",
@@ -436,6 +530,11 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(new_count.0)
     }
 
+    #[tracing::instrument(
+        name = "catalog_remove_pending_deletion",
+        skip(self),
+        fields(db = "sqlite")
+    )]
     async fn remove_pending_deletion(&self, id: i32) -> Result<()> {
         self.backend.remove_pending_deletion(id).await
     }
@@ -443,7 +542,7 @@ impl CatalogManager for SqliteCatalogManager {
     #[tracing::instrument(
         name = "catalog_create_result",
         skip(self),
-        fields(runtimedb.result_id = tracing::field::Empty)
+        fields(db = "sqlite", runtimedb.result_id = tracing::field::Empty)
     )]
     async fn create_result(&self, initial_status: ResultStatus) -> Result<String> {
         let id = crate::id::generate_result_id();
@@ -463,7 +562,7 @@ impl CatalogManager for SqliteCatalogManager {
     #[tracing::instrument(
         name = "catalog_update_result",
         skip(self, update),
-        fields(runtimedb.result_id = %id, rows_affected = tracing::field::Empty)
+        fields(db = "sqlite", runtimedb.result_id = %id, rows_affected = tracing::field::Empty)
     )]
     async fn update_result(&self, id: &str, update: ResultUpdate<'_>) -> Result<bool> {
         let result = match update {
@@ -499,7 +598,7 @@ impl CatalogManager for SqliteCatalogManager {
     #[tracing::instrument(
         name = "catalog_get_result",
         skip(self),
-        fields(runtimedb.result_id = %id)
+        fields(db = "sqlite", runtimedb.result_id = %id)
     )]
     async fn get_result(&self, id: &str) -> Result<Option<QueryResult>> {
         let row = sqlx::query_as::<_, QueryResultRow>(
@@ -514,7 +613,7 @@ impl CatalogManager for SqliteCatalogManager {
     #[tracing::instrument(
         name = "catalog_get_queryable_result",
         skip(self),
-        fields(runtimedb.result_id = %id)
+        fields(db = "sqlite", runtimedb.result_id = %id)
     )]
     async fn get_queryable_result(&self, id: &str) -> Result<Option<QueryResult>> {
         let row = sqlx::query_as::<_, QueryResultRow>(
@@ -526,6 +625,7 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(row.map(QueryResult::from))
     }
 
+    #[tracing::instrument(name = "catalog_list_results", skip(self), fields(db = "sqlite"))]
     async fn list_results(&self, limit: usize, offset: usize) -> Result<(Vec<QueryResult>, bool)> {
         // Fetch one extra to determine has_more
         let fetch_limit = limit + 1;
@@ -546,6 +646,11 @@ impl CatalogManager for SqliteCatalogManager {
         Ok((results, has_more))
     }
 
+    #[tracing::instrument(
+        name = "catalog_cleanup_stale_results",
+        skip(self),
+        fields(db = "sqlite")
+    )]
     async fn cleanup_stale_results(&self, cutoff: DateTime<Utc>) -> Result<usize> {
         let result = sqlx::query(
             "UPDATE results SET status = 'failed', error_message = 'Cleanup: result timed out'
@@ -557,12 +662,22 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(result.rows_affected() as usize)
     }
 
+    #[tracing::instrument(
+        name = "catalog_count_connections_by_secret_id",
+        skip(self),
+        fields(db = "sqlite")
+    )]
     async fn count_connections_by_secret_id(&self, secret_id: &str) -> Result<i64> {
         self.backend.count_connections_by_secret_id(secret_id).await
     }
 
     // Upload management methods
 
+    #[tracing::instrument(
+        name = "catalog_create_upload",
+        skip(self, upload),
+        fields(db = "sqlite")
+    )]
     async fn create_upload(&self, upload: &UploadInfo) -> Result<()> {
         let created_at = upload.created_at.to_rfc3339();
         let consumed_at = upload.consumed_at.map(|t| t.to_rfc3339());
@@ -585,6 +700,7 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(())
     }
 
+    #[tracing::instrument(name = "catalog_get_upload", skip(self), fields(db = "sqlite"))]
     async fn get_upload(&self, id: &str) -> Result<Option<UploadInfo>> {
         let row: Option<UploadInfoRow> = sqlx::query_as(
             "SELECT id, status, storage_url, content_type, content_encoding, size_bytes, created_at, consumed_at \
@@ -597,6 +713,7 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(row.map(UploadInfoRow::into_upload_info))
     }
 
+    #[tracing::instrument(name = "catalog_list_uploads", skip(self), fields(db = "sqlite"))]
     async fn list_uploads(&self, status: Option<&str>) -> Result<Vec<UploadInfo>> {
         let rows: Vec<UploadInfoRow> = if let Some(status) = status {
             sqlx::query_as(
@@ -621,6 +738,7 @@ impl CatalogManager for SqliteCatalogManager {
             .collect())
     }
 
+    #[tracing::instrument(name = "catalog_consume_upload", skip(self), fields(db = "sqlite"))]
     async fn consume_upload(&self, id: &str) -> Result<bool> {
         let consumed_at = Utc::now().to_rfc3339();
         // Accept both pending and processing states (processing is the expected state after claim)
@@ -635,6 +753,7 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(result.rows_affected() > 0)
     }
 
+    #[tracing::instrument(name = "catalog_claim_upload", skip(self), fields(db = "sqlite"))]
     async fn claim_upload(&self, id: &str) -> Result<bool> {
         let result = sqlx::query(
             "UPDATE uploads SET status = 'processing' WHERE id = ? AND status = 'pending'",
@@ -646,6 +765,7 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(result.rows_affected() > 0)
     }
 
+    #[tracing::instrument(name = "catalog_release_upload", skip(self), fields(db = "sqlite"))]
     async fn release_upload(&self, id: &str) -> Result<bool> {
         let result = sqlx::query(
             "UPDATE uploads SET status = 'pending' WHERE id = ? AND status = 'processing'",
@@ -662,7 +782,7 @@ impl CatalogManager for SqliteCatalogManager {
     #[tracing::instrument(
         name = "catalog_create_dataset",
         skip(self, dataset),
-        fields(runtimedb.dataset_id = %dataset.id)
+        fields(db = "sqlite", runtimedb.dataset_id = %dataset.id)
     )]
     async fn create_dataset(&self, dataset: &DatasetInfo) -> Result<()> {
         let created_at = dataset.created_at.to_rfc3339();
@@ -691,7 +811,7 @@ impl CatalogManager for SqliteCatalogManager {
     #[tracing::instrument(
         name = "catalog_get_dataset",
         skip(self),
-        fields(runtimedb.dataset_id = %id)
+        fields(db = "sqlite", runtimedb.dataset_id = %id)
     )]
     async fn get_dataset(&self, id: &str) -> Result<Option<DatasetInfo>> {
         let row: Option<DatasetInfoRow> = sqlx::query_as(
@@ -705,6 +825,11 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(row.map(DatasetInfoRow::into_dataset_info))
     }
 
+    #[tracing::instrument(
+        name = "catalog_get_dataset_by_table_name",
+        skip(self),
+        fields(db = "sqlite")
+    )]
     async fn get_dataset_by_table_name(
         &self,
         schema_name: &str,
@@ -725,7 +850,7 @@ impl CatalogManager for SqliteCatalogManager {
     #[tracing::instrument(
         name = "catalog_list_datasets",
         skip(self),
-        fields(runtimedb.count = tracing::field::Empty)
+        fields(db = "sqlite", runtimedb.count = tracing::field::Empty)
     )]
     async fn list_datasets(&self, limit: usize, offset: usize) -> Result<(Vec<DatasetInfo>, bool)> {
         // Fetch one extra to determine if there are more results
@@ -751,6 +876,7 @@ impl CatalogManager for SqliteCatalogManager {
         Ok((datasets, has_more))
     }
 
+    #[tracing::instrument(name = "catalog_list_all_datasets", skip(self), fields(db = "sqlite"))]
     async fn list_all_datasets(&self) -> Result<Vec<DatasetInfo>> {
         let rows: Vec<DatasetInfoRow> = sqlx::query_as(
             "SELECT id, label, schema_name, table_name, parquet_url, arrow_schema_json, source_type, source_config, created_at, updated_at \
@@ -765,6 +891,11 @@ impl CatalogManager for SqliteCatalogManager {
             .collect())
     }
 
+    #[tracing::instrument(
+        name = "catalog_list_dataset_table_names",
+        skip(self),
+        fields(db = "sqlite")
+    )]
     async fn list_dataset_table_names(&self, schema_name: &str) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
             "SELECT table_name FROM datasets WHERE schema_name = ? ORDER BY table_name",
@@ -776,6 +907,7 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(rows.into_iter().map(|(name,)| name).collect())
     }
 
+    #[tracing::instrument(name = "catalog_update_dataset", skip(self), fields(db = "sqlite"))]
     async fn update_dataset(&self, id: &str, label: &str, table_name: &str) -> Result<bool> {
         let updated_at = Utc::now().to_rfc3339();
         let result = sqlx::query(
@@ -791,6 +923,7 @@ impl CatalogManager for SqliteCatalogManager {
         Ok(result.rows_affected() > 0)
     }
 
+    #[tracing::instrument(name = "catalog_delete_dataset", skip(self), fields(db = "sqlite"))]
     async fn delete_dataset(&self, id: &str) -> Result<Option<DatasetInfo>> {
         // First get the dataset so we can return it
         let dataset = self.get_dataset(id).await?;
