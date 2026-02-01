@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tracing::warn;
 
 use crate::datafetch::batch_writer::BatchWriter;
+use crate::datafetch::types::GeometryColumnInfo;
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::secrets::SecretManager;
 use crate::source::Source;
@@ -148,19 +149,22 @@ pub async fn discover_tables(
         let is_nullable: String = row.get(6);
         let ordinal: u32 = row.get(7);
 
+        let is_spatial = is_spatial_type(&data_type);
+
         let column = ColumnMetadata {
-            name: col_name,
+            name: col_name.clone(),
             data_type: mysql_type_to_arrow(&data_type),
             nullable: is_nullable.to_uppercase() == "YES",
             ordinal_position: ordinal as i32,
         };
 
         // Find or create table entry
-        if let Some(existing) = tables
+        let table_meta = if let Some(existing) = tables
             .iter_mut()
             .find(|t| t.catalog_name == catalog && t.schema_name == schema && t.table_name == table)
         {
             existing.columns.push(column);
+            existing
         } else {
             tables.push(TableMetadata {
                 catalog_name: catalog,
@@ -170,6 +174,13 @@ pub async fn discover_tables(
                 columns: vec![column],
                 geometry_columns: std::collections::HashMap::new(),
             });
+            tables.last_mut().unwrap()
+        };
+
+        // Populate geometry column metadata for GeoParquet support
+        if is_spatial {
+            let geo_info = parse_mysql_geometry_info(&data_type);
+            table_meta.geometry_columns.insert(col_name, geo_info);
         }
     }
 
@@ -404,6 +415,32 @@ pub fn is_spatial_type(mysql_type: &str) -> bool {
             | "geometrycollection"
             | "geomcollection"
     )
+}
+
+/// Parse MySQL spatial type into GeometryColumnInfo.
+///
+/// MySQL spatial types don't carry SRID information in the column type
+/// (SRID is specified per-value or via table constraints), so we default to
+/// SRID 0 (unspecified) and extract the geometry type from the column type.
+fn parse_mysql_geometry_info(mysql_type: &str) -> GeometryColumnInfo {
+    let type_lower = mysql_type.to_lowercase();
+    let base_type = type_lower.split('(').next().unwrap_or(&type_lower).trim();
+
+    let geometry_type = match base_type {
+        "point" => Some("Point".to_string()),
+        "linestring" => Some("LineString".to_string()),
+        "polygon" => Some("Polygon".to_string()),
+        "multipoint" => Some("MultiPoint".to_string()),
+        "multilinestring" => Some("MultiLineString".to_string()),
+        "multipolygon" => Some("MultiPolygon".to_string()),
+        "geometrycollection" | "geomcollection" => Some("GeometryCollection".to_string()),
+        _ => None, // "geometry" — unknown sub-type
+    };
+
+    GeometryColumnInfo {
+        srid: 0, // MySQL doesn't expose SRID in column type
+        geometry_type,
+    }
 }
 
 /// Parse a decimal string to i128 with the given precision and scale.

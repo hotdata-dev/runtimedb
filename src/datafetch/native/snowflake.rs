@@ -10,6 +10,7 @@ use snowflake_api::{QueryResult, SnowflakeApi};
 use std::sync::Arc;
 
 use crate::datafetch::batch_writer::BatchWriter;
+use crate::datafetch::types::GeometryColumnInfo;
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::secrets::SecretManager;
 use crate::source::Source;
@@ -214,8 +215,11 @@ pub async fn discover_tables(
                 .unwrap_or(true);
             let ordinal = get_int_value(ordinal_col.as_ref(), row).unwrap_or(0) as i32;
 
+            // Check if this is a spatial column
+            let is_spatial = is_spatial_type(&data_type_str);
+
             let column = ColumnMetadata {
-                name: col_name,
+                name: col_name.clone(),
                 data_type: snowflake_type_to_arrow(&data_type_str),
                 nullable: is_nullable,
                 ordinal_position: ordinal,
@@ -228,15 +232,26 @@ pub async fn discover_tables(
                     && t.table_name == table_name
             }) {
                 existing.columns.push(column);
+                // Add geometry column info if spatial
+                if is_spatial {
+                    let geo_info = parse_snowflake_geometry_info(&data_type_str);
+                    existing.geometry_columns.insert(col_name, geo_info);
+                }
             } else {
-                tables.push(TableMetadata {
+                let mut table_meta = TableMetadata {
                     catalog_name: catalog,
                     schema_name,
                     table_name,
                     table_type,
                     columns: vec![column],
                     geometry_columns: std::collections::HashMap::new(),
-                });
+                };
+                // Add geometry column info if spatial
+                if is_spatial {
+                    let geo_info = parse_snowflake_geometry_info(&data_type_str);
+                    table_meta.geometry_columns.insert(col_name, geo_info);
+                }
+                tables.push(table_meta);
             }
         }
     }
@@ -480,6 +495,25 @@ pub fn is_spatial_type(sf_type: &str) -> bool {
     let type_upper = sf_type.to_uppercase();
     let base_type = type_upper.split('(').next().unwrap_or(&type_upper).trim();
     matches!(base_type, "GEOGRAPHY" | "GEOMETRY")
+}
+
+/// Parse Snowflake geometry type info for GeoParquet metadata.
+/// Snowflake only has GEOGRAPHY (WGS84, SRID 4326) and GEOMETRY (planar, SRID 0).
+fn parse_snowflake_geometry_info(sf_type: &str) -> GeometryColumnInfo {
+    let type_upper = sf_type.to_uppercase();
+    let base_type = type_upper.split('(').next().unwrap_or(&type_upper).trim();
+
+    // GEOGRAPHY is always WGS84 (SRID 4326), GEOMETRY is planar (SRID 0)
+    let srid = if base_type == "GEOGRAPHY" { 4326 } else { 0 };
+
+    // Snowflake doesn't expose the specific geometry subtype (Point, Polygon, etc.)
+    // in information_schema, so we use the generic type
+    let geometry_type = Some("Geometry".to_string());
+
+    GeometryColumnInfo {
+        srid,
+        geometry_type,
+    }
 }
 
 /// Extract string value from Arrow array (supports both Utf8 and LargeUtf8)
