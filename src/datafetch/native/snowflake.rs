@@ -280,8 +280,22 @@ pub async fn fetch_table(
         }
     };
 
-    // Query column info to detect spatial columns (case-insensitive to handle identifier casing)
-    let schema_query = format!(
+    // Query column info to detect spatial columns
+    // Try exact case first to avoid mixing columns from case-variant tables (e.g., "Foo" vs "FOO")
+    // Only fall back to case-insensitive if exact match returns no rows
+    let exact_schema_query = format!(
+        r#"
+        SELECT column_name, data_type
+        FROM "{database}".information_schema.columns
+        WHERE table_schema = '{schema}' AND table_name = '{table}'
+        ORDER BY ordinal_position
+        "#,
+        database = database.replace('"', "\"\""),
+        schema = schema.replace('\'', "''"),
+        table = table.replace('\'', "''")
+    );
+
+    let case_insensitive_schema_query = format!(
         r#"
         SELECT column_name, data_type
         FROM "{database}".information_schema.columns
@@ -293,56 +307,78 @@ pub async fn fetch_table(
         table = table.replace('\'', "''")
     );
 
-    // Build column expressions with ST_AsBinary for spatial columns
+    // Helper to parse column expressions from query result
+    fn parse_column_exprs(
+        batches: &[arrow54_array::RecordBatch],
+    ) -> Result<Vec<String>, DataFetchError> {
+        let mut exprs = Vec::new();
+        for batch in batches {
+            let converted = convert_arrow_batch(batch)?;
+            for row in 0..converted.num_rows() {
+                if let (Some(col_name), Some(data_type)) = (
+                    get_string_value(converted.column(0).as_ref(), row),
+                    get_string_value(converted.column(1).as_ref(), row),
+                ) {
+                    let escaped_col = format!("\"{}\"", col_name.replace('"', "\"\""));
+                    if is_spatial_type(&data_type) {
+                        exprs.push(format!("ST_AsBinary({}) AS {}", escaped_col, escaped_col));
+                    } else {
+                        exprs.push(escaped_col);
+                    }
+                }
+            }
+        }
+        Ok(exprs)
+    }
+
+    // Try exact case first
     let column_exprs: Vec<String> = {
-        let schema_result = client
-            .exec(&schema_query)
+        let exact_result = client
+            .exec(&exact_schema_query)
             .await
             .map_err(|e| DataFetchError::Query(format!("Schema query failed: {}", e)))?;
 
-        match schema_result {
-            QueryResult::Arrow(batches) => {
-                let mut exprs = Vec::new();
-                for batch in batches {
-                    let converted = convert_arrow_batch(&batch)?;
-                    for row in 0..converted.num_rows() {
-                        if let (Some(col_name), Some(data_type)) = (
-                            get_string_value(converted.column(0).as_ref(), row),
-                            get_string_value(converted.column(1).as_ref(), row),
-                        ) {
-                            let escaped_col = format!("\"{}\"", col_name.replace('"', "\"\""));
-                            if is_spatial_type(&data_type) {
-                                exprs.push(format!(
-                                    "ST_AsBinary({}) AS {}",
-                                    escaped_col, escaped_col
-                                ));
-                            } else {
-                                exprs.push(escaped_col);
-                            }
-                        }
-                    }
+        match exact_result {
+            QueryResult::Arrow(batches) if !batches.is_empty() => {
+                let exprs = parse_column_exprs(&batches)?;
+                if !exprs.is_empty() {
+                    exprs
+                } else {
+                    // Exact query returned batches but no columns, try case-insensitive
+                    Vec::new()
                 }
-                exprs
             }
-            _ => {
-                // Schema query returned no data
-                Vec::new()
-            }
+            _ => Vec::new(),
         }
+    };
+
+    // If exact case returned nothing, try case-insensitive fallback
+    let column_exprs = if column_exprs.is_empty() {
+        let fallback_result = client
+            .exec(&case_insensitive_schema_query)
+            .await
+            .map_err(|e| DataFetchError::Query(format!("Schema query failed: {}", e)))?;
+
+        match fallback_result {
+            QueryResult::Arrow(batches) => parse_column_exprs(&batches)?,
+            _ => Vec::new(),
+        }
+    } else {
+        column_exprs
     };
 
     // Build SELECT query with column expressions
     // Guard against empty column list which could silently skip ST_AsBinary wrapping
     let select_clause = if column_exprs.is_empty() {
-        // If schema query returned nothing, check if table has spatial columns with a separate query
+        // If schema query returned nothing, check if table has spatial columns
         // This handles edge cases like permissions issues where info_schema doesn't return columns
         let spatial_check_query = format!(
             r#"
             SELECT COUNT(*) as cnt
             FROM "{database}".information_schema.columns
-            WHERE UPPER(table_schema) = UPPER('{schema}')
-              AND UPPER(table_name) = UPPER('{table}')
-              AND data_type IN ('GEOGRAPHY', 'GEOMETRY')
+            WHERE (table_schema = '{schema}' AND table_name = '{table}')
+               OR (UPPER(table_schema) = UPPER('{schema}') AND UPPER(table_name) = UPPER('{table}'))
+            AND data_type IN ('GEOGRAPHY', 'GEOMETRY')
             "#,
             database = database.replace('"', "\"\""),
             schema = schema.replace('\'', "''"),
