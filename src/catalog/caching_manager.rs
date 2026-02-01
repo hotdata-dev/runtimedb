@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn, Instrument};
+use tracing::{info, warn};
 
 /// Wrapper around cached data with timestamp for TTL tracking.
 #[derive(Debug, Serialize, Deserialize)]
@@ -147,7 +147,7 @@ impl CachingCatalogManager {
     }
 
     /// Read from cache with fallback to inner catalog.
-    #[tracing::instrument(skip(self, fetch))]
+    #[tracing::instrument(name = "cache_read", skip(self, fetch))]
     async fn cached_read<T, F, Fut>(&self, key: &str, fetch: F) -> Result<T>
     where
         T: Serialize + DeserializeOwned,
@@ -188,7 +188,7 @@ impl CachingCatalogManager {
     }
 
     /// Set a value in the cache with TTL.
-    #[tracing::instrument(skip(self, data))]
+    #[tracing::instrument(name = "cache_set", skip(self, data))]
     async fn cache_set<T: Serialize>(&self, key: &str, data: &T) -> Result<()> {
         let entry = CachedEntry {
             data,
@@ -209,7 +209,7 @@ impl CachingCatalogManager {
     }
 
     /// Delete a key from the cache.
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(name = "cache_del", skip(self))]
     async fn cache_del(&self, key: &str) {
         let result: Result<(), _> = self.redis().del(key).await;
         if let Err(e) = result {
@@ -218,7 +218,7 @@ impl CachingCatalogManager {
     }
 
     /// Delete keys matching a pattern using SCAN.
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(name = "cache_del_pattern", skip(self))]
     async fn cache_del_pattern(&self, pattern: &str) {
         let mut cursor = 0u64;
         loop {
