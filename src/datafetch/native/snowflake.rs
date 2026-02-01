@@ -372,18 +372,7 @@ pub async fn fetch_table(
     let select_clause = if column_exprs.is_empty() {
         // If schema query returned nothing, check if table has spatial columns
         // This handles edge cases like permissions issues where info_schema doesn't return columns
-        let spatial_check_query = format!(
-            r#"
-            SELECT COUNT(*) as cnt
-            FROM "{database}".information_schema.columns
-            WHERE (table_schema = '{schema}' AND table_name = '{table}')
-               OR (UPPER(table_schema) = UPPER('{schema}') AND UPPER(table_name) = UPPER('{table}'))
-            AND data_type IN ('GEOGRAPHY', 'GEOMETRY')
-            "#,
-            database = database.replace('"', "\"\""),
-            schema = schema.replace('\'', "''"),
-            table = table.replace('\'', "''")
-        );
+        let spatial_check_query = build_spatial_check_query(database, schema, table);
 
         let has_spatial = match client.exec(&spatial_check_query).await {
             Ok(QueryResult::Arrow(batches)) => batches.first().is_some_and(|b| {
@@ -564,6 +553,23 @@ pub fn is_spatial_type(sf_type: &str) -> bool {
     let type_upper = sf_type.to_uppercase();
     let base_type = type_upper.split('(').next().unwrap_or(&type_upper).trim();
     matches!(base_type, "GEOGRAPHY" | "GEOMETRY")
+}
+
+/// Build SQL query to check if a table has spatial columns.
+/// Exported for testing to verify correct boolean precedence.
+fn build_spatial_check_query(database: &str, schema: &str, table: &str) -> String {
+    format!(
+        r#"
+        SELECT COUNT(*) as cnt
+        FROM "{database}".information_schema.columns
+        WHERE ((table_schema = '{schema}' AND table_name = '{table}')
+           OR (UPPER(table_schema) = UPPER('{schema}') AND UPPER(table_name) = UPPER('{table}')))
+          AND data_type IN ('GEOGRAPHY', 'GEOMETRY')
+        "#,
+        database = database.replace('"', "\"\""),
+        schema = schema.replace('\'', "''"),
+        table = table.replace('\'', "''")
+    )
 }
 
 /// Parse Snowflake geometry type info for GeoParquet metadata.
@@ -896,5 +902,54 @@ mod tests {
         let array_ref: Arc<dyn datafusion::arrow::array::Array> = Arc::new(array);
 
         assert_eq!(get_int_value(array_ref.as_ref(), 0), None);
+    }
+
+    #[test]
+    fn test_spatial_check_query_boolean_precedence() {
+        // Verify the spatial check query has correct boolean precedence.
+        // The OR branches must be grouped together before ANDing with data_type filter,
+        // otherwise the exact-case branch would match ALL columns (not just spatial).
+        //
+        // Correct: WHERE ((exact_case) OR (upper_case)) AND data_type IN (...)
+        // Wrong:   WHERE (exact_case) OR (upper_case) AND data_type IN (...)
+        //          (due to AND binding tighter than OR, this becomes:
+        //           WHERE (exact_case) OR ((upper_case) AND data_type IN (...))
+        //           which means exact_case matches ALL columns!)
+
+        let query = build_spatial_check_query("mydb", "myschema", "mytable");
+        let normalized = query.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        // The query structure should be:
+        // WHERE (( ... ) OR ( ... )) AND data_type
+        // Look for the pattern: closing the OR group "))" followed by "AND data_type"
+
+        // Find where "OR" appears and verify the structure around it
+        let or_pos = normalized.find(" OR ").expect("Query should contain OR");
+        let and_data_type_pos = normalized
+            .find("AND data_type")
+            .expect("Query should contain AND data_type");
+
+        // Between OR and AND data_type, we need to close out the OR group
+        let between = &normalized[or_pos..and_data_type_pos];
+
+        // The buggy version has: "OR (UPPER(...)) AND data_type"
+        // The fixed version has: "OR (UPPER(...))) AND data_type"
+        // The difference is the extra ")" that closes the outer group containing both OR branches
+
+        // Count parentheses between OR and AND data_type
+        // In the fixed version, there should be more closing parens than opening
+        // because we close both the UPPER() clause AND the outer grouping
+        let open_parens = between.matches('(').count();
+        let close_parens = between.matches(')').count();
+
+        assert!(
+            close_parens > open_parens,
+            "After OR clause, there should be more closing parens than opening (to close the outer OR group). \
+             Found {} open, {} close in segment: '{}'\nFull query: {}",
+            open_parens,
+            close_parens,
+            between,
+            normalized
+        );
     }
 }
