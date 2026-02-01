@@ -343,10 +343,12 @@ fn build_fetch_query(
                 escaped_table
             ))
         } else {
-            // Fall back to SELECT * — geometry will arrive in DuckDB's internal format
-            Ok(format!(
-                "SELECT * FROM \"{}\".\"{}\"",
-                escaped_schema, escaped_table
+            // Cannot safely fetch spatial columns without ST_AsBinary — the geometry data
+            // would be in DuckDB's internal format (not WKB), but downstream code
+            // (GeoParquet writer, spatial functions) would incorrectly treat it as WKB.
+            Err(DataFetchError::Query(
+                "Table contains spatial columns but the DuckDB spatial extension is not functional. \
+                 Cannot fetch geometry data without ST_AsBinary() support.".to_string()
             ))
         }
     } else {
@@ -918,21 +920,85 @@ mod tests {
     }
 
     #[test]
-    fn test_build_fetch_query_spatial_fallback() {
-        // When spatial extension is not functional, build_fetch_query should
-        // fall back to SELECT * instead of failing with ST_AsBinary
+    fn test_build_fetch_query_no_spatial_columns() {
+        // When there are no spatial columns, build_fetch_query returns SELECT *
         let conn = Connection::open_in_memory().unwrap();
 
-        // Create a table that looks like it has spatial columns via information_schema
-        // but WITHOUT loading spatial — simulates the bundled crate limitation
         conn.execute_batch(
             "CREATE SCHEMA test_schema; \
-             CREATE TABLE test_schema.fallback_test (id INTEGER, name VARCHAR);",
+             CREATE TABLE test_schema.regular_test (id INTEGER, name VARCHAR);",
         )
         .unwrap();
 
         // No spatial columns → SELECT *
-        let query = build_fetch_query(&conn, "test_schema", "fallback_test").unwrap();
-        assert_eq!(query, "SELECT * FROM \"test_schema\".\"fallback_test\"");
+        let query = build_fetch_query(&conn, "test_schema", "regular_test").unwrap();
+        assert_eq!(query, "SELECT * FROM \"test_schema\".\"regular_test\"");
+    }
+
+    #[test]
+    fn test_build_fetch_query_errors_when_spatial_unavailable() {
+        // When a table has spatial columns but ST_AsBinary is not available,
+        // build_fetch_query should return an error (not silently fall back to SELECT *).
+        //
+        // Falling back to SELECT * would produce DuckDB's internal geometry format
+        // instead of WKB, but downstream code would treat it as WKB, causing corruption.
+        //
+        // This test uses a file-based database to simulate the cross-connection scenario
+        // where spatial extension may not load properly on the fetch connection.
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.duckdb");
+
+        // Connection 1: Create a geometry table WITH spatial extension
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let has_spatial = conn.execute_batch("INSTALL spatial; LOAD spatial;").is_ok()
+                && conn.prepare("SELECT ST_AsBinary(ST_Point(0,0))").is_ok();
+
+            if !has_spatial {
+                // Skip test if spatial extension not available at all
+                return;
+            }
+
+            conn.execute_batch(
+                "CREATE SCHEMA geo_schema; \
+                 CREATE TABLE geo_schema.geo_table (id INTEGER, geom GEOMETRY);",
+            )
+            .unwrap();
+        }
+        // Connection 1 dropped
+
+        // Connection 2: Open WITHOUT loading spatial, try to build fetch query
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            // Intentionally NOT loading spatial extension
+
+            // The table has a GEOMETRY column (detected via information_schema),
+            // but ST_AsBinary is not available on this connection.
+            let result = build_fetch_query(&conn, "geo_schema", "geo_table");
+
+            // On systems where spatial doesn't persist across connections (bundled crate),
+            // this should error. On systems where it does persist, we get ST_AsBinary.
+            match result {
+                Ok(query) => {
+                    // If it succeeded, spatial must be working — verify ST_AsBinary is used
+                    assert!(
+                        query.contains("ST_AsBinary"),
+                        "If query succeeds, must use ST_AsBinary, got: {}",
+                        query
+                    );
+                }
+                Err(e) => {
+                    // Expected error when spatial extension isn't functional
+                    let msg = e.to_string();
+                    assert!(
+                        msg.contains("spatial") && msg.contains("ST_AsBinary"),
+                        "Error should mention spatial/ST_AsBinary: {}",
+                        msg
+                    );
+                }
+            }
+        }
     }
 }
