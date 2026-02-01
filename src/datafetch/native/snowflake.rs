@@ -317,9 +317,15 @@ pub async fn fetch_table(
     };
 
     // Build SELECT query with column expressions
+    // Guard against empty column list (can happen with case mismatch or permissions issues)
+    let select_clause = if column_exprs.is_empty() {
+        "*".to_string()
+    } else {
+        column_exprs.join(", ")
+    };
     let query = format!(
         r#"SELECT {} FROM "{}"."{}"."{}"#,
-        column_exprs.join(", "),
+        select_clause,
         database.replace('"', "\"\""),
         schema.replace('"', "\"\""),
         table.replace('"', "\"\"")
