@@ -280,12 +280,12 @@ pub async fn fetch_table(
         }
     };
 
-    // Query column info to detect spatial columns
+    // Query column info to detect spatial columns (case-insensitive to handle identifier casing)
     let schema_query = format!(
         r#"
         SELECT column_name, data_type
         FROM "{database}".information_schema.columns
-        WHERE table_schema = '{schema}' AND table_name = '{table}'
+        WHERE UPPER(table_schema) = UPPER('{schema}') AND UPPER(table_name) = UPPER('{table}')
         ORDER BY ordinal_position
         "#,
         database = database.replace('"', "\"\""),
@@ -325,15 +325,48 @@ pub async fn fetch_table(
                 exprs
             }
             _ => {
-                // Fallback to SELECT * if schema query fails
-                vec!["*".to_string()]
+                // Schema query returned no data
+                Vec::new()
             }
         }
     };
 
     // Build SELECT query with column expressions
-    // Guard against empty column list (can happen with case mismatch or permissions issues)
+    // Guard against empty column list which could silently skip ST_AsBinary wrapping
     let select_clause = if column_exprs.is_empty() {
+        // If schema query returned nothing, check if table has spatial columns with a separate query
+        // This handles edge cases like permissions issues where info_schema doesn't return columns
+        let spatial_check_query = format!(
+            r#"
+            SELECT COUNT(*) as cnt
+            FROM "{database}".information_schema.columns
+            WHERE UPPER(table_schema) = UPPER('{schema}')
+              AND UPPER(table_name) = UPPER('{table}')
+              AND data_type IN ('GEOGRAPHY', 'GEOMETRY')
+            "#,
+            database = database.replace('"', "\"\""),
+            schema = schema.replace('\'', "''"),
+            table = table.replace('\'', "''")
+        );
+
+        let has_spatial = match client.exec(&spatial_check_query).await {
+            Ok(QueryResult::Arrow(batches)) => batches.first().is_some_and(|b| {
+                if let Ok(converted) = convert_arrow_batch(b) {
+                    get_int_value(converted.column(0).as_ref(), 0).unwrap_or(0) > 0
+                } else {
+                    false
+                }
+            }),
+            _ => false,
+        };
+
+        if has_spatial {
+            return Err(DataFetchError::Query(
+                "Table contains spatial columns but column schema query returned no results. \
+                 Cannot fetch geometry data without ST_AsBinary() wrapping."
+                    .to_string(),
+            ));
+        }
         "*".to_string()
     } else {
         column_exprs.join(", ")
