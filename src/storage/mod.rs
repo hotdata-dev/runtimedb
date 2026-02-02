@@ -3,8 +3,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::SessionContext;
+use object_store::ObjectStore;
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::sync::Arc;
 
 pub mod filesystem;
 pub mod s3;
@@ -65,10 +67,18 @@ pub trait StorageManager: Debug + Send + Sync {
     // DataFusion integration
     fn register_with_datafusion(&self, ctx: &SessionContext) -> Result<()>;
 
-    /// Get object store configuration for liquid-cache registration.
-    /// Returns the object store URL and options (credentials) needed to register
-    /// with liquid-cache's server.
+    /// Get object store configuration for liquid-cache server registration.
+    /// Returns the object store URL and options (credentials) needed for the
+    /// liquid-cache server to build its own store instance.
     fn get_object_store_config(&self) -> Option<(ObjectStoreUrl, HashMap<String, String>)> {
+        None
+    }
+
+    /// Get the object store for local DataFusion registration and instrumentation.
+    /// Returns the pre-built store instance that can be wrapped with tracing.
+    /// This avoids rebuilding stores from config which can lose settings like
+    /// path-style URLs for MinIO.
+    fn get_object_store(&self) -> Option<(ObjectStoreUrl, Arc<dyn ObjectStore>)> {
         None
     }
 

@@ -17,9 +17,15 @@ use chrono::Utc;
 use datafusion::arrow::datatypes::Schema;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::AsyncCatalogProviderList;
+use datafusion::execution::object_store::ObjectStoreUrl;
+use datafusion::execution::runtime_env::RuntimeEnv;
+use datafusion::execution::SessionStateBuilder;
 use datafusion::prelude::*;
-use liquid_cache_client::LiquidCacheClientBuilder;
-use std::collections::HashSet;
+use datafusion_tracing::{instrument_with_info_spans, InstrumentationOptions};
+use instrumented_object_store::instrument_object_store;
+use liquid_cache_client::PushdownOptimizer;
+use object_store::ObjectStore;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -174,9 +180,8 @@ impl RuntimeEngine {
             let server = config.liquid_cache.server_address.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("liquid cache enabled but server_address not set")
             })?;
-            info!("Creating liquid cache builder for server: {}", server);
-            let liquid_cache_builder = LiquidCacheClientBuilder::new(server);
-            builder = builder.liquid_cache_builder(liquid_cache_builder);
+            info!("Enabling liquid cache with server: {}", server);
+            builder = builder.liquid_cache_server(server.clone());
         }
 
         // Pass cache config to builder
@@ -2276,7 +2281,7 @@ pub struct RuntimeEngineBuilder {
     deletion_worker_interval: Duration,
     parallel_refresh_count: usize,
     max_concurrent_persistence: usize,
-    liquid_cache_builder: Option<LiquidCacheClientBuilder>,
+    liquid_cache_server: Option<String>,
     cache_config: Option<crate::config::CacheConfig>,
     stale_result_cleanup_interval: Duration,
     stale_result_timeout: Duration,
@@ -2303,7 +2308,7 @@ impl RuntimeEngineBuilder {
             deletion_worker_interval: Duration::from_secs(DEFAULT_DELETION_WORKER_INTERVAL_SECS),
             parallel_refresh_count: DEFAULT_PARALLEL_REFRESH_COUNT,
             max_concurrent_persistence: DEFAULT_MAX_CONCURRENT_PERSISTENCE,
-            liquid_cache_builder: None,
+            liquid_cache_server: None,
             cache_config: None,
             stale_result_cleanup_interval: Duration::from_secs(
                 DEFAULT_STALE_RESULT_CLEANUP_INTERVAL_SECS,
@@ -2386,8 +2391,8 @@ impl RuntimeEngineBuilder {
 
     /// Configure liquid cache for distributed query caching.
     /// When enabled, queries are offloaded to a liquid-cache server for caching.
-    pub fn liquid_cache_builder(mut self, builder: LiquidCacheClientBuilder) -> Self {
-        self.liquid_cache_builder = Some(builder);
+    pub fn liquid_cache_server(mut self, server_address: String) -> Self {
+        self.liquid_cache_server = Some(server_address);
         self
     }
 
@@ -2484,21 +2489,19 @@ impl RuntimeEngineBuilder {
         // Step 5: Run migrations and set up DataFusion
         catalog.run_migrations().await?;
 
-        let df_ctx = if let Some(mut liquid_cache_builder) = self.liquid_cache_builder {
-            info!("Building liquid cache session context");
+        let df_ctx = {
+            // Get actual object stores for instrumentation (preserves full config like MinIO path-style)
+            let object_stores: Vec<_> = storage.get_object_store().into_iter().collect();
 
-            // Register object stores from storage config
-            if let Some((url, options)) = storage.get_object_store_config() {
-                info!("URL: {}, options: {:?}", url, options);
-                liquid_cache_builder = liquid_cache_builder.with_object_store(url, Some(options));
-            }
+            // Build liquid-cache config if server is configured
+            let liquid_cache_config = self.liquid_cache_server.map(|server| {
+                let store_configs: Vec<_> = storage.get_object_store_config().into_iter().collect();
+                (server, store_configs)
+            });
 
-            liquid_cache_builder.build(SessionConfig::new())?
-        } else {
-            let ctx = SessionContext::new();
-            // Register storage with DataFusion (when not using liquid cache)
-            storage.register_with_datafusion(&ctx)?;
-            ctx
+            // Build instrumented context - all object stores get tracing,
+            // liquid-cache adds the PushdownOptimizer if configured
+            build_instrumented_context(object_stores, liquid_cache_config)?
         };
 
         // Step 6: Initialize secret manager
@@ -2706,6 +2709,80 @@ async fn persist_result_background(
             Err(error)
         }
     }
+}
+
+// =========================================================================
+// Instrumented SessionContext Builder
+// =========================================================================
+
+/// Object store configuration for liquid-cache: URL and options (credentials, etc.)
+type ObjectStoreConfig = (ObjectStoreUrl, HashMap<String, String>);
+
+/// Liquid-cache configuration: server address and store configs for PushdownOptimizer
+type LiquidCacheConfig = (String, Vec<ObjectStoreConfig>);
+
+/// Builds an instrumented SessionContext with optional liquid-cache support.
+///
+/// This function creates a SessionContext with full tracing instrumentation:
+///
+/// 1. **Object stores**: All provided stores are wrapped with `instrument_object_store()`
+///    for storage I/O tracing (uses actual store instances, not rebuilt from config)
+/// 2. **DataFusion operators**: Each operator gets a span via `datafusion-tracing`
+/// 3. **Liquid-cache optimizer**: When configured, adds the `PushdownOptimizer`
+///
+/// ## Arguments
+///
+/// * `object_stores` - Pre-built object stores to wrap with instrumentation. These are
+///   the actual store instances (e.g., from S3Storage), ensuring configuration like
+///   path-style URLs for MinIO is preserved.
+/// * `liquid_cache_config` - Optional (server_address, store_configs) for liquid-cache.
+///   The store configs are sent to the liquid-cache server so it can build matching stores.
+fn build_instrumented_context(
+    object_stores: Vec<(ObjectStoreUrl, Arc<dyn ObjectStore>)>,
+    liquid_cache_config: Option<LiquidCacheConfig>,
+) -> Result<SessionContext> {
+    let runtime_env = Arc::new(RuntimeEnv::default());
+
+    // Register instrumented object stores (using actual pre-built stores)
+    for (url, store) in object_stores {
+        let url_ref: &url::Url = url.as_ref();
+        let prefix = url_ref.scheme();
+        let instrumented_store = instrument_object_store(store, prefix);
+
+        info!(
+            url = %url.as_str(),
+            prefix = %prefix,
+            "Registering instrumented object store"
+        );
+        runtime_env.register_object_store(url.as_ref(), instrumented_store);
+    }
+
+    // Configure session (liquid-cache has specific recommended settings)
+    let session_config = if liquid_cache_config.is_some() {
+        SessionConfig::new()
+            .with_target_partitions(1)
+            .with_round_robin_repartition(false)
+    } else {
+        SessionConfig::new()
+    };
+
+    // Build SessionState with tracing instrumentation
+    let mut state_builder = SessionStateBuilder::new()
+        .with_config(session_config)
+        .with_runtime_env(runtime_env)
+        .with_default_features()
+        .with_physical_optimizer_rule(
+            instrument_with_info_spans!(options: InstrumentationOptions::default()),
+        );
+
+    // Add liquid-cache pushdown optimizer if configured
+    if let Some((server_address, store_configs)) = liquid_cache_config {
+        info!(server = %server_address, "Adding liquid-cache pushdown optimizer");
+        let pushdown_optimizer = PushdownOptimizer::new(server_address, store_configs);
+        state_builder = state_builder.with_physical_optimizer_rule(Arc::new(pushdown_optimizer));
+    }
+
+    Ok(SessionContext::from(state_builder.build()))
 }
 
 #[cfg(test)]
@@ -3078,5 +3155,43 @@ mod tests {
             engine.stale_result_cleanup_handle.lock().await.is_none(),
             "Cleanup worker handle should be None when disabled"
         );
+    }
+
+    #[tokio::test]
+    async fn test_instrumented_context_basic() {
+        let ctx = build_instrumented_context(vec![], None).unwrap();
+        assert!(ctx.state().config().target_partitions() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_instrumented_context_executes_sql() {
+        use datafusion::arrow::array::{Int64Array, StringArray};
+
+        let ctx = build_instrumented_context(vec![], None).unwrap();
+        let result = ctx
+            .sql("SELECT * FROM (VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')) AS t(id, name)")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 1);
+        let batch = &result[0];
+        assert_eq!(batch.num_rows(), 3);
+
+        let id_col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(id_col.value(0), 1);
+
+        let name_col = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(name_col.value(0), "Alice");
     }
 }
