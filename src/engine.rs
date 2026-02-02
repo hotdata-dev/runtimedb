@@ -2029,9 +2029,6 @@ impl RuntimeEngine {
             );
         }
 
-        // Invalidate the cached table provider
-        self.invalidate_dataset_cache(&deleted.table_name);
-
         Ok(())
     }
 
@@ -2109,27 +2106,12 @@ impl RuntimeEngine {
             return Err(DatasetError::NotFound(id.to_string()));
         }
 
-        // Invalidate cache for the old table name if it changed
-        if table_name != old_table_name {
-            self.invalidate_dataset_cache(&old_table_name);
-        }
-
         // Fetch and return updated dataset
         self.catalog
             .get_dataset(id)
             .await
             .map_err(DatasetError::Catalog)?
             .ok_or_else(|| DatasetError::NotFound(id.to_string()))
-    }
-
-    /// Invalidate the cached table provider for a dataset.
-    /// This should be called when a dataset is deleted or its table_name is changed.
-    ///
-    /// Note: With async catalog providers, tables are resolved on-demand without caching,
-    /// so this method is now a no-op. It's kept for API compatibility.
-    #[allow(unused_variables)]
-    pub fn invalidate_dataset_cache(&self, table_name: &str) {
-        // No-op: async providers resolve tables on-demand without caching
     }
 
     /// Start background task that processes pending deletions periodically.
