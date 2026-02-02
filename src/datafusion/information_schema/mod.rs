@@ -4,20 +4,29 @@ mod tables;
 use crate::catalog::CatalogManager;
 use async_trait::async_trait;
 use columns::ColumnsTableProvider;
-use datafusion::catalog::SchemaProvider;
+use datafusion::catalog::AsyncSchemaProvider;
 use datafusion::datasource::TableProvider;
-use std::any::Any;
+use datafusion::error::Result;
+use std::fmt::Debug;
 use std::sync::Arc;
 use tables::TablesTableProvider;
 
-/// Schema provider for `runtimedb.information_schema`.
+/// Async schema provider for `runtimedb.information_schema`.
 ///
 /// Provides virtual tables that expose metadata about all registered
 /// connections, schemas, and tables in the RuntimeDB instance.
-#[derive(Debug)]
 pub struct InformationSchemaProvider {
     tables: Arc<TablesTableProvider>,
     columns: Arc<ColumnsTableProvider>,
+}
+
+impl Debug for InformationSchemaProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InformationSchemaProvider")
+            .field("tables", &"TablesTableProvider")
+            .field("columns", &"ColumnsTableProvider")
+            .finish()
+    }
 }
 
 impl InformationSchemaProvider {
@@ -30,24 +39,12 @@ impl InformationSchemaProvider {
 }
 
 #[async_trait]
-impl SchemaProvider for InformationSchemaProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn table_names(&self) -> Vec<String> {
-        vec!["tables".to_string(), "columns".to_string()]
-    }
-
-    async fn table(&self, name: &str) -> datafusion::error::Result<Option<Arc<dyn TableProvider>>> {
+impl AsyncSchemaProvider for InformationSchemaProvider {
+    async fn table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>> {
         match name {
             "tables" => Ok(Some(self.tables.clone())),
             "columns" => Ok(Some(self.columns.clone())),
             _ => Ok(None),
         }
-    }
-
-    fn table_exist(&self, name: &str) -> bool {
-        matches!(name, "tables" | "columns")
     }
 }
