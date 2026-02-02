@@ -1,70 +1,56 @@
 use super::results_schema::ResultsSchemaProvider;
 use crate::catalog::CatalogManager;
 use async_trait::async_trait;
-use datafusion::catalog::{CatalogProvider, SchemaProvider};
+use datafusion::catalog::{AsyncCatalogProvider, AsyncSchemaProvider};
 use datafusion::error::Result;
 use datafusion::prelude::SessionContext;
-use std::any::Any;
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::fmt::Debug;
+use std::sync::Arc;
 
-/// Virtual catalog provider for internal RuntimeDB system objects.
+/// Async catalog provider for internal RuntimeDB system objects.
 ///
 /// This catalog provides access to system schemas like `results` and `information_schema`
-/// that expose internal RuntimeDB data. Schemas are registered dynamically via
-/// `register_schema()`.
-#[derive(Debug)]
+/// that expose internal RuntimeDB data.
 pub struct RuntimeDbCatalogProvider {
-    schemas: RwLock<HashMap<String, Arc<dyn SchemaProvider>>>,
+    results_schema: Arc<ResultsSchemaProvider>,
+    information_schema: Option<Arc<dyn AsyncSchemaProvider>>,
+}
+
+impl Debug for RuntimeDbCatalogProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeDbCatalogProvider")
+            .field("results_schema", &"...")
+            .field("information_schema", &self.information_schema.is_some())
+            .finish()
+    }
 }
 
 impl RuntimeDbCatalogProvider {
-    /// Create a new RuntimeDbCatalogProvider with the results schema pre-registered.
+    /// Create a new RuntimeDbCatalogProvider with the results schema.
     ///
     /// The `ctx` parameter is used to share the RuntimeEnv (including object stores like S3)
     /// with the results schema provider for schema inference.
     pub fn new(catalog: Arc<dyn CatalogManager>, ctx: &SessionContext) -> Self {
-        let mut schemas = HashMap::new();
-        schemas.insert(
-            "results".to_string(),
-            Arc::new(ResultsSchemaProvider::with_runtime_env(catalog, ctx))
-                as Arc<dyn SchemaProvider>,
-        );
         Self {
-            schemas: RwLock::new(schemas),
+            results_schema: Arc::new(ResultsSchemaProvider::with_runtime_env(catalog, ctx)),
+            information_schema: None,
         }
+    }
+
+    /// Register the information_schema provider.
+    pub fn with_information_schema(mut self, schema: Arc<dyn AsyncSchemaProvider>) -> Self {
+        self.information_schema = Some(schema);
+        self
     }
 }
 
 #[async_trait]
-impl CatalogProvider for RuntimeDbCatalogProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn schema_names(&self) -> Vec<String> {
-        self.schemas
-            .read()
-            .expect("schema lock poisoned")
-            .keys()
-            .cloned()
-            .collect()
-    }
-
-    fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
-        self.schemas
-            .read()
-            .expect("schema lock poisoned")
-            .get(name)
-            .cloned()
-    }
-
-    fn register_schema(
-        &self,
-        name: &str,
-        schema: Arc<dyn SchemaProvider>,
-    ) -> Result<Option<Arc<dyn SchemaProvider>>> {
-        let mut schemas = self.schemas.write().expect("schema lock poisoned");
-        Ok(schemas.insert(name.to_string(), schema))
+impl AsyncCatalogProvider for RuntimeDbCatalogProvider {
+    async fn schema(&self, name: &str) -> Result<Option<Arc<dyn AsyncSchemaProvider>>> {
+        match name {
+            "results" => Ok(Some(self.results_schema.clone())),
+            "information_schema" => Ok(self.information_schema.clone()),
+            _ => Ok(None),
+        }
     }
 }

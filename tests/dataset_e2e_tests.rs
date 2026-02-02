@@ -1207,9 +1207,6 @@ async fn test_corrupted_schema_falls_back_to_parquet_inference() {
 
     pool.close().await;
 
-    // Invalidate the cache so we force a re-read
-    engine.invalidate_dataset_cache("test_table");
-
     // Query should still work due to fallback to parquet schema inference
     let result = engine
         .execute_query(&format!(

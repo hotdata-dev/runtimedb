@@ -4,10 +4,7 @@ use crate::catalog::{
 };
 use crate::datafetch::native::StreamingParquetWriter;
 use crate::datafetch::{BatchWriter, FetchOrchestrator, NativeFetcher};
-use crate::datafusion::{
-    block_on, DatasetsCatalogProvider, InformationSchemaProvider, RuntimeCatalogProvider,
-    RuntimeDbCatalogProvider,
-};
+use crate::datafusion::UnifiedCatalogList;
 use crate::http::models::{
     ConnectionRefreshResult, ConnectionSchemaError, RefreshWarning, SchemaRefreshResult,
     TableRefreshError, TableRefreshResult,
@@ -19,7 +16,7 @@ use anyhow::Result;
 use chrono::Utc;
 use datafusion::arrow::datatypes::Schema;
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::catalog::CatalogProvider;
+use datafusion::catalog::AsyncCatalogProviderList;
 use datafusion::prelude::*;
 use liquid_cache_client::LiquidCacheClientBuilder;
 use std::collections::HashSet;
@@ -103,6 +100,8 @@ pub struct RuntimeEngine {
     storage: Arc<dyn StorageManager>,
     orchestrator: Arc<FetchOrchestrator>,
     secret_manager: Arc<SecretManager>,
+    /// Unified async catalog list for all catalogs (connections, datasets, runtimedb).
+    unified_catalog_list: Arc<UnifiedCatalogList>,
     shutdown_token: CancellationToken,
     deletion_worker_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     deletion_grace_period: Duration,
@@ -338,31 +337,10 @@ impl RuntimeEngine {
         &self.secret_manager
     }
 
-    /// Register all connections from the catalog store as DataFusion catalogs.
-    async fn register_existing_connections(&mut self) -> Result<()> {
-        let connections = self.catalog.list_connections().await?;
-
-        for conn in connections {
-            let source: Source = serde_json::from_str(&conn.config_json)?;
-
-            let catalog_provider = Arc::new(RuntimeCatalogProvider::new(
-                conn.id.clone(),
-                conn.name.clone(),
-                Arc::new(source),
-                self.catalog.clone(),
-                self.orchestrator.clone(),
-            )) as Arc<dyn CatalogProvider>;
-
-            self.df_ctx.register_catalog(&conn.name, catalog_provider);
-        }
-
-        Ok(())
-    }
-
     /// Register a connection without discovering tables.
     ///
-    /// This persists the connection config to the catalog and registers it with DataFusion,
-    /// but does not attempt to connect to the remote database or discover tables.
+    /// This persists the connection config to the catalog metadata store.
+    /// The connection catalog will be resolved on-demand during query execution.
     /// Use `refresh_schema()` to discover tables after registration.
     ///
     /// The Source should already contain a Credential with the secret ID if authentication
@@ -388,23 +366,8 @@ impl RuntimeEngine {
             .add_connection(name, source_type, &config_json, secret_id.as_deref())
             .await?;
 
-        // Get the connection to retrieve info for RuntimeCatalogProvider
-        let conn = self
-            .catalog
-            .get_connection(&connection_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Connection not found after creation"))?;
-
-        // Register with DataFusion (empty catalog - no tables yet)
-        let catalog_provider = Arc::new(RuntimeCatalogProvider::new(
-            conn.id.clone(),
-            name.to_string(),
-            Arc::new(source),
-            self.catalog.clone(),
-            self.orchestrator.clone(),
-        )) as Arc<dyn CatalogProvider>;
-
-        self.df_ctx.register_catalog(name, catalog_provider);
+        // Note: Connection catalogs are now resolved on-demand during query execution
+        // via the async ConnectionsCatalogList. No pre-registration with DataFusion needed.
 
         tracing::Span::current().record("runtimedb.connection_id", &connection_id);
         info!("Connection '{}' registered (discovery pending)", name);
@@ -445,6 +408,8 @@ impl RuntimeEngine {
     }
 
     /// Execute a SQL query and return the results.
+    /// This follows the official datafusion remote_catalog example
+    /// https://github.com/apache/datafusion/blob/main/datafusion-examples/examples/data_io/remote_catalog.rs
     #[tracing::instrument(
         name = "execute_query",
         skip(self, sql),
@@ -460,17 +425,55 @@ impl RuntimeEngine {
             tracing::Span::current().record("runtimedb.sql", sql);
         }
 
-        // Parse SQL and create logical plan
-        let df = self
-            .df_ctx
-            .sql(sql)
-            .instrument(tracing::info_span!("sql_to_dataframe"))
-            .await
+        let session_state = self.df_ctx.state();
+
+        // Step 1: Parse SQL into a statement
+        let dialect = session_state.config().options().sql_parser.dialect;
+        let statement = session_state.sql_to_statement(sql, &dialect).map_err(|e| {
+            error!("SQL parse error: {}", e);
+            e
+        })?;
+
+        // Step 2: Extract table references from the parsed SQL
+        let references = session_state
+            .resolve_table_references(&statement)
             .map_err(|e| {
-                error!("Error executing query: {}", e);
+                error!("Failed to resolve table references: {}", e);
                 e
             })?;
 
+        // Step 3: Resolve connection catalogs asynchronously
+        // This uses the async catalog providers to look up catalogs on-demand
+        // without blocking. The resolve() method returns a sync CatalogProviderList
+        // that has all needed catalogs pre-resolved.
+        let resolved_catalog_list = self
+            .unified_catalog_list
+            .resolve(&references, session_state.config())
+            .instrument(tracing::info_span!("resolve_catalogs"))
+            .await
+            .map_err(|e| {
+                error!("Failed to resolve catalogs: {}", e);
+                e
+            })?;
+
+        // Step 4: Clone context and register resolved catalogs
+        // Each query gets an isolated context to avoid concurrent queries
+        // interfering with each other's catalog registrations.
+        let query_ctx = self.df_ctx.clone();
+        query_ctx.register_catalog_list(resolved_catalog_list);
+        let session_state = query_ctx.state();
+
+        // Step 5: Plan and execute using the query-specific session state
+        let plan = session_state
+            .statement_to_plan(statement)
+            .instrument(tracing::info_span!("statement_to_plan"))
+            .await
+            .map_err(|e| {
+                error!("Planning error: {}", e);
+                e
+            })?;
+
+        let df = DataFrame::new(session_state, plan);
         let schema: Arc<Schema> = Arc::clone(df.schema().inner());
 
         // Execute physical plan and collect results
@@ -797,7 +800,7 @@ impl RuntimeEngine {
     )]
     pub async fn purge_connection(&self, connection_id: &str) -> Result<()> {
         // Get connection info (validates it exists)
-        let conn = self
+        let _conn = self
             .catalog
             .get_connection(connection_id)
             .await?
@@ -808,22 +811,10 @@ impl RuntimeEngine {
             .clear_connection_cache_metadata(connection_id)
             .await?;
 
-        // Step 2: Re-register the connection with fresh state
-        // This causes DataFusion to drop any open file handles to the cached files
-        let source: Source = serde_json::from_str(&conn.config_json)?;
+        // Note: Connection catalogs are resolved on-demand during query execution.
+        // The next query will resolve a fresh catalog without cached file references.
 
-        let catalog_provider = Arc::new(RuntimeCatalogProvider::new(
-            conn.id.clone(),
-            conn.name.clone(),
-            Arc::new(source),
-            self.catalog.clone(),
-            self.orchestrator.clone(),
-        )) as Arc<dyn CatalogProvider>;
-
-        // register_catalog replaces existing catalog with same name
-        self.df_ctx.register_catalog(&conn.name, catalog_provider);
-
-        // Step 3: Delete the physical files (now that DataFusion has released file handles)
+        // Step 2: Delete the physical files
         self.delete_connection_files(connection_id).await?;
 
         Ok(())
@@ -846,7 +837,7 @@ impl RuntimeEngine {
         table_name: &str,
     ) -> Result<()> {
         // Validate connection exists
-        let conn = self
+        let _conn = self
             .catalog
             .get_connection(connection_id)
             .await?
@@ -859,22 +850,10 @@ impl RuntimeEngine {
             .clear_table_cache_metadata(connection_id, schema_name, table_name)
             .await?;
 
-        // Step 2: Re-register the connection with fresh state
-        // This causes DataFusion to drop any open file handles to the cached files
-        let source: Source = serde_json::from_str(&conn.config_json)?;
+        // Note: Connection catalogs are resolved on-demand during query execution.
+        // The next query will resolve a fresh catalog without cached file references.
 
-        let catalog_provider = Arc::new(RuntimeCatalogProvider::new(
-            conn.id.clone(),
-            conn.name.clone(),
-            Arc::new(source),
-            self.catalog.clone(),
-            self.orchestrator.clone(),
-        )) as Arc<dyn CatalogProvider>;
-
-        // register_catalog replaces existing catalog with same name
-        self.df_ctx.register_catalog(&conn.name, catalog_provider);
-
-        // Step 3: Delete the physical files (now that DataFusion has released file handles)
+        // Step 2: Delete the physical files
         self.delete_table_files(&table_info).await?;
 
         Ok(())
@@ -2050,9 +2029,6 @@ impl RuntimeEngine {
             );
         }
 
-        // Invalidate the cached table provider
-        self.invalidate_dataset_cache(&deleted.table_name);
-
         Ok(())
     }
 
@@ -2130,31 +2106,12 @@ impl RuntimeEngine {
             return Err(DatasetError::NotFound(id.to_string()));
         }
 
-        // Invalidate cache for the old table name if it changed
-        if table_name != old_table_name {
-            self.invalidate_dataset_cache(&old_table_name);
-        }
-
         // Fetch and return updated dataset
         self.catalog
             .get_dataset(id)
             .await
             .map_err(DatasetError::Catalog)?
             .ok_or_else(|| DatasetError::NotFound(id.to_string()))
-    }
-
-    /// Invalidate the cached table provider for a dataset.
-    /// This should be called when a dataset is deleted or its table_name is changed.
-    pub fn invalidate_dataset_cache(&self, table_name: &str) {
-        use crate::datafusion::DatasetsSchemaProvider;
-
-        if let Some(catalog) = self.df_ctx.catalog("datasets") {
-            if let Some(schema) = catalog.schema(crate::datasets::DEFAULT_SCHEMA) {
-                if let Some(provider) = schema.as_any().downcast_ref::<DatasetsSchemaProvider>() {
-                    provider.invalidate_cache(table_name);
-                }
-            }
-        }
     }
 
     /// Start background task that processes pending deletions periodically.
@@ -2277,8 +2234,8 @@ impl Drop for RuntimeEngine {
         // Signal workers to stop (deletion worker, stale result cleanup worker)
         self.shutdown_token.cancel();
 
-        // Ensure catalog connection is closed when engine is dropped
-        let _ = block_on(self.catalog.close());
+        // Note: Call engine.shutdown().await explicitly before dropping for proper cleanup.
+        // The catalog connection will be cleaned up when its Arc is dropped.
     }
 }
 
@@ -2609,12 +2566,21 @@ impl RuntimeEngineBuilder {
         // Initialize catalog (starts warmup loop if configured)
         catalog.init().await?;
 
-        let mut engine = RuntimeEngine {
+        // Create the unified async catalog list for all catalogs
+        // This handles connections, datasets, and runtimedb catalogs
+        let unified_catalog_list = Arc::new(UnifiedCatalogList::new(
+            catalog.clone(),
+            orchestrator.clone(),
+            &df_ctx,
+        ));
+
+        let engine = RuntimeEngine {
             catalog,
             df_ctx,
             storage,
             orchestrator,
             secret_manager,
+            unified_catalog_list,
             shutdown_token,
             deletion_worker_handle: Mutex::new(Some(deletion_worker_handle)),
             deletion_grace_period: self.deletion_grace_period,
@@ -2625,29 +2591,8 @@ impl RuntimeEngineBuilder {
             stale_result_cleanup_handle: Mutex::new(stale_result_cleanup_handle),
         };
 
-        // Register all existing connections as DataFusion catalogs
-        engine.register_existing_connections().await?;
-
-        // Register the runtimedb virtual catalog for system metadata and results
-        // Pass df_ctx so the results schema can access registered object stores (S3, etc.)
-        let runtimedb_catalog = Arc::new(RuntimeDbCatalogProvider::new(
-            engine.catalog.clone(),
-            &engine.df_ctx,
-        ));
-        runtimedb_catalog.register_schema(
-            "information_schema",
-            Arc::new(InformationSchemaProvider::new(engine.catalog.clone())),
-        )?;
-        engine
-            .df_ctx
-            .register_catalog("runtimedb", runtimedb_catalog);
-
-        // Register the datasets catalog for user-uploaded datasets
-        let datasets_catalog = Arc::new(DatasetsCatalogProvider::with_runtime_env(
-            engine.catalog.clone(),
-            &engine.df_ctx,
-        ));
-        engine.df_ctx.register_catalog("datasets", datasets_catalog);
+        // Note: All catalogs (connections, datasets, runtimedb) are now resolved on-demand
+        // during query execution via the unified AsyncCatalogProviderList.
 
         // Process any pending deletions from previous runs
         if let Err(e) = engine.process_pending_deletions().await {
