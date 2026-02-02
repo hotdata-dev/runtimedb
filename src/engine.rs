@@ -408,6 +408,8 @@ impl RuntimeEngine {
     }
 
     /// Execute a SQL query and return the results.
+    /// This follows the official datafusion remote_catalog example
+    /// https://github.com/apache/datafusion/blob/main/datafusion-examples/examples/data_io/remote_catalog.rs
     #[tracing::instrument(
         name = "execute_query",
         skip(self, sql),
@@ -454,17 +456,14 @@ impl RuntimeEngine {
                 e
             })?;
 
-        // Step 4: Register resolved catalogs into the session context
-        // All catalogs (runtimedb, datasets, connections) are resolved on-demand
-        // and registered here for this query's execution.
-        self.df_ctx.register_catalog_list(resolved_catalog_list);
+        // Step 4: Clone context and register resolved catalogs
+        // Each query gets an isolated context to avoid concurrent queries
+        // interfering with each other's catalog registrations.
+        let query_ctx = self.df_ctx.clone();
+        query_ctx.register_catalog_list(resolved_catalog_list);
+        let session_state = query_ctx.state();
 
-        // Step 5: Refresh session state to include newly registered catalogs
-        // The previous session_state was captured before catalog resolution,
-        // so it doesn't see the catalogs we just registered.
-        let session_state = self.df_ctx.state();
-
-        // Step 6: Plan and execute using the session state with registered catalogs
+        // Step 5: Plan and execute using the query-specific session state
         let plan = session_state
             .statement_to_plan(statement)
             .instrument(tracing::info_span!("statement_to_plan"))
