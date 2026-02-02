@@ -38,10 +38,7 @@ impl RuntimeDbCatalogProvider {
     }
 
     /// Register the information_schema provider.
-    pub fn with_information_schema(
-        mut self,
-        schema: Arc<dyn AsyncSchemaProvider>,
-    ) -> Self {
+    pub fn with_information_schema(mut self, schema: Arc<dyn AsyncSchemaProvider>) -> Self {
         self.information_schema = Some(schema);
         self
     }

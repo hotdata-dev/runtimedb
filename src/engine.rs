@@ -440,13 +440,11 @@ impl RuntimeEngine {
         let session_state = self.df_ctx.state();
 
         // Step 1: Parse SQL into a statement
-        let dialect = session_state.config().options().sql_parser.dialect.clone();
-        let statement = session_state
-            .sql_to_statement(sql, &dialect)
-            .map_err(|e| {
-                error!("SQL parse error: {}", e);
-                e
-            })?;
+        let dialect = session_state.config().options().sql_parser.dialect;
+        let statement = session_state.sql_to_statement(sql, &dialect).map_err(|e| {
+            error!("SQL parse error: {}", e);
+            e
+        })?;
 
         // Step 2: Extract table references from the parsed SQL
         let references = session_state
