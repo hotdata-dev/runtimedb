@@ -474,13 +474,13 @@ impl RuntimeEngine {
         // All catalogs (runtimedb, datasets, connections) are resolved on-demand
         // and registered here for this query's execution.
         self.df_ctx.register_catalog_list(resolved_catalog_list);
-        // for catalog_name in resolved_catalog_list.catalog_names() {
-        //     if let Some(catalog) = resolved_catalog_list.catalog(&catalog_name) {
-        //         self.df_ctx.register_catalog(&catalog_name, catalog);
-        //     }
-        // }
 
-        // Step 5: Plan and execute using the session state with registered catalogs
+        // Step 5: Refresh session state to include newly registered catalogs
+        // The previous session_state was captured before catalog resolution,
+        // so it doesn't see the catalogs we just registered.
+        let session_state = self.df_ctx.state();
+
+        // Step 6: Plan and execute using the session state with registered catalogs
         let plan = session_state
             .statement_to_plan(statement)
             .instrument(tracing::info_span!("statement_to_plan"))
