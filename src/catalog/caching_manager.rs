@@ -147,7 +147,7 @@ impl CachingCatalogManager {
     }
 
     /// Read from cache with fallback to inner catalog.
-    #[tracing::instrument(name = "cache_read", skip(self, fetch))]
+    #[tracing::instrument(name = "cache_read", skip(self, fetch), fields(cache_hit = tracing::field::Empty))]
     async fn cached_read<T, F, Fut>(&self, key: &str, fetch: F) -> Result<T>
     where
         T: Serialize + DeserializeOwned,
@@ -160,7 +160,10 @@ impl CachingCatalogManager {
             Ok(Some(json)) => {
                 // Deserialize cached entry
                 match serde_json::from_str::<CachedEntry<T>>(&json) {
-                    Ok(entry) => return Ok(entry.data),
+                    Ok(entry) => {
+                        tracing::Span::current().record("cache_hit", true);
+                        return Ok(entry.data);
+                    }
                     Err(e) => {
                         // Corrupted cache entry - log and treat as miss
                         warn!("cache: failed to deserialize {}: {}", key, e);
@@ -175,6 +178,8 @@ impl CachingCatalogManager {
                 warn!("cache: redis get failed for {}: {}", key, e);
             }
         }
+
+        tracing::Span::current().record("cache_hit", false);
 
         // Fetch from inner catalog
         let data = fetch().await?;
@@ -496,6 +501,7 @@ impl CatalogManager for CachingCatalogManager {
     // Lifecycle methods
     // ─────────────────────────────────────────────────────────────────────────
 
+    #[tracing::instrument(name = "catalog.init", skip(self))]
     async fn init(&self) -> Result<()> {
         // Start refresh loop if configured (guard against duplicate calls)
         if self.config().refresh_interval_secs > 0 {
@@ -515,6 +521,7 @@ impl CatalogManager for CachingCatalogManager {
         Ok(())
     }
 
+    #[tracing::instrument(name = "catalog.close", skip(self))]
     async fn close(&self) -> Result<()> {
         // Signal shutdown to refresh loop
         self.state.shutdown_token.cancel();
@@ -536,6 +543,7 @@ impl CatalogManager for CachingCatalogManager {
         self.inner().run_migrations().await
     }
 
+    #[tracing::instrument(name = "catalog.add_connection", skip(self, config_json))]
     async fn add_connection(
         &self,
         name: &str,
@@ -562,6 +570,7 @@ impl CatalogManager for CachingCatalogManager {
         Ok(id)
     }
 
+    #[tracing::instrument(name = "catalog.add_table", skip(self, arrow_schema_json))]
     async fn add_table(
         &self,
         connection_id: &str,
@@ -604,6 +613,7 @@ impl CatalogManager for CachingCatalogManager {
         Ok(id)
     }
 
+    #[tracing::instrument(name = "catalog.update_table_sync", skip(self))]
     async fn update_table_sync(&self, table_id: i32, parquet_path: &str) -> Result<()> {
         self.inner()
             .update_table_sync(table_id, parquet_path)
@@ -628,6 +638,7 @@ impl CatalogManager for CachingCatalogManager {
         Ok(())
     }
 
+    #[tracing::instrument(name = "catalog.clear_table_cache_metadata", skip(self))]
     async fn clear_table_cache_metadata(
         &self,
         connection_id: &str,
@@ -658,6 +669,7 @@ impl CatalogManager for CachingCatalogManager {
         Ok(table)
     }
 
+    #[tracing::instrument(name = "catalog.clear_connection_cache_metadata", skip(self))]
     async fn clear_connection_cache_metadata(&self, connection_id: &str) -> Result<()> {
         self.inner()
             .clear_connection_cache_metadata(connection_id)
@@ -684,6 +696,7 @@ impl CatalogManager for CachingCatalogManager {
         Ok(())
     }
 
+    #[tracing::instrument(name = "catalog.delete_connection", skip(self))]
     async fn delete_connection(&self, connection_id: &str) -> Result<()> {
         // Fetch connection info before deletion (needed for name-based cache key)
         let conn_info = self.inner().get_connection(connection_id).await?;
@@ -855,6 +868,7 @@ impl CatalogManager for CachingCatalogManager {
 
     // Dataset management methods (with cache invalidation for list_dataset_table_names)
 
+    #[tracing::instrument(name = "catalog.create_dataset", skip(self, dataset), fields(dataset_id = %dataset.id))]
     async fn create_dataset(&self, dataset: &DatasetInfo) -> Result<()> {
         self.inner().create_dataset(dataset).await?;
 
@@ -887,6 +901,7 @@ impl CatalogManager for CachingCatalogManager {
         self.inner().list_all_datasets().await
     }
 
+    #[tracing::instrument(name = "catalog.update_dataset", skip(self))]
     async fn update_dataset(&self, id: &str, label: &str, table_name: &str) -> Result<bool> {
         // Get dataset before update to know which schema to invalidate
         let dataset = self.inner().get_dataset(id).await?;
@@ -901,6 +916,7 @@ impl CatalogManager for CachingCatalogManager {
         Ok(result)
     }
 
+    #[tracing::instrument(name = "catalog.delete_dataset", skip(self))]
     async fn delete_dataset(&self, id: &str) -> Result<Option<DatasetInfo>> {
         let deleted = self.inner().delete_dataset(id).await?;
 
@@ -916,12 +932,14 @@ impl CatalogManager for CachingCatalogManager {
     // Cached read methods
     // ─────────────────────────────────────────────────────────────────────────
 
+    #[tracing::instrument(name = "catalog.list_connections", skip(self))]
     async fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
         let key = self.key_conn_list();
         self.cached_read(&key, || self.inner().list_connections())
             .await
     }
 
+    #[tracing::instrument(name = "catalog.get_connection", skip(self))]
     async fn get_connection(&self, id: &str) -> Result<Option<ConnectionInfo>> {
         let key = self.key_conn_id(id);
         let id_owned = id.to_string();
@@ -929,6 +947,7 @@ impl CatalogManager for CachingCatalogManager {
             .await
     }
 
+    #[tracing::instrument(name = "catalog.get_connection_by_name", skip(self))]
     async fn get_connection_by_name(&self, name: &str) -> Result<Option<ConnectionInfo>> {
         let key = self.key_conn_name(name);
         let name_owned = name.to_string();
@@ -936,6 +955,7 @@ impl CatalogManager for CachingCatalogManager {
             .await
     }
 
+    #[tracing::instrument(name = "catalog.list_tables", skip(self))]
     async fn list_tables(&self, connection_id: Option<&str>) -> Result<Vec<TableInfo>> {
         let key = self.key_tbl_list(connection_id);
         let conn_id = connection_id.map(|s| s.to_string());
@@ -946,6 +966,7 @@ impl CatalogManager for CachingCatalogManager {
         .await
     }
 
+    #[tracing::instrument(name = "catalog.get_table", skip(self))]
     async fn get_table(
         &self,
         connection_id: &str,
@@ -960,6 +981,7 @@ impl CatalogManager for CachingCatalogManager {
             .await
     }
 
+    #[tracing::instrument(name = "catalog.list_dataset_table_names", skip(self))]
     async fn list_dataset_table_names(&self, schema_name: &str) -> Result<Vec<String>> {
         let key = self.key_tbl_names(schema_name);
         let schema = schema_name.to_string();
