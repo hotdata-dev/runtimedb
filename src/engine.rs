@@ -337,20 +337,6 @@ impl RuntimeEngine {
         &self.secret_manager
     }
 
-    /// Gracefully close the engine, stopping background workers and closing connections.
-    ///
-    /// This should be called before dropping the engine to ensure proper cleanup.
-    /// After calling close(), the engine should not be used for queries.
-    pub async fn close(&self) -> Result<()> {
-        // Signal workers to stop
-        self.shutdown_token.cancel();
-
-        // Close catalog connection
-        self.catalog.close().await?;
-
-        Ok(())
-    }
-
     /// Register a connection without discovering tables.
     ///
     /// This persists the connection config to the catalog metadata store.
@@ -2267,7 +2253,7 @@ impl Drop for RuntimeEngine {
         // Signal workers to stop (deletion worker, stale result cleanup worker)
         self.shutdown_token.cancel();
 
-        // Note: Call engine.close().await explicitly before dropping for proper cleanup.
+        // Note: Call engine.shutdown().await explicitly before dropping for proper cleanup.
         // The catalog connection will be cleaned up when its Arc is dropped.
     }
 }
