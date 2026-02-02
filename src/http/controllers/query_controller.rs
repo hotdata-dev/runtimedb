@@ -63,6 +63,7 @@ pub async fn query_handler(
 }
 
 /// Serialize record batches to columns, nullable flags, and rows for JSON response.
+#[tracing::instrument(name = "serialize_http_response", skip(schema, batches))]
 pub(crate) fn serialize_batches(
     schema: &Arc<Schema>,
     batches: &[RecordBatch],
