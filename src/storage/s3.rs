@@ -271,6 +271,11 @@ impl StorageManager for S3Storage {
         // Include custom endpoint if provided (for MinIO/S3-compatible)
         if let Some(endpoint) = &self.config.endpoint {
             options.insert("aws_endpoint".to_string(), endpoint.clone());
+            // MinIO requires path-style URLs (not virtual-hosted)
+            options.insert(
+                "aws_virtual_hosted_style_request".to_string(),
+                "false".to_string(),
+            );
         }
 
         // Set allow_http based on config
@@ -279,6 +284,11 @@ impl StorageManager for S3Storage {
         }
 
         Some((url, options))
+    }
+
+    fn get_object_store(&self) -> Option<(ObjectStoreUrl, Arc<dyn ObjectStore>)> {
+        let url = ObjectStoreUrl::parse(format!("s3://{}", self.bucket)).ok()?;
+        Some((url, self.store.clone()))
     }
 
     #[tracing::instrument(
