@@ -2038,6 +2038,10 @@ impl RuntimeEngine {
             .map_err(DatasetError::Catalog)?
             .ok_or_else(|| DatasetError::NotFound(id.to_string()))?;
 
+        if let Some(cache) = &self.parquet_cache {
+            cache.cache().invalidate_url(&deleted.parquet_url);
+        }
+
         // Schedule parquet directory deletion after grace period
         // parquet_url is the full file path (e.g., .../version/data.parquet)
         // but delete_prefix expects the directory, so strip the filename

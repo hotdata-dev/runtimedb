@@ -9,6 +9,7 @@ use datafusion::datasource::MemTable;
 use datafusion::datasource::TableProvider;
 use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::ExecutionPlan;
+use futures::FutureExt;
 use lru::LruCache;
 use tokio::sync::Semaphore;
 
@@ -134,37 +135,44 @@ impl InMemoryTableCache {
     }
 
     pub fn total_bytes(&self) -> u64 {
+        // Approximate size; updated without synchronization guarantees.
         self.total_bytes.load(Ordering::Relaxed)
     }
 
     pub fn get_ready(&self, key: &str) -> Option<Arc<MemTable>> {
         let mut cache = self.inner.lock().unwrap();
         let entry = cache.get_mut(key)?;
-        match &mut entry.state {
+        let should_evict = match &mut entry.state {
             CacheState::Ready {
-                table, last_access, ..
+                table,
+                bytes,
+                last_access,
             } => {
                 if let Some(ttl) = self.ttl {
                     if last_access.elapsed() > ttl {
-                        let bytes = match &entry.state {
-                            CacheState::Ready { bytes, .. } => *bytes,
-                            _ => 0,
-                        };
-                        cache.pop(key);
-                        self.total_bytes.fetch_sub(bytes, Ordering::Relaxed);
+                        self.total_bytes.fetch_sub(*bytes, Ordering::Relaxed);
                         tracing::debug!(
                             parquet_url = %key,
-                            bytes,
+                            bytes = *bytes,
                             "Mem cache entry expired"
                         );
-                        return None;
+                        true
+                    } else {
+                        *last_access = Instant::now();
+                        return Some(table.clone());
                     }
+                } else {
+                    *last_access = Instant::now();
+                    return Some(table.clone());
                 }
-                *last_access = Instant::now();
-                Some(table.clone())
             }
-            _ => None,
+            _ => return None,
+        };
+
+        if should_evict {
+            cache.pop(key);
         }
+        None
     }
 
     fn snapshot(&self, key: &str) -> Option<CacheStateSnapshot> {
@@ -569,21 +577,29 @@ impl ParquetCacheManager {
                 tokio::spawn(async move {
                     let _permit = permit;
                     let start = Instant::now();
-                    if let Err(err) = load_parquet_into_cache(
+                    let load_result = std::panic::AssertUnwindSafe(load_parquet_into_cache(
                         &cache,
                         storage.as_ref(),
                         &parquet_url,
                         schema_clone,
-                    )
-                    .await
-                    {
-                        cache.mark_failed(&parquet_url, err.to_string());
-                    } else {
-                        tracing::debug!(
-                            parquet_url = %parquet_url,
-                            load_ms = start.elapsed().as_millis() as u64,
-                            "Mem cache load completed"
-                        );
+                    ))
+                    .catch_unwind()
+                    .await;
+
+                    match load_result {
+                        Ok(Ok(())) => {
+                            tracing::debug!(
+                                parquet_url = %parquet_url,
+                                load_ms = start.elapsed().as_millis() as u64,
+                                "Mem cache load completed"
+                            );
+                        }
+                        Ok(Err(err)) => {
+                            cache.mark_failed(&parquet_url, err.to_string());
+                        }
+                        Err(_) => {
+                            cache.mark_failed(&parquet_url, "mem cache load panicked".to_string());
+                        }
                     }
                 });
             }
@@ -731,6 +747,8 @@ enum LoadResult {
 }
 
 fn normalize_parquet_file_url(url: &str) -> String {
+    // Supports both file:// and object store URLs. If a directory URL is provided,
+    // append the canonical parquet filename to match cache layout.
     if url.ends_with(".parquet") {
         return url.to_string();
     }
