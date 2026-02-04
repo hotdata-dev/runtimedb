@@ -5,7 +5,8 @@ use datafusion::error::Result;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use super::lazy_table_provider::LazyTableProvider;
+use super::lazy_table_provider::{LazyTableProvider, LazyTableProviderArgs};
+use super::ParquetCacheManager;
 use crate::catalog::CatalogManager;
 use crate::datafetch::{deserialize_arrow_schema, FetchOrchestrator};
 use crate::source::Source;
@@ -22,6 +23,7 @@ pub struct AsyncConnectionSchema {
     source: Arc<Source>,
     catalog: Arc<dyn CatalogManager>,
     orchestrator: Arc<FetchOrchestrator>,
+    cache_manager: Option<Arc<ParquetCacheManager>>,
 }
 
 impl AsyncConnectionSchema {
@@ -31,6 +33,7 @@ impl AsyncConnectionSchema {
         source: Arc<Source>,
         catalog: Arc<dyn CatalogManager>,
         orchestrator: Arc<FetchOrchestrator>,
+        cache_manager: Option<Arc<ParquetCacheManager>>,
     ) -> Self {
         Self {
             connection_id,
@@ -38,6 +41,7 @@ impl AsyncConnectionSchema {
             source,
             catalog,
             orchestrator,
+            cache_manager,
         }
     }
 }
@@ -79,15 +83,16 @@ impl AsyncSchemaProvider for AsyncConnectionSchema {
         })?;
 
         // Create LazyTableProvider for on-demand data fetching
-        let provider = Arc::new(LazyTableProvider::new(
+        let provider = Arc::new(LazyTableProvider::new(LazyTableProviderArgs {
             schema,
-            self.source.clone(),
-            self.catalog.clone(),
-            self.orchestrator.clone(),
-            self.connection_id.clone(),
-            self.schema_name.clone(),
-            name.to_string(),
-        )) as Arc<dyn TableProvider>;
+            source: self.source.clone(),
+            catalog: self.catalog.clone(),
+            orchestrator: self.orchestrator.clone(),
+            connection_id: self.connection_id.clone(),
+            schema_name: self.schema_name.clone(),
+            table_name: name.to_string(),
+            cache_manager: self.cache_manager.clone(),
+        })) as Arc<dyn TableProvider>;
 
         Ok(Some(provider))
     }

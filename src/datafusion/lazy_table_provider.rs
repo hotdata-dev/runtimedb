@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use crate::catalog::CatalogManager;
 use crate::datafetch::FetchOrchestrator;
+use crate::datafusion::{scan_parquet_exec, ParquetCacheManager};
 use crate::source::Source;
 
 /// A lazy table provider that defers data fetching until scan() is called.
@@ -26,71 +27,32 @@ pub struct LazyTableProvider {
     connection_id: String,
     schema_name: String,
     table_name: String,
+    cache_manager: Option<Arc<ParquetCacheManager>>,
+}
+
+pub struct LazyTableProviderArgs {
+    pub schema: SchemaRef,
+    pub source: Arc<Source>,
+    pub catalog: Arc<dyn CatalogManager>,
+    pub orchestrator: Arc<FetchOrchestrator>,
+    pub connection_id: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub cache_manager: Option<Arc<ParquetCacheManager>>,
 }
 
 impl LazyTableProvider {
-    pub fn new(
-        schema: SchemaRef,
-        source: Arc<Source>,
-        catalog: Arc<dyn CatalogManager>,
-        orchestrator: Arc<FetchOrchestrator>,
-        connection_id: String,
-        schema_name: String,
-        table_name: String,
-    ) -> Self {
+    pub fn new(args: LazyTableProviderArgs) -> Self {
         Self {
-            schema,
-            source,
-            catalog,
-            orchestrator,
-            connection_id,
-            schema_name,
-            table_name,
+            schema: args.schema,
+            source: args.source,
+            catalog: args.catalog,
+            orchestrator: args.orchestrator,
+            connection_id: args.connection_id,
+            schema_name: args.schema_name,
+            table_name: args.table_name,
+            cache_manager: args.cache_manager,
         }
-    }
-
-    /// Load a parquet file and return an ExecutionPlan.
-    /// Uses the catalog schema (self.schema) to ensure consistency with schema()
-    /// and proper projection index alignment.
-    #[tracing::instrument(
-        name = "load_parquet_exec",
-        skip(self, state, projection, filters, limit),
-        fields(runtimedb.parquet_url = %parquet_url)
-    )]
-    async fn load_parquet_exec(
-        &self,
-        parquet_url: &str,
-        state: &dyn Session,
-        projection: Option<&Vec<usize>>,
-        filters: &[Expr],
-        limit: Option<usize>,
-    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
-        use datafusion::datasource::file_format::parquet::ParquetFormat;
-        use datafusion::datasource::listing::{
-            ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
-        };
-
-        // Parse the URL - DataFusion handles both file:// and s3://
-        let table_path = ListingTableUrl::parse(parquet_url)
-            .map_err(|e| DataFusionError::External(format!("Failed to parse URL: {}", e).into()))?;
-
-        let file_format = ParquetFormat::default();
-        let listing_options = ListingOptions::new(Arc::new(file_format));
-
-        // Use the catalog schema (self.schema) to ensure consistency.
-        // This ensures projection indices from DataFusion align correctly since
-        // they're based on the schema returned by schema().
-        // The Parquet reader will match columns by name.
-        let config = ListingTableConfig::new(table_path)
-            .with_listing_options(listing_options)
-            .with_schema(self.schema.clone());
-
-        let table = ListingTable::try_new(config).map_err(|e| {
-            DataFusionError::External(format!("Failed to create ListingTable: {}", e).into())
-        })?;
-
-        // Create the scan execution plan with projection, filter, and limit pushdown
-        table.scan(state, projection, filters, limit).await
     }
 
     /// Fetch the table data and update catalog
@@ -171,9 +133,29 @@ impl TableProvider for LazyTableProvider {
 
         tracing::Span::current().record("runtimedb.cache_hit", cache_hit);
 
-        // Load the parquet file and create execution plan with projection, filter, and limit pushdown
-        self.load_parquet_exec(&parquet_url, state, projection, filters, limit)
+        // Scan using in-memory cache when available, otherwise fall back to parquet
+        if let Some(cache_manager) = &self.cache_manager {
+            cache_manager
+                .scan_with_cache(
+                    &parquet_url,
+                    self.schema.clone(),
+                    state,
+                    projection,
+                    filters,
+                    limit,
+                )
+                .await
+        } else {
+            scan_parquet_exec(
+                &parquet_url,
+                self.schema.clone(),
+                state,
+                projection,
+                filters,
+                limit,
+            )
             .await
+        }
     }
 
     fn supports_filters_pushdown(

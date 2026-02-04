@@ -33,6 +33,7 @@ axum = "0.8.7"
 tower = { version = "0.5.2", features = ["util"] }
 config = "0.15.19"
 tracing = "0.1"
+lru = "0.12"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }

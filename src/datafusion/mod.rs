@@ -4,8 +4,10 @@ mod connections_catalog_list;
 mod datasets_catalog;
 mod information_schema;
 mod lazy_table_provider;
+mod parquet_scan;
 mod results_schema;
 mod runtimedb_catalog;
+mod table_cache;
 
 pub use async_connection_catalog::AsyncConnectionCatalog;
 pub use async_connection_schema::AsyncConnectionSchema;
@@ -13,4 +15,6 @@ pub use connections_catalog_list::UnifiedCatalogList;
 pub use datasets_catalog::{DatasetsCatalogProvider, DatasetsSchemaProvider};
 pub use information_schema::InformationSchemaProvider;
 pub use lazy_table_provider::LazyTableProvider;
+pub use parquet_scan::scan_parquet_exec;
 pub use runtimedb_catalog::RuntimeDbCatalogProvider;
+pub use table_cache::{CachedParquetTableProvider, InMemoryTableCache, ParquetCacheManager};

@@ -100,6 +100,22 @@ pub struct EngineConfig {
     /// Default: 300 (5 minutes).
     #[serde(default = "default_stale_result_timeout_secs")]
     pub stale_result_timeout_secs: u64,
+
+    /// Max total bytes for in-memory table cache. Default: 4GB.
+    #[serde(default = "default_in_memory_cache_total_max_bytes")]
+    pub in_memory_cache_total_max_bytes: u64,
+
+    /// Max bytes for a single table in the in-memory cache. Default: 1GB.
+    #[serde(default = "default_in_memory_cache_table_max_bytes")]
+    pub in_memory_cache_table_max_bytes: u64,
+
+    /// TTL in seconds for in-memory table cache. 0 = no TTL. Default: 0.
+    #[serde(default)]
+    pub in_memory_cache_ttl_secs: u64,
+
+    /// Max concurrent background in-memory cache loads. Default: 10.
+    #[serde(default = "default_in_memory_cache_max_concurrent_loads")]
+    pub in_memory_cache_max_concurrent_loads: usize,
 }
 
 impl Default for EngineConfig {
@@ -108,6 +124,10 @@ impl Default for EngineConfig {
             max_concurrent_persistence: default_max_concurrent_persistence(),
             stale_result_cleanup_interval_secs: default_stale_result_cleanup_interval_secs(),
             stale_result_timeout_secs: default_stale_result_timeout_secs(),
+            in_memory_cache_total_max_bytes: default_in_memory_cache_total_max_bytes(),
+            in_memory_cache_table_max_bytes: default_in_memory_cache_table_max_bytes(),
+            in_memory_cache_ttl_secs: 0,
+            in_memory_cache_max_concurrent_loads: default_in_memory_cache_max_concurrent_loads(),
         }
     }
 }
@@ -122,6 +142,18 @@ fn default_stale_result_cleanup_interval_secs() -> u64 {
 
 fn default_stale_result_timeout_secs() -> u64 {
     300
+}
+
+fn default_in_memory_cache_total_max_bytes() -> u64 {
+    4 * 1024 * 1024 * 1024
+}
+
+fn default_in_memory_cache_table_max_bytes() -> u64 {
+    1024 * 1024 * 1024
+}
+
+fn default_in_memory_cache_max_concurrent_loads() -> usize {
+    10
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

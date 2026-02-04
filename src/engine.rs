@@ -4,7 +4,7 @@ use crate::catalog::{
 };
 use crate::datafetch::native::StreamingParquetWriter;
 use crate::datafetch::{BatchWriter, FetchOrchestrator, NativeFetcher};
-use crate::datafusion::UnifiedCatalogList;
+use crate::datafusion::{InMemoryTableCache, ParquetCacheManager, UnifiedCatalogList};
 use crate::http::models::{
     ConnectionRefreshResult, ConnectionSchemaError, RefreshWarning, SchemaRefreshResult,
     TableRefreshError, TableRefreshResult,
@@ -123,6 +123,7 @@ pub struct RuntimeEngine {
     persistence_tasks: Mutex<JoinSet<()>>,
     /// Handle for the stale result cleanup worker task.
     stale_result_cleanup_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    parquet_cache: Option<Arc<ParquetCacheManager>>,
 }
 
 impl RuntimeEngine {
@@ -194,6 +195,13 @@ impl RuntimeEngine {
         ));
         builder = builder
             .stale_result_timeout(Duration::from_secs(config.engine.stale_result_timeout_secs));
+        builder = builder
+            .in_memory_cache_total_max_bytes(config.engine.in_memory_cache_total_max_bytes)
+            .in_memory_cache_table_max_bytes(config.engine.in_memory_cache_table_max_bytes)
+            .in_memory_cache_ttl(Duration::from_secs(config.engine.in_memory_cache_ttl_secs))
+            .in_memory_cache_max_concurrent_loads(
+                config.engine.in_memory_cache_max_concurrent_loads,
+            );
 
         builder.build().await
     }
@@ -308,6 +316,10 @@ impl RuntimeEngine {
     async fn delete_connection_files(&self, connection_id: &str) -> Result<()> {
         let cache_prefix = self.storage.cache_prefix(connection_id);
 
+        if let Some(cache) = &self.parquet_cache {
+            cache.cache().invalidate_prefix(&cache_prefix);
+        }
+
         if let Err(e) = self.storage.delete_prefix(&cache_prefix).await {
             warn!("Failed to delete cache prefix {}: {}", cache_prefix, e);
         }
@@ -319,6 +331,9 @@ impl RuntimeEngine {
     async fn delete_table_files(&self, table_info: &TableInfo) -> Result<()> {
         // Delete versioned cache directory if it exists
         if let Some(parquet_path) = &table_info.parquet_path {
+            if let Some(cache) = &self.parquet_cache {
+                cache.cache().invalidate_url(parquet_path);
+            }
             if let Err(e) = self.storage.delete_prefix(parquet_path).await {
                 warn!("Failed to delete cache directory {}: {}", parquet_path, e);
             }
@@ -1153,6 +1168,9 @@ impl RuntimeEngine {
             .await?;
 
         if let Some(path) = old_path {
+            if let Some(cache) = &self.parquet_cache {
+                cache.cache().invalidate_url(&path);
+            }
             if let Err(e) = self.schedule_file_deletion(&path).await {
                 tracing::warn!(
                     schema = schema_name,
@@ -1266,6 +1284,9 @@ impl RuntimeEngine {
                     result.tables_refreshed += 1;
                     result.total_rows += rows_synced;
                     if let Some(path) = old_path {
+                        if let Some(cache) = &self.parquet_cache {
+                            cache.cache().invalidate_url(&path);
+                        }
                         if let Err(e) = self.schedule_file_deletion(&path).await {
                             tracing::warn!(
                                 schema = %schema_name,
@@ -2285,6 +2306,10 @@ pub struct RuntimeEngineBuilder {
     cache_config: Option<crate::config::CacheConfig>,
     stale_result_cleanup_interval: Duration,
     stale_result_timeout: Duration,
+    in_memory_cache_total_max_bytes: u64,
+    in_memory_cache_table_max_bytes: u64,
+    in_memory_cache_ttl: Duration,
+    in_memory_cache_max_concurrent_loads: usize,
 }
 
 impl Default for RuntimeEngineBuilder {
@@ -2314,6 +2339,10 @@ impl RuntimeEngineBuilder {
                 DEFAULT_STALE_RESULT_CLEANUP_INTERVAL_SECS,
             ),
             stale_result_timeout: Duration::from_secs(DEFAULT_STALE_RESULT_TIMEOUT_SECS),
+            in_memory_cache_total_max_bytes: 4 * 1024 * 1024 * 1024,
+            in_memory_cache_table_max_bytes: 1024 * 1024 * 1024,
+            in_memory_cache_ttl: Duration::from_secs(0),
+            in_memory_cache_max_concurrent_loads: 10,
         }
     }
 
@@ -2418,6 +2447,26 @@ impl RuntimeEngineBuilder {
         self
     }
 
+    pub fn in_memory_cache_total_max_bytes(mut self, bytes: u64) -> Self {
+        self.in_memory_cache_total_max_bytes = bytes;
+        self
+    }
+
+    pub fn in_memory_cache_table_max_bytes(mut self, bytes: u64) -> Self {
+        self.in_memory_cache_table_max_bytes = bytes;
+        self
+    }
+
+    pub fn in_memory_cache_ttl(mut self, ttl: Duration) -> Self {
+        self.in_memory_cache_ttl = ttl;
+        self
+    }
+
+    pub fn in_memory_cache_max_concurrent_loads(mut self, max: usize) -> Self {
+        self.in_memory_cache_max_concurrent_loads = max.max(1);
+        self
+    }
+
     /// Resolve the base directory, using default if not set.
     fn resolve_base_dir(&self) -> PathBuf {
         self.base_dir.clone().unwrap_or_else(|| {
@@ -2504,6 +2553,30 @@ impl RuntimeEngineBuilder {
             build_instrumented_context(object_stores, liquid_cache_config)?
         };
 
+        let parquet_cache = if self.in_memory_cache_total_max_bytes > 0
+            && self.in_memory_cache_table_max_bytes > 0
+        {
+            let ttl = if self.in_memory_cache_ttl.is_zero() {
+                None
+            } else {
+                Some(self.in_memory_cache_ttl)
+            };
+            let cache = Arc::new(InMemoryTableCache::new(
+                self.in_memory_cache_total_max_bytes,
+                self.in_memory_cache_table_max_bytes,
+                ttl,
+            ));
+            let warm_semaphore =
+                Arc::new(Semaphore::new(self.in_memory_cache_max_concurrent_loads));
+            Some(Arc::new(ParquetCacheManager::new(
+                cache,
+                storage.clone(),
+                warm_semaphore,
+            )))
+        } else {
+            None
+        };
+
         // Step 6: Initialize secret manager
         let (secret_key, using_default_key) = match self.secret_key {
             Some(key) => (key, false),
@@ -2575,6 +2648,7 @@ impl RuntimeEngineBuilder {
             catalog.clone(),
             orchestrator.clone(),
             &df_ctx,
+            parquet_cache.clone(),
         ));
 
         let engine = RuntimeEngine {
@@ -2592,6 +2666,7 @@ impl RuntimeEngineBuilder {
             persistence_semaphore: Arc::new(Semaphore::new(self.max_concurrent_persistence)),
             persistence_tasks: Mutex::new(JoinSet::new()),
             stale_result_cleanup_handle: Mutex::new(stale_result_cleanup_handle),
+            parquet_cache,
         };
 
         // Note: All catalogs (connections, datasets, runtimedb) are now resolved on-demand
