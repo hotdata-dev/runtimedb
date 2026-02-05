@@ -280,6 +280,7 @@ impl RuntimeEngine {
                         &secret_key,
                         region,
                         allow_http,
+                        config.storage.s3_compat,
                     )?))
                 } else if let (Some(access_key), Some(secret_key)) = (access_key, secret_key) {
                     // AWS S3 with explicit credentials from config/env
@@ -3025,6 +3026,7 @@ mod tests {
                 endpoint: None,
                 access_key: None,
                 secret_key: None,
+                s3_compat: false,
             },
             paths: PathsConfig {
                 base_dir: Some(base_dir.to_str().unwrap().to_string()),

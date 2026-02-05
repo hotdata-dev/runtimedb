@@ -54,6 +54,10 @@ pub struct StorageConfig {
     pub endpoint: Option<String>,
     pub access_key: Option<String>,
     pub secret_key: Option<String>,
+    /// Enable S3 compatibility layer for non-standard S3 backends (e.g. NVIDIA AIStore).
+    /// Wraps the object store to handle quirks like non-standard HTTP error codes.
+    #[serde(default)]
+    pub s3_compat: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

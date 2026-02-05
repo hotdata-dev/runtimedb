@@ -3,6 +3,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::SessionContext;
+use futures::stream::BoxStream;
 use futures::TryStreamExt;
 use object_store::aws::AmazonS3Builder;
 use object_store::buffered::BufWriter;
@@ -14,6 +15,130 @@ use tracing::warn;
 use url::Url;
 
 use super::{CacheWriteHandle, DatasetWriteHandle, StorageManager};
+
+/// ObjectStore wrapper that maps HTTP 400 errors to NotFound on `head()` calls.
+///
+/// Some S3-compatible stores (e.g. NVIDIA AIStore) return 400 Bad Request for HEAD
+/// on non-existent "directory" paths instead of 404. DataFusion expects 404 to
+/// distinguish files from directories when listing parquet tables.
+#[derive(Debug)]
+struct S3CompatObjectStore {
+    inner: Arc<dyn ObjectStore>,
+}
+
+impl std::fmt::Display for S3CompatObjectStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "S3CompatObjectStore({})", self.inner)
+    }
+}
+
+impl S3CompatObjectStore {
+    fn new(inner: Arc<dyn ObjectStore>) -> Self {
+        Self { inner }
+    }
+
+    /// Check if an object_store error is an HTTP 400 from the S3 backend.
+    fn is_http_400(err: &object_store::Error) -> bool {
+        let msg = err.to_string();
+        msg.contains("400 Bad Request") || msg.contains("status code: 400")
+    }
+}
+
+#[async_trait]
+impl ObjectStore for S3CompatObjectStore {
+    async fn put(
+        &self,
+        location: &ObjectPath,
+        payload: object_store::PutPayload,
+    ) -> object_store::Result<object_store::PutResult> {
+        self.inner.put(location, payload).await
+    }
+
+    async fn put_opts(
+        &self,
+        location: &ObjectPath,
+        payload: object_store::PutPayload,
+        opts: object_store::PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        self.inner.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart(
+        &self,
+        location: &ObjectPath,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        self.inner.put_multipart(location).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &ObjectPath,
+        opts: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        self.inner.put_multipart_opts(location, opts).await
+    }
+
+    async fn get(&self, location: &ObjectPath) -> object_store::Result<object_store::GetResult> {
+        self.inner.get(location).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &ObjectPath,
+        options: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        self.inner.get_opts(location, options).await
+    }
+
+    async fn head(&self, location: &ObjectPath) -> object_store::Result<object_store::ObjectMeta> {
+        match self.inner.head(location).await {
+            Ok(meta) => Ok(meta),
+            Err(e) if Self::is_http_400(&e) => Err(object_store::Error::NotFound {
+                path: location.to_string(),
+                source: e.into(),
+            }),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn delete(&self, location: &ObjectPath) -> object_store::Result<()> {
+        self.inner.delete(location).await
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> BoxStream<'static, object_store::Result<object_store::ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    fn list_with_offset(
+        &self,
+        prefix: Option<&ObjectPath>,
+        offset: &ObjectPath,
+    ) -> BoxStream<'static, object_store::Result<object_store::ObjectMeta>> {
+        self.inner.list_with_offset(prefix, offset)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy(&self, from: &ObjectPath, to: &ObjectPath) -> object_store::Result<()> {
+        self.inner.copy(from, to).await
+    }
+
+    async fn copy_if_not_exists(
+        &self,
+        from: &ObjectPath,
+        to: &ObjectPath,
+    ) -> object_store::Result<()> {
+        self.inner.copy_if_not_exists(from, to).await
+    }
+}
 
 /// Explicit credentials for S3 access (used for MinIO or explicit AWS credentials)
 #[derive(Debug, Clone)]
@@ -93,7 +218,11 @@ impl S3Storage {
         })
     }
 
-    /// Create S3Storage with custom endpoint for MinIO/S3-compatible storage
+    /// Create S3Storage with custom endpoint for MinIO/S3-compatible storage.
+    ///
+    /// Uses path-style URLs. When `s3_compat` is true, wraps the store with
+    /// S3CompatObjectStore to handle backends (e.g. NVIDIA AIStore) that return
+    /// non-standard HTTP error codes.
     pub fn new_with_endpoint(
         bucket: &str,
         endpoint: &str,
@@ -101,6 +230,7 @@ impl S3Storage {
         secret_key: &str,
         region: &str,
         allow_http: bool,
+        s3_compat: bool,
     ) -> Result<Self> {
         let builder = AmazonS3Builder::new()
             .with_bucket_name(bucket)
@@ -109,14 +239,19 @@ impl S3Storage {
             .with_secret_access_key(secret_key)
             .with_region(region)
             .with_allow_http(allow_http)
-            // For MinIO, we need to use path-style URLs
+            // For MinIO/AIStore, we need to use path-style URLs
             .with_virtual_hosted_style_request(false);
 
         let store = builder.build()?;
+        let store: Arc<dyn ObjectStore> = if s3_compat {
+            Arc::new(S3CompatObjectStore::new(Arc::new(store)))
+        } else {
+            Arc::new(store)
+        };
 
         Ok(Self {
             bucket: bucket.to_string(),
-            store: Arc::new(store),
+            store,
             config: S3Config {
                 region: region.to_string(),
                 endpoint: Some(endpoint.to_string()),
