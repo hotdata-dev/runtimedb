@@ -7,10 +7,6 @@ use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::prelude::*;
 use liquid_cache_client::PushdownOptimizer;
-use object_store::ObjectStore;
-
-type ObjectStoreMapper =
-    Box<dyn Fn(Arc<dyn ObjectStore>, &ObjectStoreUrl) -> Arc<dyn ObjectStore> + Send + Sync>;
 
 type SessionStateMapper = Box<dyn FnOnce(SessionStateBuilder) -> SessionStateBuilder + Send>;
 
@@ -20,7 +16,6 @@ type SessionStateMapper = Box<dyn FnOnce(SessionStateBuilder) -> SessionStateBui
 pub struct LiquidCacheClientBuilder {
     object_stores: Vec<(ObjectStoreUrl, HashMap<String, String>)>,
     cache_server: String,
-    object_store_mapper: Option<ObjectStoreMapper>,
     session_state_mapper: Option<SessionStateMapper>,
 }
 
@@ -30,7 +25,6 @@ impl LiquidCacheClientBuilder {
         Self {
             object_stores: vec![],
             cache_server: cache_server.as_ref().to_string(),
-            object_store_mapper: None,
             session_state_mapper: None,
         }
     }
@@ -44,22 +38,6 @@ impl LiquidCacheClientBuilder {
     ) -> Self {
         self.object_stores
             .push((url, object_store_options.unwrap_or_default()));
-        self
-    }
-
-    /// Set a mapper function that transforms each object store before registration.
-    ///
-    /// This is useful for wrapping object stores with instrumentation or middleware.
-    /// The function receives the object store and its URL, and should return the
-    /// (possibly wrapped) object store.
-    pub fn with_object_store_mapper(
-        mut self,
-        f: impl Fn(Arc<dyn ObjectStore>, &ObjectStoreUrl) -> Arc<dyn ObjectStore>
-            + Send
-            + Sync
-            + 'static,
-    ) -> Self {
-        self.object_store_mapper = Some(Box::new(f));
         self
     }
 
@@ -102,12 +80,7 @@ impl LiquidCacheClientBuilder {
             let (object_store, _path) =
                 object_store::parse_url_opts(object_store_url.as_ref(), options.clone())
                     .map_err(|e| DataFusionError::External(Box::new(e)))?;
-            let object_store: Arc<dyn ObjectStore> = Arc::new(object_store);
-            let object_store = match &self.object_store_mapper {
-                Some(mapper) => mapper(object_store, object_store_url),
-                None => object_store,
-            };
-            runtime_env.register_object_store(object_store_url.as_ref(), object_store);
+            runtime_env.register_object_store(object_store_url.as_ref(), Arc::new(object_store));
         }
 
         let mut state_builder = SessionStateBuilder::new()

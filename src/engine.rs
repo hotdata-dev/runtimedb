@@ -2738,12 +2738,9 @@ fn build_instrumented_context(
     if let Some((server_address, store_configs)) = liquid_cache_config {
         info!(server = %server_address, "Building liquid-cache session context");
 
+        // Object store instrumentation is skipped here: actual I/O happens on the
+        // liquid-cache server, so client-side object store wrappers see no traffic.
         let mut liquid_cache_builder = LiquidCacheClientBuilder::new(&server_address)
-            .with_object_store_mapper(|store, url| {
-                let url_ref: &url::Url = url.as_ref();
-                let prefix = url_ref.scheme();
-                instrument_object_store(store, prefix)
-            })
             .with_session_state_mapper(|builder| {
                 builder.with_physical_optimizer_rule(
                     instrument_with_info_spans!(options: InstrumentationOptions::default()),
