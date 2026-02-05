@@ -1,4 +1,5 @@
 use super::results_schema::ResultsSchemaProvider;
+use super::ParquetCacheManager;
 use crate::catalog::CatalogManager;
 use async_trait::async_trait;
 use datafusion::catalog::{AsyncCatalogProvider, AsyncSchemaProvider};
@@ -30,9 +31,17 @@ impl RuntimeDbCatalogProvider {
     ///
     /// The `ctx` parameter is used to share the RuntimeEnv (including object stores like S3)
     /// with the results schema provider for schema inference.
-    pub fn new(catalog: Arc<dyn CatalogManager>, ctx: &SessionContext) -> Self {
+    pub fn new(
+        catalog: Arc<dyn CatalogManager>,
+        ctx: &SessionContext,
+        cache_manager: Option<Arc<ParquetCacheManager>>,
+    ) -> Self {
         Self {
-            results_schema: Arc::new(ResultsSchemaProvider::with_runtime_env(catalog, ctx)),
+            results_schema: Arc::new(ResultsSchemaProvider::with_runtime_env(
+                catalog,
+                ctx,
+                cache_manager,
+            )),
             information_schema: None,
         }
     }

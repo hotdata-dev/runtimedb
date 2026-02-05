@@ -5,6 +5,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use super::async_connection_schema::AsyncConnectionSchema;
+use super::ParquetCacheManager;
 use crate::catalog::CatalogManager;
 use crate::datafetch::FetchOrchestrator;
 use crate::source::Source;
@@ -22,6 +23,7 @@ pub struct AsyncConnectionCatalog {
     source: Arc<Source>,
     catalog: Arc<dyn CatalogManager>,
     orchestrator: Arc<FetchOrchestrator>,
+    cache_manager: Option<Arc<ParquetCacheManager>>,
 }
 
 impl AsyncConnectionCatalog {
@@ -31,6 +33,7 @@ impl AsyncConnectionCatalog {
         source: Arc<Source>,
         catalog: Arc<dyn CatalogManager>,
         orchestrator: Arc<FetchOrchestrator>,
+        cache_manager: Option<Arc<ParquetCacheManager>>,
     ) -> Self {
         Self {
             connection_id,
@@ -38,6 +41,7 @@ impl AsyncConnectionCatalog {
             source,
             catalog,
             orchestrator,
+            cache_manager,
         }
     }
 }
@@ -66,6 +70,7 @@ impl AsyncCatalogProvider for AsyncConnectionCatalog {
                 self.source.clone(),
                 self.catalog.clone(),
                 self.orchestrator.clone(),
+                self.cache_manager.clone(),
             ))))
         } else {
             Ok(None)

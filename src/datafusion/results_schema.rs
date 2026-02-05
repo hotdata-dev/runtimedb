@@ -1,10 +1,10 @@
 use crate::catalog::CatalogManager;
+use crate::datafusion::table_cache::CachedParquetTableProvider;
+use crate::datafusion::ParquetCacheManager;
 use async_trait::async_trait;
 use datafusion::catalog::AsyncSchemaProvider;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
-use datafusion::datasource::listing::{
-    ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
-};
+use datafusion::datasource::listing::{ListingOptions, ListingTableUrl};
 use datafusion::datasource::TableProvider;
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::execution::SessionState;
@@ -20,6 +20,7 @@ pub struct ResultsSchemaProvider {
     catalog: Arc<dyn CatalogManager>,
     /// Session state for schema inference - shares the RuntimeEnv (and object stores) with the main session
     session_state: Arc<SessionState>,
+    cache_manager: Option<Arc<ParquetCacheManager>>,
 }
 
 impl Debug for ResultsSchemaProvider {
@@ -39,6 +40,7 @@ impl ResultsSchemaProvider {
     pub fn with_runtime_env(
         catalog: Arc<dyn CatalogManager>,
         ctx: &datafusion::prelude::SessionContext,
+        cache_manager: Option<Arc<ParquetCacheManager>>,
     ) -> Self {
         // Create a minimal session state that shares the RuntimeEnv
         let session_state = SessionStateBuilder::new()
@@ -47,6 +49,7 @@ impl ResultsSchemaProvider {
         Self {
             catalog,
             session_state: Arc::new(session_state),
+            cache_manager,
         }
     }
 }
@@ -82,11 +85,11 @@ impl AsyncSchemaProvider for ResultsSchemaProvider {
             .infer_schema(self.session_state.as_ref(), &table_path)
             .await?;
 
-        let config = ListingTableConfig::new(table_path)
-            .with_listing_options(listing_options)
-            .with_schema(schema);
-
-        let table: Arc<dyn TableProvider> = Arc::new(ListingTable::try_new(config)?);
+        let table: Arc<dyn TableProvider> = Arc::new(CachedParquetTableProvider::new(
+            parquet_path.clone(),
+            schema,
+            self.cache_manager.clone(),
+        ));
 
         Ok(Some(table))
     }

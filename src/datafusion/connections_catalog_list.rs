@@ -9,6 +9,7 @@ use super::async_connection_catalog::AsyncConnectionCatalog;
 use super::datasets_catalog::DatasetsCatalogProvider;
 use super::information_schema::InformationSchemaProvider;
 use super::runtimedb_catalog::RuntimeDbCatalogProvider;
+use super::ParquetCacheManager;
 use crate::catalog::CatalogManager;
 use crate::datafetch::FetchOrchestrator;
 use crate::source::Source;
@@ -30,6 +31,7 @@ pub struct UnifiedCatalogList {
     runtimedb_catalog: Arc<RuntimeDbCatalogProvider>,
     /// Pre-built datasets catalog provider
     datasets_catalog: Arc<DatasetsCatalogProvider>,
+    cache_manager: Option<Arc<ParquetCacheManager>>,
 }
 
 impl Debug for UnifiedCatalogList {
@@ -50,19 +52,23 @@ impl UnifiedCatalogList {
         catalog: Arc<dyn CatalogManager>,
         orchestrator: Arc<FetchOrchestrator>,
         ctx: &SessionContext,
+        cache_manager: Option<Arc<ParquetCacheManager>>,
     ) -> Self {
         // Build the runtimedb catalog with results and information_schema
-        let runtimedb_catalog = RuntimeDbCatalogProvider::new(catalog.clone(), ctx)
-            .with_information_schema(Arc::new(InformationSchemaProvider::new(catalog.clone())));
+        let runtimedb_catalog =
+            RuntimeDbCatalogProvider::new(catalog.clone(), ctx, cache_manager.clone())
+                .with_information_schema(Arc::new(InformationSchemaProvider::new(catalog.clone())));
 
         // Build the datasets catalog
-        let datasets_catalog = DatasetsCatalogProvider::with_runtime_env(catalog.clone(), ctx);
+        let datasets_catalog =
+            DatasetsCatalogProvider::with_runtime_env(catalog.clone(), ctx, cache_manager.clone());
 
         Self {
             catalog,
             orchestrator,
             runtimedb_catalog: Arc::new(runtimedb_catalog),
             datasets_catalog: Arc::new(datasets_catalog),
+            cache_manager,
         }
     }
 }
@@ -106,6 +112,7 @@ impl AsyncCatalogProviderList for UnifiedCatalogList {
             Arc::new(source),
             self.catalog.clone(),
             self.orchestrator.clone(),
+            self.cache_manager.clone(),
         ))))
     }
 }

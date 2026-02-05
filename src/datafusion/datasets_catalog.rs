@@ -4,13 +4,13 @@
 //! Each dataset is stored as a parquet file and can be queried via SQL.
 
 use crate::catalog::CatalogManager;
+use crate::datafusion::table_cache::CachedParquetTableProvider;
+use crate::datafusion::ParquetCacheManager;
 use crate::datasets::DEFAULT_SCHEMA;
 use async_trait::async_trait;
 use datafusion::catalog::{AsyncCatalogProvider, AsyncSchemaProvider};
 use datafusion::datasource::file_format::parquet::ParquetFormat;
-use datafusion::datasource::listing::{
-    ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
-};
+use datafusion::datasource::listing::{ListingOptions, ListingTableUrl};
 use datafusion::datasource::TableProvider;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::session_state::SessionStateBuilder;
@@ -33,9 +33,14 @@ impl DatasetsCatalogProvider {
     pub fn with_runtime_env(
         catalog: Arc<dyn CatalogManager>,
         ctx: &datafusion::prelude::SessionContext,
+        cache_manager: Option<Arc<ParquetCacheManager>>,
     ) -> Self {
         Self {
-            schema: Arc::new(DatasetsSchemaProvider::with_runtime_env(catalog, ctx)),
+            schema: Arc::new(DatasetsSchemaProvider::with_runtime_env(
+                catalog,
+                ctx,
+                cache_manager,
+            )),
         }
     }
 }
@@ -59,6 +64,7 @@ pub struct DatasetsSchemaProvider {
     catalog: Arc<dyn CatalogManager>,
     /// Session state for fallback schema inference - shares the RuntimeEnv (and object stores)
     session_state: Arc<SessionState>,
+    cache_manager: Option<Arc<ParquetCacheManager>>,
 }
 
 impl Debug for DatasetsSchemaProvider {
@@ -78,6 +84,7 @@ impl DatasetsSchemaProvider {
     pub fn with_runtime_env(
         catalog: Arc<dyn CatalogManager>,
         ctx: &datafusion::prelude::SessionContext,
+        cache_manager: Option<Arc<ParquetCacheManager>>,
     ) -> Self {
         let session_state = SessionStateBuilder::new()
             .with_runtime_env(ctx.runtime_env())
@@ -85,6 +92,7 @@ impl DatasetsSchemaProvider {
         Self {
             catalog,
             session_state: Arc::new(session_state),
+            cache_manager,
         }
     }
 }
@@ -130,11 +138,11 @@ impl AsyncSchemaProvider for DatasetsSchemaProvider {
                 }
             };
 
-        let config = ListingTableConfig::new(table_path)
-            .with_listing_options(listing_options)
-            .with_schema(schema);
-
-        let table: Arc<dyn TableProvider> = Arc::new(ListingTable::try_new(config)?);
+        let table: Arc<dyn TableProvider> = Arc::new(CachedParquetTableProvider::new(
+            info.parquet_url.clone(),
+            schema,
+            self.cache_manager.clone(),
+        ));
 
         Ok(Some(table))
     }
