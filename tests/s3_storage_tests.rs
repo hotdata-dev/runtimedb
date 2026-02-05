@@ -80,6 +80,7 @@ impl MinioTestInfra {
             MINIO_ROOT_PASSWORD,
             MINIO_REGION,
             true,
+            false,
         )
         .expect("Failed to create S3Storage");
 
