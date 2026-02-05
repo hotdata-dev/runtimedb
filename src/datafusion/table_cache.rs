@@ -151,7 +151,7 @@ impl InMemoryTableCache {
                 if let Some(ttl) = self.ttl {
                     if last_access.elapsed() > ttl {
                         self.total_bytes.fetch_sub(*bytes, Ordering::Relaxed);
-                        tracing::debug!(
+                        tracing::info!(
                             parquet_url = %key,
                             bytes = *bytes,
                             "Mem cache entry expired"
@@ -277,7 +277,7 @@ impl InMemoryTableCache {
             }
         }
 
-        tracing::debug!(
+        tracing::info!(
             transitioned_loading,
             removed_failed,
             removed_too_large,
@@ -300,7 +300,7 @@ impl InMemoryTableCache {
                         entry.state = CacheState::Loading {
                             started_at: Instant::now(),
                         };
-                        tracing::debug!(parquet_url = %key, "Mem cache load retry started");
+                        tracing::info!(parquet_url = %key, "Mem cache load retry started");
                         true
                     }
                 }
@@ -314,7 +314,7 @@ impl InMemoryTableCache {
                         },
                     },
                 );
-                tracing::debug!(parquet_url = %key, "Mem cache load started");
+                tracing::info!(parquet_url = %key, "Mem cache load started");
                 true
             }
         }
@@ -324,7 +324,7 @@ impl InMemoryTableCache {
         let mut cache = self.inner.lock().unwrap();
         if let Some(entry) = cache.get_mut(key) {
             entry.state = CacheState::Failed {
-                last_error: error,
+                last_error: error.clone(),
                 last_attempt: Instant::now(),
             };
         } else {
@@ -332,13 +332,13 @@ impl InMemoryTableCache {
                 key.to_string(),
                 CacheEntry {
                     state: CacheState::Failed {
-                        last_error: error,
+                        last_error: error.clone(),
                         last_attempt: Instant::now(),
                     },
                 },
             );
         }
-        tracing::warn!(parquet_url = %key, "Mem cache load failed");
+        tracing::warn!(parquet_url = %key, error = %error, "Mem cache load failed");
     }
 
     pub fn mark_too_large(&self, key: &str, bytes: u64) {
@@ -359,7 +359,7 @@ impl InMemoryTableCache {
                 },
             );
         }
-        tracing::debug!(parquet_url = %key, bytes, "Mem cache skipped: table too large");
+        tracing::info!(parquet_url = %key, bytes, "Mem cache skipped: table too large");
     }
 
     pub fn insert_ready(&self, key: &str, table: Arc<MemTable>, bytes: u64) -> InsertOutcome {
@@ -406,7 +406,7 @@ impl InMemoryTableCache {
         }
 
         if evicted_entries > 0 {
-            tracing::debug!(
+            tracing::info!(
                 parquet_url = %key,
                 evicted_entries,
                 evicted_bytes,
@@ -430,7 +430,7 @@ impl InMemoryTableCache {
             },
         );
         self.total_bytes.fetch_add(bytes, Ordering::Relaxed);
-        tracing::debug!(
+        tracing::info!(
             parquet_url = %key,
             bytes,
             total_bytes = self.total_bytes.load(Ordering::Relaxed),
@@ -444,7 +444,7 @@ impl InMemoryTableCache {
         if let Some(entry) = cache.pop(key) {
             if let CacheState::Ready { bytes, .. } = entry.state {
                 self.total_bytes.fetch_sub(bytes, Ordering::Relaxed);
-                tracing::debug!(
+                tracing::info!(
                     parquet_url = %key,
                     bytes,
                     total_bytes = self.total_bytes.load(Ordering::Relaxed),
@@ -471,7 +471,7 @@ impl InMemoryTableCache {
         for key in to_remove {
             cache.pop(&key);
         }
-        tracing::debug!(
+        tracing::info!(
             prefix = %prefix,
             total_bytes = self.total_bytes.load(Ordering::Relaxed),
             "Mem cache invalidated prefix"
@@ -519,14 +519,14 @@ impl ParquetCacheManager {
         self.cache.prune_if_needed();
 
         if let Some(table) = self.cache.get_ready(parquet_url) {
-            tracing::debug!(parquet_url = %parquet_url, "Mem cache hit");
+            tracing::info!(parquet_url = %parquet_url, "Mem cache hit");
             return table.scan(state, projection, filters, limit).await;
         }
 
         if let Some(snapshot) = self.cache.snapshot(parquet_url) {
             match snapshot {
                 CacheStateSnapshot::Loading { started_at } => {
-                    tracing::debug!(
+                    tracing::info!(
                         parquet_url = %parquet_url,
                         load_ms = started_at.elapsed().as_millis() as u64,
                         "Mem cache load in progress"
@@ -536,7 +536,7 @@ impl ParquetCacheManager {
                     last_error,
                     last_attempt,
                 } => {
-                    tracing::debug!(
+                    tracing::info!(
                         parquet_url = %parquet_url,
                         last_attempt_ms = last_attempt.elapsed().as_millis() as u64,
                         error = %last_error,
@@ -547,7 +547,7 @@ impl ParquetCacheManager {
                     bytes,
                     last_attempt,
                 } => {
-                    tracing::debug!(
+                    tracing::info!(
                         parquet_url = %parquet_url,
                         bytes,
                         last_attempt_ms = last_attempt.elapsed().as_millis() as u64,
@@ -555,7 +555,7 @@ impl ParquetCacheManager {
                     );
                 }
                 CacheStateSnapshot::Ready { bytes, last_access } => {
-                    tracing::debug!(
+                    tracing::info!(
                         parquet_url = %parquet_url,
                         bytes,
                         idle_ms = last_access.elapsed().as_millis() as u64,
@@ -564,7 +564,7 @@ impl ParquetCacheManager {
                 }
             }
         } else {
-            tracing::debug!(parquet_url = %parquet_url, "Mem cache miss");
+            tracing::info!(parquet_url = %parquet_url, "Mem cache miss");
         }
 
         // Attempt to warm in the background without blocking.
@@ -588,7 +588,7 @@ impl ParquetCacheManager {
 
                     match load_result {
                         Ok(Ok(())) => {
-                            tracing::debug!(
+                            tracing::info!(
                                 parquet_url = %parquet_url,
                                 load_ms = start.elapsed().as_millis() as u64,
                                 "Mem cache load completed"
@@ -604,7 +604,7 @@ impl ParquetCacheManager {
                 });
             }
         } else {
-            tracing::debug!(parquet_url = %parquet_url, "Mem cache warm skipped (no permits)");
+            tracing::info!(parquet_url = %parquet_url, "Mem cache warm skipped (no permits)");
         }
 
         scan_parquet_exec(parquet_url, schema, state, projection, filters, limit).await
@@ -709,11 +709,13 @@ async fn load_parquet_into_cache(
             return Ok(LoadResult::TooLarge { bytes });
         }
 
-        let reader =
-            datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-                file,
-            )?
-            .build()?;
+        let options = datafusion::parquet::arrow::arrow_reader::ArrowReaderOptions::new()
+            .with_schema(schema.clone());
+        let reader = datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new_with_options(
+            file,
+            options,
+        )?
+        .build()?;
 
         let mut batches = Vec::new();
         for batch in reader {
