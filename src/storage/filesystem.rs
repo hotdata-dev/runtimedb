@@ -128,10 +128,9 @@ impl StorageManager for FilesystemStorage {
         schema: &str,
         table: &str,
     ) -> CacheWriteHandle {
-        // Use versioned DIRECTORIES to avoid duplicate reads during grace period.
-        // DataFusion's ListingTable reads all parquet files in a directory.
-        // By using versioned directories with a fixed filename, we ensure only
-        // the active version is read after catalog update.
+        // Use versioned DIRECTORIES for atomic swap and clean deletion.
+        // Each version gets its own directory with a fixed filename, so the
+        // previous version can be safely deleted after catalog update.
         // Path: {cache_base}/{conn_id}/{schema}/{table}/{version}/data.parquet
         let version = nanoid::nanoid!(8);
         let local_path = self

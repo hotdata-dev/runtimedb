@@ -52,9 +52,14 @@ impl LazyTableProvider {
     /// Load a parquet file and return an ExecutionPlan.
     /// Uses the catalog schema (self.schema) to ensure consistency with schema()
     /// and proper projection index alignment.
+    ///
+    /// Constructs a DataSourceExec directly from the known file path, bypassing
+    /// ListingTable's list operation. Only performs a single head request (vs
+    /// head+list with ListingTable). Filter pushdown is handled by the physical
+    /// optimizer on DataSourceExec.
     #[tracing::instrument(
         name = "load_parquet_exec",
-        skip(self, state, projection, filters, limit),
+        skip(self, state, projection, limit),
         fields(runtimedb.parquet_url = %parquet_url)
     )]
     async fn load_parquet_exec(
@@ -62,35 +67,20 @@ impl LazyTableProvider {
         parquet_url: &str,
         state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        filters: &[Expr],
         limit: Option<usize>,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
-        use datafusion::datasource::file_format::parquet::ParquetFormat;
-        use datafusion::datasource::listing::{
-            ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
-        };
+        // parquet_url for cache tables is a directory URL (e.g., s3://bucket/.../version/)
+        // Append data.parquet to get the actual file URL.
+        let file_url = format!("{}/data.parquet", parquet_url.trim_end_matches('/'));
 
-        // Parse the URL - DataFusion handles both file:// and s3://
-        let table_path = ListingTableUrl::parse(parquet_url)
-            .map_err(|e| DataFusionError::External(format!("Failed to parse URL: {}", e).into()))?;
-
-        let file_format = ParquetFormat::default();
-        let listing_options = ListingOptions::new(Arc::new(file_format));
-
-        // Use the catalog schema (self.schema) to ensure consistency.
-        // This ensures projection indices from DataFusion align correctly since
-        // they're based on the schema returned by schema().
-        // The Parquet reader will match columns by name.
-        let config = ListingTableConfig::new(table_path)
-            .with_listing_options(listing_options)
-            .with_schema(self.schema.clone());
-
-        let table = ListingTable::try_new(config).map_err(|e| {
-            DataFusionError::External(format!("Failed to create ListingTable: {}", e).into())
-        })?;
-
-        // Create the scan execution plan with projection, filter, and limit pushdown
-        table.scan(state, projection, filters, limit).await
+        super::parquet_exec::build_parquet_exec(
+            &file_url,
+            self.schema.clone(),
+            state,
+            projection,
+            limit,
+        )
+        .await
     }
 
     /// Fetch the table data and update catalog
@@ -128,7 +118,7 @@ impl TableProvider for LazyTableProvider {
 
     #[tracing::instrument(
         name = "lazy_table_scan",
-        skip(self, state, projection, filters, limit),
+        skip(self, state, projection, _filters, limit),
         fields(
             runtimedb.connection_id = %self.connection_id,
             runtimedb.schema = %self.schema_name,
@@ -140,7 +130,7 @@ impl TableProvider for LazyTableProvider {
         &self,
         state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        filters: &[Expr],
+        _filters: &[Expr],
         limit: Option<usize>,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
         // Check if table is already cached
@@ -171,8 +161,9 @@ impl TableProvider for LazyTableProvider {
 
         tracing::Span::current().record("runtimedb.cache_hit", cache_hit);
 
-        // Load the parquet file and create execution plan with projection, filter, and limit pushdown
-        self.load_parquet_exec(&parquet_url, state, projection, filters, limit)
+        // Load the parquet file and create execution plan with projection and limit pushdown.
+        // Filter pushdown is handled by the physical optimizer on DataSourceExec.
+        self.load_parquet_exec(&parquet_url, state, projection, limit)
             .await
     }
 
