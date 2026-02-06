@@ -10,7 +10,7 @@ path = "src/bin/server.rs"
 [dependencies]
 datafusion = "51.0"
 datafusion-tracing = "51.0.0"
-instrumented-object-store = "52.0.0"
+instrumented-object-store = "51.0.0"
 duckdb = { version = "1.4.4", features = ["bundled"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "sqlite", "mysql", "chrono", "tls-rustls", "bigdecimal"] }
 bigdecimal = "0.4"
@@ -58,6 +58,7 @@ arrow-ipc-54 = { package = "arrow-ipc", version = "54" }
 # Arrow 56 for duckdb compatibility (duckdb uses arrow 56, datafusion uses arrow 57)
 arrow-ipc-56 = { package = "arrow-ipc", version = "56" }
 liquid-cache-client = { git = "https://github.com/XiangpengHao/liquid-cache", rev = "5e63d811132230a0e15fb6d4311be2eb5551cb4d" }
+liquid-cache-local = { git = "https://github.com/XiangpengHao/liquid-cache", rev = "5e63d811132230a0e15fb6d4311be2eb5551cb4d" }
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 
 [build-dependencies]
@@ -70,3 +71,22 @@ rand = "0.8"
 reqwest = { version = "0.13.1", features = ["json"] }
 toml = "0.8"
 rust_decimal = "1.36"
+
+[patch.crates-io]
+datafusion = { git = "https://github.com/apache/datafusion.git", rev = "b1af8fe9ced2725fba30b127619380baea7b3067" }
+datafusion-proto = { git = "https://github.com/apache/datafusion.git", rev = "b1af8fe9ced2725fba30b127619380baea7b3067" }
+arrow = { git = "https://github.com/apache/arrow-rs.git", rev = "b1dfb697babcb614040ea2ae17e842e9db557f69" }
+arrow-array = { git = "https://github.com/apache/arrow-rs.git", rev = "b1dfb697babcb614040ea2ae17e842e9db557f69" }
+arrow-buffer = { git = "https://github.com/apache/arrow-rs.git", rev = "b1dfb697babcb614040ea2ae17e842e9db557f69" }
+arrow-cast = { git = "https://github.com/apache/arrow-rs.git", rev = "b1dfb697babcb614040ea2ae17e842e9db557f69" }
+arrow-data = { git = "https://github.com/apache/arrow-rs.git", rev = "b1dfb697babcb614040ea2ae17e842e9db557f69" }
+arrow-ipc = { git = "https://github.com/apache/arrow-rs.git", rev = "b1dfb697babcb614040ea2ae17e842e9db557f69" }
+arrow-ord = { git = "https://github.com/apache/arrow-rs.git", rev = "b1dfb697babcb614040ea2ae17e842e9db557f69" }
+arrow-row = { git = "https://github.com/apache/arrow-rs.git", rev = "b1dfb697babcb614040ea2ae17e842e9db557f69" }
+arrow-schema = { git = "https://github.com/apache/arrow-rs.git", rev = "b1dfb697babcb614040ea2ae17e842e9db557f69" }
+arrow-select = { git = "https://github.com/apache/arrow-rs.git", rev = "b1dfb697babcb614040ea2ae17e842e9db557f69" }
+arrow-flight = { git = "https://github.com/apache/arrow-rs.git", rev = "b1dfb697babcb614040ea2ae17e842e9db557f69" }
+arrow-json = { git = "https://github.com/apache/arrow-rs.git", rev = "b1dfb697babcb614040ea2ae17e842e9db557f69" }
+parquet = { git = "https://github.com/apache/arrow-rs.git", rev = "b1dfb697babcb614040ea2ae17e842e9db557f69" }
+parquet-variant-json = { git = "https://github.com/apache/arrow-rs.git", rev = "b1dfb697babcb614040ea2ae17e842e9db557f69" }
+parquet-variant-compute = { git = "https://github.com/apache/arrow-rs.git", rev = "b1dfb697babcb614040ea2ae17e842e9db557f69" }

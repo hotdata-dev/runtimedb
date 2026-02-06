@@ -48,9 +48,9 @@ pub async fn build_parquet_exec(
     })?;
 
     let parquet_source: Arc<dyn datafusion::datasource::physical_plan::FileSource> =
-        Arc::new(ParquetSource::default());
+        Arc::new(ParquetSource::new(file_schema));
 
-    let config = FileScanConfigBuilder::new(object_store_url, file_schema, parquet_source)
+    let config = FileScanConfigBuilder::new(object_store_url, parquet_source)
         .with_file(object_meta.into())
         .with_projection_indices(projection.cloned())
         .with_limit(limit)
