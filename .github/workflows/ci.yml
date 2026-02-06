@@ -111,9 +111,23 @@ jobs:
             ${{ runner.os }}-cargo-target-
       - run: cargo test
 
+  image_meta:
+    name: Compute image metadata
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - name: Generate image tag
+        id: meta
+        run: |
+          timestamp="$(date -u +%Y%m%d-%H%M%S)"
+          short_sha="$(echo "${GITHUB_SHA}" | cut -c1-12)"
+          echo "image_tag=build-${timestamp}-${short_sha}" >> "${GITHUB_OUTPUT}"
+
   build:
     name: Build (${{ matrix.arch }})
-    needs: [test]
+    needs: [test, image_meta]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' # only build on main (for now)
     strategy:
       matrix:
@@ -154,13 +168,13 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push Docker image
         run: |
-          docker build -t ghcr.io/${{ github.repository }}:${{ github.sha }}-${{ matrix.arch }} .
-          docker push ghcr.io/${{ github.repository }}:${{ github.sha }}-${{ matrix.arch }}
+          docker build -t ghcr.io/${{ github.repository }}:${{ needs.image_meta.outputs.image_tag }}-${{ matrix.arch }} .
+          docker push ghcr.io/${{ github.repository }}:${{ needs.image_meta.outputs.image_tag }}-${{ matrix.arch }}
 
   manifest:
     name: Create multi-arch manifest
     runs-on: ubuntu-latest
-    needs: [build]
+    needs: [build, image_meta]
     permissions:
       contents: read
       packages: write
@@ -173,18 +187,18 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Create and push multi-arch manifest
         run: |
-          docker manifest create ghcr.io/${{ github.repository }}:${{ github.sha }} \
-            ghcr.io/${{ github.repository }}:${{ github.sha }}-amd64 \
-            ghcr.io/${{ github.repository }}:${{ github.sha }}-arm64
-          docker manifest push ghcr.io/${{ github.repository }}:${{ github.sha }}
+          docker manifest create ghcr.io/${{ github.repository }}:${{ needs.image_meta.outputs.image_tag }} \
+            ghcr.io/${{ github.repository }}:${{ needs.image_meta.outputs.image_tag }}-amd64 \
+            ghcr.io/${{ github.repository }}:${{ needs.image_meta.outputs.image_tag }}-arm64
+          docker manifest push ghcr.io/${{ github.repository }}:${{ needs.image_meta.outputs.image_tag }}
 
           docker manifest create ghcr.io/${{ github.repository }}:latest \
-            ghcr.io/${{ github.repository }}:${{ github.sha }}-amd64 \
-            ghcr.io/${{ github.repository }}:${{ github.sha }}-arm64
+            ghcr.io/${{ github.repository }}:${{ needs.image_meta.outputs.image_tag }}-amd64 \
+            ghcr.io/${{ github.repository }}:${{ needs.image_meta.outputs.image_tag }}-arm64
           docker manifest push ghcr.io/${{ github.repository }}:latest
 
   notify:
-    needs: [ manifest ]
+    needs: [manifest, image_meta]
     runs-on: ubuntu-latest
     name: Announce new build available
     steps:
@@ -197,5 +211,5 @@ jobs:
           repo: ${{ secrets.DOWNSTREAM_NOTIFY_REPO }}
           ref: main
           workflow: runtimedb.yml
-          workflow-inputs: '{"image_tag": "${{ github.sha }}"}'
+          workflow-inputs: '{"image_tag": "${{ needs.image_meta.outputs.image_tag }}"}'
         continue-on-error: true
