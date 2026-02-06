@@ -83,6 +83,9 @@ pub struct LiquidCacheConfig {
     pub enabled: bool,
     /// Liquid cache server address (e.g., "http://localhost:15214")
     pub server_address: Option<String>,
+    /// Run liquid cache in local (in-process) mode instead of connecting to an external server
+    #[serde(default)]
+    pub local: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

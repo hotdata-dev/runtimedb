@@ -29,3 +29,4 @@ type = "filesystem"
 [liquid_cache]
 enabled = false
 # server_address = "http://localhost:15214"
+# local = true

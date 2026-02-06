@@ -24,6 +24,7 @@ use datafusion::prelude::*;
 use datafusion_tracing::{instrument_with_info_spans, InstrumentationOptions};
 use instrumented_object_store::instrument_object_store;
 use liquid_cache_client::LiquidCacheClientBuilder;
+use liquid_cache_local::LiquidCacheLocalBuilder;
 use object_store::ObjectStore;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -177,11 +178,16 @@ impl RuntimeEngine {
         }
 
         if config.liquid_cache.enabled {
-            let server = config.liquid_cache.server_address.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("liquid cache enabled but server_address not set")
-            })?;
-            info!("Enabling liquid cache with server: {}", server);
-            builder = builder.liquid_cache_server(server.clone());
+            if config.liquid_cache.local {
+                info!("Enabling liquid cache in local mode");
+                builder = builder.liquid_cache_local(true);
+            } else {
+                let server = config.liquid_cache.server_address.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("liquid cache enabled but server_address not set")
+                })?;
+                info!("Enabling liquid cache with server: {}", server);
+                builder = builder.liquid_cache_server(server.clone());
+            }
         }
 
         // Pass cache config to builder
@@ -2283,6 +2289,7 @@ pub struct RuntimeEngineBuilder {
     parallel_refresh_count: usize,
     max_concurrent_persistence: usize,
     liquid_cache_server: Option<String>,
+    liquid_cache_local: bool,
     cache_config: Option<crate::config::CacheConfig>,
     stale_result_cleanup_interval: Duration,
     stale_result_timeout: Duration,
@@ -2310,6 +2317,7 @@ impl RuntimeEngineBuilder {
             parallel_refresh_count: DEFAULT_PARALLEL_REFRESH_COUNT,
             max_concurrent_persistence: DEFAULT_MAX_CONCURRENT_PERSISTENCE,
             liquid_cache_server: None,
+            liquid_cache_local: false,
             cache_config: None,
             stale_result_cleanup_interval: Duration::from_secs(
                 DEFAULT_STALE_RESULT_CLEANUP_INTERVAL_SECS,
@@ -2394,6 +2402,13 @@ impl RuntimeEngineBuilder {
     /// When enabled, queries are offloaded to a liquid-cache server for caching.
     pub fn liquid_cache_server(mut self, server_address: String) -> Self {
         self.liquid_cache_server = Some(server_address);
+        self
+    }
+
+    /// Enable liquid cache in local (in-process) mode.
+    /// Runs the liquid-cache engine locally without requiring an external server.
+    pub fn liquid_cache_local(mut self, enabled: bool) -> Self {
+        self.liquid_cache_local = enabled;
         self
     }
 
@@ -2494,15 +2509,20 @@ impl RuntimeEngineBuilder {
             // Get actual object stores for instrumentation (preserves full config like MinIO path-style)
             let object_stores: Vec<_> = storage.get_object_store().into_iter().collect();
 
-            // Build liquid-cache config if server is configured
-            let liquid_cache_config = self.liquid_cache_server.map(|server| {
-                let store_configs: Vec<_> = storage.get_object_store_config().into_iter().collect();
-                (server, store_configs)
-            });
+            // Build liquid-cache mode if configured
+            let liquid_cache_mode = if self.liquid_cache_local {
+                Some(LiquidCacheMode::Local)
+            } else {
+                self.liquid_cache_server.map(|server| {
+                    let store_configs: Vec<_> =
+                        storage.get_object_store_config().into_iter().collect();
+                    LiquidCacheMode::External(server, store_configs)
+                })
+            };
 
             // Build instrumented context - all object stores get tracing,
             // liquid-cache adds the PushdownOptimizer if configured
-            build_instrumented_context(object_stores, liquid_cache_config)?
+            build_instrumented_context(object_stores, liquid_cache_mode)?
         };
 
         // Step 6: Initialize secret manager
@@ -2719,8 +2739,13 @@ async fn persist_result_background(
 /// Object store configuration for liquid-cache: URL and options (credentials, etc.)
 type ObjectStoreConfig = (ObjectStoreUrl, HashMap<String, String>);
 
-/// Liquid-cache configuration: server address and store configs for PushdownOptimizer
-type LiquidCacheConfig = (String, Vec<ObjectStoreConfig>);
+/// Liquid-cache mode: external server or local (in-process).
+enum LiquidCacheMode {
+    /// Connect to an external liquid-cache server with object store configs
+    External(String, Vec<ObjectStoreConfig>),
+    /// Run liquid-cache locally in-process
+    Local,
+}
 
 /// Builds an instrumented SessionContext with optional liquid-cache support.
 ///
@@ -2730,62 +2755,90 @@ type LiquidCacheConfig = (String, Vec<ObjectStoreConfig>);
 /// 1. Object stores are wrapped with `instrument_object_store()` for I/O tracing
 /// 2. DataFusion operators get spans via `datafusion-tracing`
 ///
-/// **With liquid-cache:**
+/// **With liquid-cache (external):**
 /// Uses `LiquidCacheClientBuilder` to create the context. Object stores are registered
 /// with the builder (for the liquid-cache server), not locally instrumented since
 /// data fetching happens on the server side.
 ///
+/// **With liquid-cache (local):**
+/// Uses `LiquidCacheLocalBuilder` to run liquid-cache in-process. Object stores are
+/// registered directly on the returned SessionContext after building.
+///
 /// ## Arguments
 ///
 /// * `object_stores` - Pre-built object stores to wrap with instrumentation (non-liquid-cache path)
-/// * `liquid_cache_config` - Optional (server_address, store_configs) for liquid-cache.
+/// * `liquid_cache_mode` - Optional liquid-cache mode (external server or local).
 fn build_instrumented_context(
     object_stores: Vec<(ObjectStoreUrl, Arc<dyn ObjectStore>)>,
-    liquid_cache_config: Option<LiquidCacheConfig>,
+    liquid_cache_mode: Option<LiquidCacheMode>,
 ) -> Result<SessionContext> {
-    // When liquid-cache is enabled, use LiquidCacheClientBuilder
-    // Object stores are registered with the builder for the server, not locally
-    if let Some((server_address, store_configs)) = liquid_cache_config {
-        info!(server = %server_address, "Building liquid-cache session context");
+    match liquid_cache_mode {
+        Some(LiquidCacheMode::External(server_address, store_configs)) => {
+            info!(server = %server_address, "Building liquid-cache session context (external)");
 
-        let mut liquid_cache_builder = LiquidCacheClientBuilder::new(&server_address);
+            let mut liquid_cache_builder = LiquidCacheClientBuilder::new(&server_address);
 
-        // Register object stores with liquid-cache builder (server needs these configs)
-        for (url, options) in store_configs {
-            info!(url = %url.as_str(), "Registering object store with liquid-cache");
-            liquid_cache_builder = liquid_cache_builder.with_object_store(url, Some(options));
+            // Register object stores with liquid-cache builder (server needs these configs)
+            for (url, options) in store_configs {
+                info!(url = %url.as_str(), "Registering object store with liquid-cache");
+                liquid_cache_builder =
+                    liquid_cache_builder.with_object_store(url, Some(options));
+            }
+
+            Ok(liquid_cache_builder.build(SessionConfig::new())?)
         }
+        Some(LiquidCacheMode::Local) => {
+            info!("Building liquid-cache session context (local)");
 
-        return Ok(liquid_cache_builder.build(SessionConfig::new())?);
+            let (ctx, _cache_ref) =
+                LiquidCacheLocalBuilder::new().build(SessionConfig::new())?;
+
+            // Register instrumented object stores for I/O tracing
+            for (url, store) in object_stores {
+                let url_ref: &url::Url = url.as_ref();
+                let prefix = url_ref.scheme();
+                let instrumented_store = instrument_object_store(store, prefix);
+
+                info!(
+                    url = %url.as_str(),
+                    prefix = %prefix,
+                    "Registering instrumented object store with liquid-cache local"
+                );
+                ctx.register_object_store(url.as_ref(), instrumented_store);
+            }
+
+            Ok(ctx)
+        }
+        None => {
+            // Non-liquid-cache path: build with full local instrumentation
+            let runtime_env = Arc::new(RuntimeEnv::default());
+
+            // Register instrumented object stores (using actual pre-built stores)
+            for (url, store) in object_stores {
+                let url_ref: &url::Url = url.as_ref();
+                let prefix = url_ref.scheme();
+                let instrumented_store = instrument_object_store(store, prefix);
+
+                info!(
+                    url = %url.as_str(),
+                    prefix = %prefix,
+                    "Registering instrumented object store"
+                );
+                runtime_env.register_object_store(url.as_ref(), instrumented_store);
+            }
+
+            // Build SessionState with tracing instrumentation
+            let state_builder = SessionStateBuilder::new()
+                .with_config(SessionConfig::new())
+                .with_runtime_env(runtime_env)
+                .with_default_features()
+                .with_physical_optimizer_rule(
+                    instrument_with_info_spans!(options: InstrumentationOptions::default()),
+                );
+
+            Ok(SessionContext::from(state_builder.build()))
+        }
     }
-
-    // Non-liquid-cache path: build with full local instrumentation
-    let runtime_env = Arc::new(RuntimeEnv::default());
-
-    // Register instrumented object stores (using actual pre-built stores)
-    for (url, store) in object_stores {
-        let url_ref: &url::Url = url.as_ref();
-        let prefix = url_ref.scheme();
-        let instrumented_store = instrument_object_store(store, prefix);
-
-        info!(
-            url = %url.as_str(),
-            prefix = %prefix,
-            "Registering instrumented object store"
-        );
-        runtime_env.register_object_store(url.as_ref(), instrumented_store);
-    }
-
-    // Build SessionState with tracing instrumentation
-    let state_builder = SessionStateBuilder::new()
-        .with_config(SessionConfig::new())
-        .with_runtime_env(runtime_env)
-        .with_default_features()
-        .with_physical_optimizer_rule(
-            instrument_with_info_spans!(options: InstrumentationOptions::default()),
-        );
-
-    Ok(SessionContext::from(state_builder.build()))
 }
 
 #[cfg(test)]
@@ -3037,6 +3090,7 @@ mod tests {
             },
             liquid_cache: LiquidCacheConfig {
                 enabled: false,
+                local: true,
                 server_address: None,
             },
             cache: CacheConfig::default(),
