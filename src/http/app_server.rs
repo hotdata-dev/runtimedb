@@ -8,12 +8,49 @@ use crate::http::controllers::{
 };
 use crate::RuntimeEngine;
 use axum::extract::DefaultBodyLimit;
-use axum::http::Request;
+use axum::http::{HeaderName, HeaderValue, Request};
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::{delete, get, post};
 use axum::Router;
+use opentelemetry::trace::TraceContextExt;
 use std::sync::Arc;
 use tower_http::trace::{DefaultOnResponse, MakeSpan, TraceLayer};
 use tracing::{Level, Span};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+static HEADER_X_TRACE_ID: HeaderName = HeaderName::from_static("x-trace-id");
+static HEADER_TRACEPARENT: HeaderName = HeaderName::from_static("traceparent");
+
+/// Middleware that injects OpenTelemetry trace context into response headers.
+///
+/// Adds two headers when a valid (sampled) trace context exists:
+/// - `traceparent`: W3C Trace Context format `{version}-{trace_id}-{span_id}-{trace_flags}`
+/// - `X-Trace-Id`: bare trace ID for human consumption
+async fn trace_id_response_header(request: Request<axum::body::Body>, next: Next) -> Response {
+    let mut response = next.run(request).await;
+
+    let span_context = Span::current().context().span().span_context().clone();
+    if span_context.is_valid() {
+        let trace_id = span_context.trace_id();
+        let span_id = span_context.span_id();
+        let trace_flags = span_context.trace_flags();
+
+        if let Ok(val) = HeaderValue::from_str(&format!(
+            "00-{}-{}-{:02x}",
+            trace_id,
+            span_id,
+            trace_flags.to_u8()
+        )) {
+            response.headers_mut().insert(&HEADER_TRACEPARENT, val);
+        }
+        if let Ok(val) = HeaderValue::from_str(&trace_id.to_string()) {
+            response.headers_mut().insert(&HEADER_X_TRACE_ID, val);
+        }
+    }
+
+    response
+}
 
 /// Custom span creator that names spans after HTTP method and path.
 #[derive(Clone, Copy)]
@@ -100,6 +137,7 @@ impl AppServer {
                     get(get_dataset).put(update_dataset).delete(delete_dataset),
                 )
                 .with_state(engine.clone())
+                .layer(middleware::from_fn(trace_id_response_header))
                 .layer(
                     TraceLayer::new_for_http()
                         .make_span_with(HttpMakeSpan)
