@@ -3,14 +3,25 @@
 use datafusion::arrow::datatypes::Schema;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::parquet::arrow::ArrowWriter;
-use datafusion::parquet::basic::{Compression, ZstdLevel};
-use datafusion::parquet::file::properties::{WriterProperties, WriterVersion};
+use datafusion::parquet::basic::Compression;
+use datafusion::parquet::file::properties::{BloomFilterPosition, WriterProperties, WriterVersion};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::datafetch::batch_writer::{BatchWriteResult, BatchWriter};
 use crate::datafetch::DataFetchError;
+
+/// Build shared writer properties for parquet files.
+fn writer_properties() -> WriterProperties {
+    WriterProperties::builder()
+        .set_writer_version(WriterVersion::PARQUET_2_0)
+        .set_compression(Compression::LZ4)
+        .set_bloom_filter_enabled(true)
+        .set_bloom_filter_fpp(0.01)
+        .set_bloom_filter_position(BloomFilterPosition::End)
+        .build()
+}
 
 /// Streaming Parquet writer that writes batches incrementally to disk.
 ///
@@ -50,11 +61,7 @@ impl BatchWriter for StreamingParquetWriter {
         let file = File::create(&self.path)
             .map_err(|e| DataFetchError::Storage(format!("Failed to create file: {}", e)))?;
 
-        // Centralized Parquet configuration
-        let props = WriterProperties::builder()
-            .set_writer_version(WriterVersion::PARQUET_2_0)
-            .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
-            .build();
+        let props = writer_properties();
 
         let writer = ArrowWriter::try_new(file, Arc::new(schema.clone()), Some(props))
             .map_err(|e| DataFetchError::Storage(e.to_string()))?;
@@ -221,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compression_applied() {
+    fn test_lz4_compression() {
         use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
         use std::fs::File;
 
@@ -255,23 +262,83 @@ mod tests {
         writer.write_batch(&batch).unwrap();
         writer.close().unwrap();
 
-        // Read back and verify compression
+        // Read back and verify LZ4 compression
         let file = File::open(&path).unwrap();
         let reader = SerializedFileReader::new(file).unwrap();
         let metadata = reader.metadata();
 
-        // Check that ZSTD compression is applied to column chunks
         for row_group in metadata.row_groups() {
             for column in row_group.columns() {
                 let compression = column.compression();
-                // Verify ZSTD compression is used (level may vary based on implementation)
-                match compression {
-                    datafusion::parquet::basic::Compression::ZSTD(_) => {
-                        // Success - ZSTD compression is applied
-                    }
-                    other => panic!("Expected ZSTD compression, got {:?}", other),
+                assert_eq!(
+                    compression,
+                    datafusion::parquet::basic::Compression::LZ4,
+                    "Expected LZ4, got {:?}",
+                    compression
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_bloom_filter_enabled() {
+        use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
+        use std::fs::File;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bloom_filter.parquet");
+
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, true),
+        ]);
+
+        let mut writer: Box<dyn BatchWriter> = Box::new(StreamingParquetWriter::new(path.clone()));
+        writer.init(&schema).unwrap();
+
+        // Write some data with distinct values to trigger bloom filter creation
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10])),
+                Arc::new(datafusion::arrow::array::StringArray::from(vec![
+                    Some("Alice"),
+                    Some("Bob"),
+                    Some("Charlie"),
+                    Some("David"),
+                    Some("Eve"),
+                    Some("Frank"),
+                    Some("Grace"),
+                    Some("Henry"),
+                    Some("Ivy"),
+                    Some("Jack"),
+                ])),
+            ],
+        )
+        .unwrap();
+
+        writer.write_batch(&batch).unwrap();
+        writer.close().unwrap();
+
+        // Read back and verify bloom filters exist
+        let file = File::open(&path).unwrap();
+        let reader = SerializedFileReader::new(file).unwrap();
+        let metadata = reader.metadata();
+
+        // Check that bloom filter offsets are set for columns
+        let mut bloom_filter_found = false;
+        for row_group in metadata.row_groups() {
+            for column in row_group.columns() {
+                if column.bloom_filter_offset().is_some() {
+                    bloom_filter_found = true;
+                    break;
                 }
             }
         }
+
+        assert!(
+            bloom_filter_found,
+            "Expected bloom filter to be present in parquet metadata"
+        );
     }
 }

@@ -2756,7 +2756,9 @@ fn build_instrumented_context(
             liquid_cache_builder = liquid_cache_builder.with_object_store(url, Some(options));
         }
 
-        return Ok(liquid_cache_builder.build(SessionConfig::new())?);
+        let session_config = SessionConfig::new()
+            .set_bool("datafusion.execution.parquet.bloom_filter_on_read", true);
+        return Ok(liquid_cache_builder.build(session_config)?);
     }
 
     // Non-liquid-cache path: build with full local instrumentation
@@ -2776,9 +2778,13 @@ fn build_instrumented_context(
         runtime_env.register_object_store(url.as_ref(), instrumented_store);
     }
 
+    // Configure session — enable bloom filter reads for point lookups
+    let session_config =
+        SessionConfig::new().set_bool("datafusion.execution.parquet.bloom_filter_on_read", true);
+
     // Build SessionState with tracing instrumentation
     let state_builder = SessionStateBuilder::new()
-        .with_config(SessionConfig::new())
+        .with_config(session_config)
         .with_runtime_env(runtime_env)
         .with_default_features()
         .with_physical_optimizer_rule(
