@@ -4,6 +4,7 @@ mod connections_catalog_list;
 mod datasets_catalog;
 mod information_schema;
 mod lazy_table_provider;
+mod parquet_exec;
 mod results_schema;
 mod runtimedb_catalog;
 

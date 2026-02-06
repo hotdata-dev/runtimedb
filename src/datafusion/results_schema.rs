@@ -2,14 +2,14 @@ use crate::catalog::CatalogManager;
 use async_trait::async_trait;
 use datafusion::catalog::AsyncSchemaProvider;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
-use datafusion::datasource::listing::{
-    ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
-};
+use datafusion::datasource::listing::{ListingOptions, ListingTableUrl};
 use datafusion::datasource::TableProvider;
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::execution::SessionState;
 use std::fmt::Debug;
 use std::sync::Arc;
+
+use super::parquet_exec::SingleFileParquetProvider;
 
 /// Async schema provider for the `runtimedb.results` schema.
 /// Resolves result IDs to their parquet files.
@@ -77,16 +77,16 @@ impl AsyncSchemaProvider for ResultsSchemaProvider {
         let file_format = ParquetFormat::default();
         let listing_options = ListingOptions::new(Arc::new(file_format));
 
-        // Infer schema using the shared session state (which has access to object stores like S3)
+        // Infer schema using the shared session state (which has access to object stores like S3).
+        // TODO: Store schema in catalog when result is created to avoid this I/O entirely.
         let schema = listing_options
             .infer_schema(self.session_state.as_ref(), &table_path)
             .await?;
 
-        let config = ListingTableConfig::new(table_path)
-            .with_listing_options(listing_options)
-            .with_schema(schema);
-
-        let table: Arc<dyn TableProvider> = Arc::new(ListingTable::try_new(config)?);
+        // Use SingleFileParquetProvider instead of ListingTable to avoid redundant
+        // list+head operations during scan execution.
+        let table: Arc<dyn TableProvider> =
+            Arc::new(SingleFileParquetProvider::new(schema, parquet_path));
 
         Ok(Some(table))
     }
