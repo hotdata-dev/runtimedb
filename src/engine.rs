@@ -2781,8 +2781,7 @@ fn build_instrumented_context(
             // Register object stores with liquid-cache builder (server needs these configs)
             for (url, options) in store_configs {
                 info!(url = %url.as_str(), "Registering object store with liquid-cache");
-                liquid_cache_builder =
-                    liquid_cache_builder.with_object_store(url, Some(options));
+                liquid_cache_builder = liquid_cache_builder.with_object_store(url, Some(options));
             }
 
             Ok(liquid_cache_builder.build(SessionConfig::new())?)
@@ -2790,8 +2789,7 @@ fn build_instrumented_context(
         Some(LiquidCacheMode::Local) => {
             info!("Building liquid-cache session context (local)");
 
-            let (ctx, _cache_ref) =
-                LiquidCacheLocalBuilder::new().build(SessionConfig::new())?;
+            let (ctx, _cache_ref) = LiquidCacheLocalBuilder::new().build(SessionConfig::new())?;
 
             // Register instrumented object stores for I/O tracing
             for (url, store) in object_stores {
