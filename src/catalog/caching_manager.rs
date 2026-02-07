@@ -5,8 +5,9 @@
 //! to the inner catalog directly.
 
 use super::{
-    CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
-    ResultStatus, ResultUpdate, TableInfo, UploadInfo,
+    CatalogManager, ConnectionInfo, CreateQueryRun, DatasetInfo, OptimisticLock, PendingDeletion,
+    QueryResult, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus, ResultUpdate, TableInfo,
+    UploadInfo,
 };
 use crate::config::CacheConfig;
 use crate::secrets::{SecretMetadata, SecretStatus};
@@ -34,6 +35,15 @@ struct CachedEntry<T> {
 fn encode_key_segment(s: &str) -> String {
     urlencoding::encode(s).into_owned()
 }
+
+/// Allowed first-page limits for query listing cache.
+const QUERY_CACHE_LIMITS: &[usize] = &[20, 50, 100];
+
+/// Soft TTL for query listing cache (seconds). Within this window the data is fresh.
+const QUERY_CACHE_SOFT_TTL_SECS: u64 = 1;
+
+/// Hard TTL for query listing cache (seconds). Beyond this the entry is expired.
+const QUERY_CACHE_HARD_TTL_SECS: u64 = 10;
 
 /// Internal state for CachingCatalogManager.
 struct CachingCatalogManagerInner {
@@ -144,6 +154,182 @@ impl CachingCatalogManager {
             self.prefix(),
             encode_key_segment(schema_name)
         )
+    }
+
+    /// Build a cache key for the first-page query listing cache.
+    fn key_query_list_first(&self, limit: usize) -> String {
+        format!("{}queries:first:limit:{}", self.prefix(), limit)
+    }
+
+    /// Build the key for the query-listing dirty marker.
+    fn key_query_list_dirty(&self) -> String {
+        format!("{}queries:dirty", self.prefix())
+    }
+
+    /// Set the dirty marker for query listing cache (best-effort).
+    async fn mark_query_list_dirty(&self) {
+        let key = self.key_query_list_dirty();
+        // Set a short-lived marker so the cache knows writes happened.
+        // TTL matches hard_ttl so it auto-expires when the cache itself would.
+        let result: Result<(), _> = self
+            .redis()
+            .set_ex(&key, "1", QUERY_CACHE_HARD_TTL_SECS)
+            .await;
+        if let Err(e) = result {
+            warn!("cache: failed to set query list dirty marker: {}", e);
+        }
+    }
+
+    /// Check if the query listing dirty marker is set.
+    async fn is_query_list_dirty(&self) -> bool {
+        let key = self.key_query_list_dirty();
+        let result: Result<Option<String>, _> = self.redis().get(&key).await;
+        matches!(result, Ok(Some(_)))
+    }
+
+    /// Read from the query listing first-page cache with stale-while-revalidate.
+    ///
+    /// Returns `Some((data, has_more))` on hit, `None` on miss.
+    #[tracing::instrument(name = "cache_query_list_read", skip(self), fields(cache_hit = tracing::field::Empty))]
+    async fn cached_query_list_read(&self, limit: usize) -> Option<(Vec<QueryRun>, bool)> {
+        let key = self.key_query_list_first(limit);
+        let result: Result<Option<String>, _> = self.redis().get(&key).await;
+        match result {
+            Ok(Some(json)) => {
+                match serde_json::from_str::<CachedEntry<(Vec<QueryRun>, bool)>>(&json) {
+                    Ok(entry) => {
+                        let now_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64;
+                        let age_secs = (now_ms.saturating_sub(entry.cached_at)) / 1000;
+
+                        if age_secs > QUERY_CACHE_HARD_TTL_SECS {
+                            // Beyond hard TTL — treat as miss
+                            tracing::Span::current().record("cache_hit", false);
+                            return None;
+                        }
+
+                        let is_dirty = self.is_query_list_dirty().await;
+                        let is_stale = age_secs > QUERY_CACHE_SOFT_TTL_SECS || is_dirty;
+
+                        if is_stale {
+                            // Serve stale, trigger async revalidation
+                            tracing::Span::current().record("cache_hit", "stale");
+                            self.trigger_query_list_revalidate(limit);
+                        } else {
+                            tracing::Span::current().record("cache_hit", true);
+                        }
+
+                        Some(entry.data)
+                    }
+                    Err(e) => {
+                        warn!("cache: failed to deserialize query list {}: {}", key, e);
+                        tracing::Span::current().record("cache_hit", false);
+                        None
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::Span::current().record("cache_hit", false);
+                None
+            }
+            Err(e) => {
+                warn!("cache: redis get failed for query list {}: {}", key, e);
+                tracing::Span::current().record("cache_hit", false);
+                None
+            }
+        }
+    }
+
+    /// Store a query listing first-page result in the cache.
+    async fn cache_query_list_set(&self, limit: usize, data: &(Vec<QueryRun>, bool)) {
+        let key = self.key_query_list_first(limit);
+        let entry = CachedEntry {
+            data,
+            cached_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+        };
+        match serde_json::to_string(&entry) {
+            Ok(json) => {
+                let result: Result<(), _> = self
+                    .redis()
+                    .set_ex(&key, json, QUERY_CACHE_HARD_TTL_SECS)
+                    .await;
+                if let Err(e) = result {
+                    warn!("cache: failed to set query list {}: {}", key, e);
+                }
+            }
+            Err(e) => {
+                warn!("cache: failed to serialize query list: {}", e);
+            }
+        }
+        // Clear dirty marker since we just refreshed
+        let dirty_key = self.key_query_list_dirty();
+        let _: Result<(), _> = self.redis().del(&dirty_key).await;
+    }
+
+    /// Build the Redis key for the distributed revalidation lock.
+    fn key_query_list_revalidate_lock(&self) -> String {
+        format!("{}queries:revalidate_lock", self.prefix())
+    }
+
+    /// Trigger an async background revalidation of the first-page cache for a given limit.
+    /// Uses a distributed Redis lock (`SET NX EX`) so only one node revalidates at a time.
+    fn trigger_query_list_revalidate(&self, limit: usize) {
+        let state = Arc::clone(&self.state);
+        let prefix = self.prefix().to_string();
+        let lock_key = self.key_query_list_revalidate_lock();
+        tokio::spawn(async move {
+            // Distributed singleflight: SET NX EX with a short TTL.
+            // If another node (or local task) already holds the lock, skip.
+            let acquired: Result<bool, _> = redis::cmd("SET")
+                .arg(&lock_key)
+                .arg("1")
+                .arg("NX")
+                .arg("EX")
+                .arg(QUERY_CACHE_HARD_TTL_SECS)
+                .query_async(&mut state.redis.clone())
+                .await;
+            if !acquired.unwrap_or(false) {
+                return; // Another revalidation is in progress
+            }
+
+            // Fetch fresh data
+            let fetch_result = state.inner.list_query_runs(limit, None).await;
+            match fetch_result {
+                Ok(data) => {
+                    let key = format!("{}queries:first:limit:{}", prefix, limit);
+                    let entry = CachedEntry {
+                        data: &data,
+                        cached_at: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64,
+                    };
+                    if let Ok(json) = serde_json::to_string(&entry) {
+                        let result: Result<(), _> = state
+                            .redis
+                            .clone()
+                            .set_ex(&key, json, QUERY_CACHE_HARD_TTL_SECS)
+                            .await;
+                        if let Err(e) = result {
+                            warn!("cache: revalidate failed to set query list: {}", e);
+                        }
+                    }
+                    // Clear dirty marker
+                    let dirty_key = format!("{}queries:dirty", prefix);
+                    let _: Result<(), _> = state.redis.clone().del(&dirty_key).await;
+                }
+                Err(e) => {
+                    warn!("cache: revalidate failed to fetch query runs: {}", e);
+                }
+            }
+            // Release lock early so next revalidation can proceed
+            let _: Result<(), _> = state.redis.clone().del(&lock_key).await;
+        });
     }
 
     /// Read from cache with fallback to inner catalog.
@@ -812,6 +998,49 @@ impl CatalogManager for CachingCatalogManager {
 
     async fn count_connections_by_secret_id(&self, secret_id: &str) -> Result<i64> {
         self.inner().count_connections_by_secret_id(secret_id).await
+    }
+
+    // Query run history methods
+
+    async fn create_query_run(&self, params: CreateQueryRun<'_>) -> Result<String> {
+        let result = self.inner().create_query_run(params).await?;
+        self.mark_query_list_dirty().await;
+        Ok(result)
+    }
+
+    async fn update_query_run(&self, id: &str, update: QueryRunUpdate<'_>) -> Result<bool> {
+        let result = self.inner().update_query_run(id, update).await?;
+        self.mark_query_list_dirty().await;
+        Ok(result)
+    }
+
+    #[tracing::instrument(name = "catalog.list_query_runs", skip(self))]
+    async fn list_query_runs(
+        &self,
+        limit: usize,
+        cursor: Option<&QueryRunCursor>,
+    ) -> Result<(Vec<QueryRun>, bool)> {
+        // Only cache first-page requests with allowed limits
+        let is_first_page = cursor.is_none() && QUERY_CACHE_LIMITS.contains(&limit);
+
+        if is_first_page {
+            if let Some(cached) = self.cached_query_list_read(limit).await {
+                return Ok(cached);
+            }
+        }
+
+        // Cache miss or non-cacheable request — fetch from catalog
+        let result = self.inner().list_query_runs(limit, cursor).await?;
+
+        if is_first_page {
+            self.cache_query_list_set(limit, &result).await;
+        }
+
+        Ok(result)
+    }
+
+    async fn get_query_run(&self, id: &str) -> Result<Option<QueryRun>> {
+        self.inner().get_query_run(id).await
     }
 
     // Query result persistence methods
