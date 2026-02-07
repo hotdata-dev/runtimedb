@@ -1,6 +1,7 @@
 use crate::catalog::{
     is_dataset_table_name_conflict, CachingCatalogManager, CatalogManager, ConnectionInfo,
-    ResultStatus, ResultUpdate, SqliteCatalogManager, TableInfo,
+    CreateQueryRun, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus, ResultUpdate,
+    SqliteCatalogManager, TableInfo,
 };
 use crate::datafetch::native::StreamingParquetWriter;
 use crate::datafetch::{BatchWriter, FetchOrchestrator, NativeFetcher};
@@ -13,6 +14,7 @@ use crate::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
 use anyhow::Result;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as Base64Engine};
 use chrono::Utc;
 use datafusion::arrow::datatypes::Schema;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -25,6 +27,8 @@ use datafusion_tracing::{instrument_with_info_spans, InstrumentationOptions};
 use instrumented_object_store::instrument_object_store;
 use liquid_cache_client::LiquidCacheClientBuilder;
 use object_store::ObjectStore;
+use opentelemetry::trace::TraceContextExt;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -34,6 +38,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::{info, warn, Instrument};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Default insecure encryption key for development use only.
 /// This key is publicly known and provides NO security.
@@ -98,6 +103,66 @@ pub struct QueryResponseWithId {
     /// Time taken to execute the query (excluding persistence).
     pub execution_time: Duration,
 }
+
+/// Result of a tracked query execution that includes query run history.
+///
+/// Returned by [`RuntimeEngine::execute_tracked_query`]. Contains all the information
+/// needed to build an HTTP response, with the query run lifecycle already managed.
+pub struct TrackedQueryResult {
+    /// Unique identifier for the query run record (qrun...).
+    pub query_id: String,
+    /// Unique identifier for the persisted result, if persistence succeeded.
+    pub result_id: Option<String>,
+    /// Arrow schema describing the result columns.
+    pub schema: Arc<Schema>,
+    /// The query result data.
+    pub results: Vec<RecordBatch>,
+    /// Total row count across all batches.
+    pub row_count: usize,
+    /// Wall-clock execution time in milliseconds.
+    pub execution_time_ms: u64,
+    /// Warning message if result persistence could not be initiated.
+    pub warning: Option<String>,
+}
+
+/// A page of query run results with cursor information.
+pub struct QueryRunPage {
+    /// The query runs in this page.
+    pub runs: Vec<QueryRun>,
+    /// Number of runs in this page.
+    pub count: usize,
+    /// The limit that was applied.
+    pub limit: usize,
+    /// Whether there are more results after this page.
+    pub has_more: bool,
+    /// Base64url-encoded cursor for the next page, if has_more is true.
+    pub next_cursor: Option<String>,
+}
+
+/// Compute SHA-256 hex hash of SQL text.
+pub fn sql_hash(sql: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(sql.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Extract the current span's trace ID if valid, else None.
+pub fn current_trace_id() -> Option<String> {
+    let ctx = tracing::Span::current().context();
+    let span_ref = ctx.span();
+    let span_context = span_ref.span_context();
+    if span_context.is_valid() {
+        Some(span_context.trace_id().to_string())
+    } else {
+        None
+    }
+}
+
+/// Maximum allowed limit for query run listing.
+const QUERY_LIST_MAX_LIMIT: usize = 1000;
+
+/// Default limit for query run listing.
+const QUERY_LIST_DEFAULT_LIMIT: usize = 100;
 
 /// The main query engine that manages connections, catalogs, and query execution.
 pub struct RuntimeEngine {
@@ -796,6 +861,176 @@ impl RuntimeEngine {
                 },
             )
             .await
+    }
+
+    /// Execute a query with full run-tracking lifecycle.
+    ///
+    /// This method:
+    /// 1. Validates metadata is a JSON object (or defaults to `{}`)
+    /// 2. Generates a query run ID and SQL hash
+    /// 3. Creates a `query_runs` record with `status='running'`
+    /// 4. Executes the query with result persistence
+    /// 5. Updates the query run as succeeded or failed
+    ///
+    /// Returns a [`TrackedQueryResult`] containing all data needed for the response.
+    #[tracing::instrument(
+        name = "engine.execute_tracked_query",
+        skip(self, sql, metadata),
+        fields(
+            runtimedb.query_run_id = tracing::field::Empty,
+            runtimedb.result_id = tracing::field::Empty,
+            runtimedb.row_count = tracing::field::Empty,
+        )
+    )]
+    pub async fn execute_tracked_query(
+        &self,
+        sql: &str,
+        metadata: Option<serde_json::Value>,
+        trace_id: Option<String>,
+    ) -> Result<TrackedQueryResult> {
+        // Validate metadata shape
+        let metadata = match metadata {
+            Some(val) => {
+                if !val.is_object() {
+                    anyhow::bail!("metadata must be a JSON object");
+                }
+                val
+            }
+            None => serde_json::Value::Object(Default::default()),
+        };
+
+        let query_run_id = crate::id::generate_query_run_id();
+        let hash = sql_hash(sql);
+
+        tracing::Span::current().record("runtimedb.query_run_id", &query_run_id);
+
+        // Insert query_run row with status='running'
+        self.catalog
+            .create_query_run(CreateQueryRun {
+                id: &query_run_id,
+                sql_text: sql,
+                sql_hash: &hash,
+                metadata: &metadata,
+                trace_id: trace_id.as_deref(),
+            })
+            .await?;
+
+        // Execute query with async persistence
+        let start = Instant::now();
+        let query_result = self.execute_query_with_persistence(sql).await;
+        let execution_time_ms = start.elapsed().as_millis() as u64;
+
+        match query_result {
+            Ok((result, warning)) => {
+                let row_count = result.results.iter().map(|b| b.num_rows()).sum::<usize>();
+
+                // Determine result_id — empty string from engine means persistence failed
+                let result_id = if result.result_id.is_empty() {
+                    None
+                } else {
+                    tracing::Span::current().record("runtimedb.result_id", &result.result_id);
+                    Some(result.result_id.clone())
+                };
+
+                tracing::Span::current().record("runtimedb.row_count", row_count);
+
+                // Update query run as succeeded
+                if let Err(e) = self
+                    .catalog
+                    .update_query_run(
+                        &query_run_id,
+                        QueryRunUpdate::Succeeded {
+                            result_id: result_id.as_deref(),
+                            row_count: row_count as i64,
+                            execution_time_ms: execution_time_ms as i64,
+                            warning_message: warning.as_deref(),
+                        },
+                    )
+                    .await
+                {
+                    warn!(error = %e, query_run_id = %query_run_id, "Failed to update query run as succeeded");
+                }
+
+                Ok(TrackedQueryResult {
+                    query_id: query_run_id,
+                    result_id,
+                    schema: result.schema,
+                    results: result.results,
+                    row_count,
+                    execution_time_ms,
+                    warning,
+                })
+            }
+            Err(e) => {
+                // Update query run as failed
+                if let Err(update_err) = self
+                    .catalog
+                    .update_query_run(
+                        &query_run_id,
+                        QueryRunUpdate::Failed {
+                            error_message: &e.to_string(),
+                            execution_time_ms: Some(execution_time_ms as i64),
+                        },
+                    )
+                    .await
+                {
+                    warn!(error = %update_err, query_run_id = %query_run_id, "Failed to update query run as failed");
+                }
+
+                Err(e)
+            }
+        }
+    }
+
+    /// List query runs with cursor pagination.
+    ///
+    /// Handles limit clamping, cursor decoding, and next-cursor encoding.
+    /// The `cursor_token` is the raw base64url string from the client.
+    pub async fn list_query_runs_page(
+        &self,
+        limit: Option<usize>,
+        cursor_token: Option<&str>,
+    ) -> Result<QueryRunPage> {
+        let limit = limit
+            .unwrap_or(QUERY_LIST_DEFAULT_LIMIT)
+            .min(QUERY_LIST_MAX_LIMIT);
+
+        // Decode cursor if provided
+        let cursor = if let Some(token) = cursor_token {
+            let decoded = URL_SAFE_NO_PAD
+                .decode(token)
+                .map_err(|_| anyhow::anyhow!("Invalid cursor"))?;
+            let cursor: QueryRunCursor = serde_json::from_slice(&decoded)
+                .map_err(|_| anyhow::anyhow!("Invalid cursor format"))?;
+            Some(cursor)
+        } else {
+            None
+        };
+
+        let (runs, has_more) = self.catalog.list_query_runs(limit, cursor.as_ref()).await?;
+
+        // Build next_cursor from last returned row when has_more=true
+        let next_cursor = if has_more {
+            runs.last().map(|last| {
+                let cursor = QueryRunCursor {
+                    created_at: last.created_at,
+                    id: last.id.clone(),
+                };
+                let json = serde_json::to_vec(&cursor).unwrap();
+                URL_SAFE_NO_PAD.encode(&json)
+            })
+        } else {
+            None
+        };
+
+        let count = runs.len();
+        Ok(QueryRunPage {
+            runs,
+            count,
+            limit,
+            has_more,
+            next_cursor,
+        })
     }
 
     /// Purge all cached data for a connection (clears parquet files and resets sync state).
