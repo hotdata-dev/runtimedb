@@ -688,7 +688,7 @@ macro_rules! catalog_manager_tests {
                 let catalog = ctx.manager();
 
                 let id = runtimedb::id::generate_query_run_id();
-                let metadata = serde_json::json!({"agent": "test"});
+                let metadata = serde_json::json!({});
                 catalog
                     .create_query_run(CreateQueryRun {
                         id: &id,
@@ -704,7 +704,6 @@ macro_rules! catalog_manager_tests {
                 assert_eq!(run.id, id);
                 assert_eq!(run.sql_text, "SELECT 1");
                 assert_eq!(run.sql_hash, "abc123");
-                assert_eq!(run.metadata["agent"], "test");
                 assert_eq!(run.trace_id.as_deref(), Some("trace-000"));
                 assert_eq!(run.status, QueryRunStatus::Running);
                 assert!(run.result_id.is_none());
@@ -870,33 +869,6 @@ macro_rules! catalog_manager_tests {
                 assert!(!updated);
             }
 
-            #[tokio::test]
-            async fn query_run_metadata_roundtrip() {
-                let ctx = super::$setup_fn().await;
-                let catalog = ctx.manager();
-
-                let id = runtimedb::id::generate_query_run_id();
-                let metadata = serde_json::json!({
-                    "agent_id": "abc",
-                    "flow": "analysis",
-                    "nested": {"key": "value"}
-                });
-                catalog
-                    .create_query_run(CreateQueryRun {
-                        id: &id,
-                        sql_text: "SELECT 1",
-                        sql_hash: "test",
-                        metadata: &metadata,
-                        trace_id: None,
-                    })
-                    .await
-                    .unwrap();
-
-                let run = catalog.get_query_run(&id).await.unwrap().unwrap();
-                assert_eq!(run.metadata["agent_id"], "abc");
-                assert_eq!(run.metadata["flow"], "analysis");
-                assert_eq!(run.metadata["nested"]["key"], "value");
-            }
         }
     };
 }

@@ -575,28 +575,15 @@ impl RuntimeEngine {
     /// The persisted result can be retrieved via `GET /results/{id}`.
     #[tracing::instrument(
         name = "execute_query_with_persistence",
-        skip(self, sql, metadata),
+        skip(self, sql),
         fields(
             runtimedb.query_run_id = tracing::field::Empty,
             runtimedb.result_id = tracing::field::Empty,
             runtimedb.row_count = tracing::field::Empty,
         )
     )]
-    pub async fn execute_query_with_persistence(
-        &self,
-        sql: &str,
-        metadata: Option<serde_json::Value>,
-    ) -> Result<TrackedQueryResult> {
-        // Validate metadata shape
-        let metadata = match metadata {
-            Some(val) => {
-                if !val.is_object() {
-                    return Err(QueryInputError("metadata must be a JSON object".into()).into());
-                }
-                val
-            }
-            None => serde_json::Value::Object(Default::default()),
-        };
+    pub async fn execute_query_with_persistence(&self, sql: &str) -> Result<TrackedQueryResult> {
+        let metadata = serde_json::Value::Object(Default::default());
 
         let query_run_id = crate::id::generate_query_run_id();
         let hash = sql_hash(sql);
@@ -628,7 +615,9 @@ impl RuntimeEngine {
                         &query_run_id,
                         QueryRunUpdate::Failed {
                             error_message: &e.to_string(),
-                            execution_time_ms: Some(execution_time_ms as i64),
+                            execution_time_ms: Some(
+                                i64::try_from(execution_time_ms).unwrap_or(i64::MAX),
+                            ),
                         },
                     )
                     .await
@@ -674,8 +663,8 @@ impl RuntimeEngine {
                 &query_run_id,
                 QueryRunUpdate::Succeeded {
                     result_id: result_id.as_deref(),
-                    row_count: row_count as i64,
-                    execution_time_ms: execution_time_ms as i64,
+                    row_count: i64::try_from(row_count).unwrap_or(i64::MAX),
+                    execution_time_ms: i64::try_from(execution_time_ms).unwrap_or(i64::MAX),
                     warning_message: warning.as_deref(),
                 },
             )
@@ -935,15 +924,15 @@ impl RuntimeEngine {
     ) -> Result<QueryRunPage> {
         let limit = limit
             .unwrap_or(QUERY_LIST_DEFAULT_LIMIT)
-            .min(QUERY_LIST_MAX_LIMIT);
+            .clamp(1, QUERY_LIST_MAX_LIMIT);
 
         // Decode cursor if provided
         let cursor = if let Some(token) = cursor_token {
             let decoded = URL_SAFE_NO_PAD
                 .decode(token)
-                .map_err(|_| anyhow::anyhow!("Invalid cursor"))?;
+                .map_err(|_| QueryInputError("Invalid pagination cursor".into()))?;
             let cursor: QueryRunCursor = serde_json::from_slice(&decoded)
-                .map_err(|_| anyhow::anyhow!("Invalid cursor format"))?;
+                .map_err(|_| QueryInputError("Invalid pagination cursor format".into()))?;
             Some(cursor)
         } else {
             None

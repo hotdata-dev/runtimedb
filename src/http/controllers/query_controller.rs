@@ -30,7 +30,7 @@ pub async fn query_handler(
     }
 
     let result = engine
-        .execute_query_with_persistence(&request.sql, request.metadata)
+        .execute_query_with_persistence(&request.sql)
         .await
         .map_err(|e| -> ApiError { e.into() })?;
 

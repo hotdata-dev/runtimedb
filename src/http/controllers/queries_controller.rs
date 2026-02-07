@@ -23,14 +23,7 @@ pub async fn list_queries_handler(
     let page = engine
         .list_query_runs_page(params.limit, params.cursor.as_deref())
         .await
-        .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("Invalid cursor") {
-                ApiError::bad_request(&msg)
-            } else {
-                ApiError::internal_error(format!("Failed to list query runs: {}", e))
-            }
-        })?;
+        .map_err(|e| -> ApiError { e.into() })?;
 
     tracing::Span::current().record("runtimedb.limit", page.limit);
 
@@ -42,7 +35,6 @@ pub async fn list_queries_handler(
             status: r.status.to_string(),
             sql_text: r.sql_text,
             sql_hash: r.sql_hash,
-            metadata: r.metadata,
             trace_id: r.trace_id,
             result_id: r.result_id,
             error_message: r.error_message,

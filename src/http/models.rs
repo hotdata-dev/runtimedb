@@ -6,9 +6,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize)]
 pub struct QueryRequest {
     pub sql: String,
-    /// Optional user-provided metadata stored with the query run.
-    #[serde(default)]
-    pub metadata: Option<serde_json::Value>,
 }
 
 /// Response body for POST /query
@@ -98,7 +95,6 @@ pub struct QueryRunInfo {
     pub status: String,
     pub sql_text: String,
     pub sql_hash: String,
-    pub metadata: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -2587,34 +2587,6 @@ async fn test_query_returns_query_id() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_query_with_metadata() -> Result<()> {
-    let (app, _tempdir) = setup_test().await?;
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(PATH_QUERY)
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_string(&json!({
-                    "sql": "SELECT 1",
-                    "metadata": {"agent_id": "test", "flow": "analysis"}
-                }))?))?,
-        )
-        .await?;
-
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
-    let json: serde_json::Value = serde_json::from_slice(&body)?;
-
-    let query_id = json["query_id"].as_str().unwrap();
-    assert!(query_id.starts_with("qrun"));
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn test_list_queries_empty() -> Result<()> {
     let (app, _tempdir) = setup_test().await?;
 
@@ -2653,8 +2625,7 @@ async fn test_query_run_lifecycle_and_list() -> Result<()> {
                 .uri(PATH_QUERY)
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&json!({
-                    "sql": "SELECT 42 as answer",
-                    "metadata": {"test": true}
+                    "sql": "SELECT 42 as answer"
                 }))?))?,
         )
         .await?;
@@ -2684,7 +2655,6 @@ async fn test_query_run_lifecycle_and_list() -> Result<()> {
     assert_eq!(queries[0]["id"], query_id);
     assert_eq!(queries[0]["status"], "succeeded");
     assert_eq!(queries[0]["sql_text"], "SELECT 42 as answer");
-    assert_eq!(queries[0]["metadata"]["test"], true);
     assert!(queries[0]["row_count"].as_i64().unwrap() > 0);
     assert!(queries[0]["execution_time_ms"].as_i64().is_some());
     assert!(queries[0]["completed_at"].is_string());
@@ -2792,43 +2762,76 @@ async fn test_query_run_pagination() -> Result<()> {
     Ok(())
 }
 
+/// Regression: limit=0 used to produce an inconsistent page (has_more=true, next_cursor=null).
+/// The engine now clamps limit to at least 1.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_query_with_non_object_metadata_returns_400() -> Result<()> {
+async fn test_list_queries_limit_zero_clamps_to_one() -> Result<()> {
+    let (router, _tempdir) = setup_test().await?;
+
+    // Create one query run
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "sql": "SELECT 1"
+                }))?))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Request with limit=0 — should be clamped to 1
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/queries?limit=0")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // With limit clamped to 1, we should get exactly 1 result
+    assert_eq!(json["count"], 1);
+    assert_eq!(json["limit"], 1);
+    assert!(!json["has_more"].as_bool().unwrap());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_queries_invalid_cursor_returns_400() -> Result<()> {
     let (app, _tempdir) = setup_test().await?;
 
-    // Array metadata
     let response = app
-        .clone()
         .oneshot(
             Request::builder()
-                .method("POST")
-                .uri(PATH_QUERY)
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_string(&json!({
-                    "sql": "SELECT 1",
-                    "metadata": [1, 2, 3]
-                }))?))?,
+                .method("GET")
+                .uri("/queries?cursor=not-valid-base64!!!")
+                .body(Body::empty())?,
         )
         .await?;
+
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    // String metadata
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(PATH_QUERY)
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_string(&json!({
-                    "sql": "SELECT 1",
-                    "metadata": "not an object"
-                }))?))?,
-        )
-        .await?;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    Ok(())
+}
 
-    // Number metadata
+#[tokio::test(flavor = "multi_thread")]
+async fn test_query_with_very_large_sql() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    // Build a large SQL query (~30KB) using repeated column aliases
+    let columns: Vec<String> = (0..2000).map(|i| format!("{} as col_{}", i, i)).collect();
+    let large_sql = format!("SELECT {}", columns.join(", "));
+    assert!(large_sql.len() > 30_000);
+
     let response = app
         .oneshot(
             Request::builder()
@@ -2836,12 +2839,19 @@ async fn test_query_with_non_object_metadata_returns_400() -> Result<()> {
                 .uri(PATH_QUERY)
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&json!({
-                    "sql": "SELECT 1",
-                    "metadata": 42
+                    "sql": large_sql
                 }))?))?,
         )
         .await?;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert!(json["query_id"].as_str().unwrap().starts_with("qrun"));
+    assert_eq!(json["row_count"], 1);
+    assert_eq!(json["columns"].as_array().unwrap().len(), 2000);
 
     Ok(())
 }
