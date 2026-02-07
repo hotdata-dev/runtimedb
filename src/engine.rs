@@ -566,12 +566,16 @@ impl RuntimeEngine {
     ///
     /// This method:
     /// 1. Creates a `query_runs` record with `status='running'`
-    /// 3. Executes the query
-    /// 4. Persists results asynchronously (background parquet write)
-    /// 5. Updates the query run as succeeded or failed
+    /// 2. Executes the query
+    /// 3. Persists results asynchronously (background parquet write)
+    /// 4. Updates the query run as succeeded or failed
     ///
     /// Returns a [`TrackedQueryResult`] containing all data needed for the response.
     /// The persisted result can be retrieved via `GET /results/{id}`.
+    ///
+    /// **Note:** If the server crashes between step 1 and step 4, the query run will
+    /// remain in `running` status indefinitely. A periodic cleanup job to mark stale
+    /// `running` records as `failed` should be added in a future iteration.
     #[tracing::instrument(
         name = "execute_query_with_persistence",
         skip(self, sql),

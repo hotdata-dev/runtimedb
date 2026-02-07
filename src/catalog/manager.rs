@@ -229,7 +229,18 @@ impl QueryRunRow {
             );
             Utc::now()
         });
-        let completed_at = self.completed_at.and_then(|s| s.parse().ok());
+        let completed_at = self.completed_at.and_then(|s| {
+            s.parse()
+                .inspect_err(|e| {
+                    tracing::warn!(
+                        id = %self.id,
+                        raw_timestamp = %s,
+                        error = %e,
+                        "Failed to parse query run completed_at, treating as null"
+                    );
+                })
+                .ok()
+        });
         QueryRun {
             id: self.id,
             sql_text: self.sql_text,

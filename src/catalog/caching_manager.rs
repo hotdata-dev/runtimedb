@@ -51,6 +51,7 @@ struct CachingCatalogManagerInner {
     redis: ConnectionManager,
     config: CacheConfig,
     refresh_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    revalidation_handles: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     shutdown_token: tokio_util::sync::CancellationToken,
 }
 
@@ -88,6 +89,7 @@ impl CachingCatalogManager {
                 redis,
                 config,
                 refresh_handle: std::sync::Mutex::new(None),
+                revalidation_handles: std::sync::Mutex::new(Vec::new()),
                 shutdown_token: CancellationToken::new(),
             }),
         })
@@ -284,7 +286,7 @@ impl CachingCatalogManager {
         let prefix = self.prefix().to_string();
         let lock_key = self.key_query_list_revalidate_lock();
         let lock_token = nanoid::nanoid!();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             // Distributed singleflight: SET NX EX with a unique token.
             // If another node (or local task) already holds the lock, skip.
             let acquired: Result<bool, _> = redis::cmd("SET")
@@ -346,6 +348,10 @@ impl CachingCatalogManager {
                 .query_async(&mut state.redis.clone())
                 .await;
         });
+        // Track handle so we can drain on shutdown; prune completed tasks to avoid unbounded growth.
+        let mut handles = self.state.revalidation_handles.lock().unwrap();
+        handles.retain(|h| !h.is_finished());
+        handles.push(handle);
     }
 
     /// Read from cache with fallback to inner catalog.
@@ -731,6 +737,13 @@ impl CatalogManager for CachingCatalogManager {
         // Take the handle out of the mutex (drop the guard before awaiting)
         let handle = self.state.refresh_handle.lock().unwrap().take();
         if let Some(h) = handle {
+            let _ = h.await;
+        }
+
+        // Drain any in-flight revalidation tasks
+        let revalidation_handles: Vec<_> =
+            { std::mem::take(&mut *self.state.revalidation_handles.lock().unwrap()) };
+        for h in revalidation_handles {
             let _ = h.await;
         }
 

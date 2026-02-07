@@ -671,7 +671,7 @@ impl CatalogManager for SqliteCatalogManager {
         fields(db = "sqlite", runtimedb.query_run_id = %params.id)
     )]
     async fn create_query_run(&self, params: CreateQueryRun<'_>) -> Result<String> {
-        let now = Utc::now();
+        let now = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO query_runs (id, sql_text, sql_hash, trace_id, status, created_at)
              VALUES (?, ?, ?, ?, 'running', ?)",
@@ -680,7 +680,7 @@ impl CatalogManager for SqliteCatalogManager {
         .bind(params.sql_text)
         .bind(params.sql_hash)
         .bind(params.trace_id)
-        .bind(now)
+        .bind(&now)
         .execute(self.backend.pool())
         .await?;
         Ok(params.id.to_string())
@@ -692,7 +692,7 @@ impl CatalogManager for SqliteCatalogManager {
         fields(db = "sqlite", runtimedb.query_run_id = %id)
     )]
     async fn update_query_run(&self, id: &str, update: QueryRunUpdate<'_>) -> Result<bool> {
-        let now = Utc::now();
+        let now = Utc::now().to_rfc3339();
         let result =
             match update {
                 QueryRunUpdate::Succeeded {
@@ -708,7 +708,7 @@ impl CatalogManager for SqliteCatalogManager {
                 .bind(row_count)
                 .bind(execution_time_ms)
                 .bind(warning_message)
-                .bind(now)
+                .bind(&now)
                 .bind(id)
                 .execute(self.backend.pool())
                 .await?,
@@ -722,7 +722,7 @@ impl CatalogManager for SqliteCatalogManager {
                     )
                     .bind(error_message)
                     .bind(execution_time_ms)
-                    .bind(now)
+                    .bind(&now)
                     .bind(id)
                     .execute(self.backend.pool())
                     .await?
