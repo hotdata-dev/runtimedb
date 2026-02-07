@@ -994,6 +994,154 @@ async fn test_query_list_stale_while_revalidate() {
     }
 }
 
+/// Test that the revalidation lock's compare-and-delete release prevents one worker
+/// from deleting another worker's lock. Simulates the race where worker A's lock
+/// expires, worker B acquires, and worker A's release attempt is a no-op.
+#[tokio::test]
+async fn test_revalidation_lock_ownership_safety() {
+    let (_redis, redis_url) = start_redis().await;
+    let (_dir, inner) = create_sqlite_catalog().await;
+
+    let config = CacheConfig {
+        redis_url: Some(redis_url.clone()),
+        ttl_secs: 60,
+        refresh_interval_secs: 0,
+        key_prefix: "lock_own:".to_string(),
+    };
+
+    let caching = CachingCatalogManager::new(inner.clone(), &redis_url, config)
+        .await
+        .unwrap();
+
+    // Seed a query run so the list is non-empty for cache population
+    let id1 = runtimedb::id::generate_query_run_id();
+    caching
+        .create_query_run(CreateQueryRun {
+            id: &id1,
+            sql_text: "SELECT 1",
+            sql_hash: "own_test",
+            metadata: &serde_json::json!({}),
+            trace_id: None,
+        })
+        .await
+        .unwrap();
+
+    // Prime the cache (clean first-page fetch)
+    let client = redis::Client::open(redis_url.as_str()).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let _: () = redis::cmd("DEL")
+        .arg("lock_own:queries:dirty")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let _ = caching.list_query_runs(100, None).await.unwrap();
+
+    // Create a second query run (sets dirty marker)
+    let id2 = runtimedb::id::generate_query_run_id();
+    caching
+        .create_query_run(CreateQueryRun {
+            id: &id2,
+            sql_text: "SELECT 2",
+            sql_hash: "own_test2",
+            metadata: &serde_json::json!({}),
+            trace_id: None,
+        })
+        .await
+        .unwrap();
+
+    // Manually acquire the revalidation lock with a known "worker-B" token
+    // BEFORE triggering revalidation, to simulate the race:
+    // worker A's lock expired and worker B grabbed it.
+    let lock_key = "lock_own:queries:revalidate_lock";
+    let worker_b_token = "worker-B-unique-token";
+    let _: () = redis::cmd("SET")
+        .arg(lock_key)
+        .arg(worker_b_token)
+        .arg("EX")
+        .arg(30u64)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    // Trigger revalidation — it will try to SET NX but fail because
+    // worker B holds the lock. This means the revalidation is skipped entirely.
+    let (_, _) = caching.list_query_runs(100, None).await.unwrap();
+
+    // Give any spawned task a moment to attempt the lock
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Worker B's lock should still be intact
+    let lock_val: Option<String> = redis::cmd("GET")
+        .arg(lock_key)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        lock_val.as_deref(),
+        Some(worker_b_token),
+        "Worker B's lock should be preserved — revalidation should not have deleted it"
+    );
+
+    // Now test the direct race: simulate worker A already acquired and is about
+    // to release, but worker B stole the lock in between.
+    // We do this by manually calling the compare-and-delete script with a stale token.
+    let stale_token = "worker-A-stale-token";
+    let release_script = r#"
+        if redis.call("GET", KEYS[1]) == ARGV[1] then
+            return redis.call("DEL", KEYS[1])
+        else
+            return 0
+        end
+    "#;
+    let result: i32 = redis::cmd("EVAL")
+        .arg(release_script)
+        .arg(1)
+        .arg(lock_key)
+        .arg(stale_token)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        result, 0,
+        "Compare-and-delete should return 0 (no-op) when token doesn't match"
+    );
+
+    // Worker B's lock should STILL be intact
+    let lock_val_after: Option<String> = redis::cmd("GET")
+        .arg(lock_key)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        lock_val_after.as_deref(),
+        Some(worker_b_token),
+        "Worker B's lock must survive a stale worker A release attempt"
+    );
+
+    // Verify the correct owner CAN release
+    let result_owner: i32 = redis::cmd("EVAL")
+        .arg(release_script)
+        .arg(1)
+        .arg(lock_key)
+        .arg(worker_b_token)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        result_owner, 1,
+        "Compare-and-delete should return 1 (deleted) when token matches"
+    );
+    let lock_gone: Option<String> = redis::cmd("GET")
+        .arg(lock_key)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!(
+        lock_gone.is_none(),
+        "Lock should be deleted after owner releases it"
+    );
+}
+
 #[tokio::test]
 async fn test_redis_unavailable_at_startup_fails() {
     let (_dir, inner) = create_sqlite_catalog().await;
