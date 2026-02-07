@@ -1,4 +1,7 @@
-use runtimedb::catalog::{CatalogManager, PostgresCatalogManager, SqliteCatalogManager};
+use runtimedb::catalog::{
+    CatalogManager, CreateQueryRun, PostgresCatalogManager, QueryRunCursor, QueryRunStatus,
+    QueryRunUpdate, SqliteCatalogManager,
+};
 use runtimedb::datasets::DEFAULT_SCHEMA;
 use sqlx::{PgPool, SqlitePool};
 use tempfile::TempDir;
@@ -674,6 +677,198 @@ macro_rules! catalog_manager_tests {
                     "Non-sqlx error with 'duplicate' should not be classified as table_name conflict"
                 );
             }
+
+            // ───────────────────────────────────────────────────────────
+            // Query run history tests
+            // ───────────────────────────────────────────────────────────
+
+            #[tokio::test]
+            async fn query_run_create_and_get() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let id = runtimedb::id::generate_query_run_id();
+
+                catalog
+                    .create_query_run(CreateQueryRun {
+                        id: &id,
+                        sql_text: "SELECT 1",
+                        sql_hash: "abc123",
+
+                        trace_id: Some("trace-000"),
+                    })
+                    .await
+                    .unwrap();
+
+                let run = catalog.get_query_run(&id).await.unwrap().unwrap();
+                assert_eq!(run.id, id);
+                assert_eq!(run.sql_text, "SELECT 1");
+                assert_eq!(run.sql_hash, "abc123");
+                assert_eq!(run.trace_id.as_deref(), Some("trace-000"));
+                assert_eq!(run.status, QueryRunStatus::Running);
+                assert!(run.result_id.is_none());
+                assert!(run.completed_at.is_none());
+            }
+
+            #[tokio::test]
+            async fn query_run_update_succeeded() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let id = runtimedb::id::generate_query_run_id();
+
+                catalog
+                    .create_query_run(CreateQueryRun {
+                        id: &id,
+                        sql_text: "SELECT 42",
+                        sql_hash: "def456",
+
+                        trace_id: None,
+                    })
+                    .await
+                    .unwrap();
+
+                let updated = catalog
+                    .update_query_run(
+                        &id,
+                        QueryRunUpdate::Succeeded {
+                            result_id: Some("rslt_test"),
+                            row_count: 1,
+                            execution_time_ms: 50,
+                            warning_message: None,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert!(updated);
+
+                let run = catalog.get_query_run(&id).await.unwrap().unwrap();
+                assert_eq!(run.status, QueryRunStatus::Succeeded);
+                assert_eq!(run.result_id.as_deref(), Some("rslt_test"));
+                assert_eq!(run.row_count, Some(1));
+                assert_eq!(run.execution_time_ms, Some(50));
+                assert!(run.completed_at.is_some());
+            }
+
+            #[tokio::test]
+            async fn query_run_update_failed() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let id = runtimedb::id::generate_query_run_id();
+
+                catalog
+                    .create_query_run(CreateQueryRun {
+                        id: &id,
+                        sql_text: "SELECT bad",
+                        sql_hash: "ghi789",
+
+                        trace_id: None,
+                    })
+                    .await
+                    .unwrap();
+
+                let updated = catalog
+                    .update_query_run(
+                        &id,
+                        QueryRunUpdate::Failed {
+                            error_message: "syntax error",
+                            execution_time_ms: Some(10),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert!(updated);
+
+                let run = catalog.get_query_run(&id).await.unwrap().unwrap();
+                assert_eq!(run.status, QueryRunStatus::Failed);
+                assert_eq!(run.error_message.as_deref(), Some("syntax error"));
+                assert_eq!(run.execution_time_ms, Some(10));
+                assert!(run.completed_at.is_some());
+            }
+
+            #[tokio::test]
+            async fn query_run_list_pagination() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+
+                // Create 5 query runs
+                let mut ids = Vec::new();
+                for i in 0..5 {
+                    let id = runtimedb::id::generate_query_run_id();
+                    catalog
+                        .create_query_run(CreateQueryRun {
+                            id: &id,
+                            sql_text: &format!("SELECT {}", i),
+                            sql_hash: &format!("hash{}", i),
+
+                            trace_id: None,
+                        })
+                        .await
+                        .unwrap();
+                    ids.push(id);
+                    // Small delay to ensure distinct created_at timestamps
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+
+                // First page: limit 2, no cursor
+                let (page1, has_more) = catalog.list_query_runs(2, None).await.unwrap();
+                assert_eq!(page1.len(), 2);
+                assert!(has_more);
+                // Newest first
+                assert_eq!(page1[0].id, ids[4]);
+                assert_eq!(page1[1].id, ids[3]);
+
+                // Second page using cursor from last item of page 1
+                let cursor = QueryRunCursor {
+                    created_at: page1[1].created_at,
+                    id: page1[1].id.clone(),
+                };
+                let (page2, has_more) = catalog.list_query_runs(2, Some(&cursor)).await.unwrap();
+                assert_eq!(page2.len(), 2);
+                assert!(has_more);
+                assert_eq!(page2[0].id, ids[2]);
+                assert_eq!(page2[1].id, ids[1]);
+
+                // Third page
+                let cursor = QueryRunCursor {
+                    created_at: page2[1].created_at,
+                    id: page2[1].id.clone(),
+                };
+                let (page3, has_more) = catalog.list_query_runs(2, Some(&cursor)).await.unwrap();
+                assert_eq!(page3.len(), 1);
+                assert!(!has_more);
+                assert_eq!(page3[0].id, ids[0]);
+            }
+
+            #[tokio::test]
+            async fn query_run_get_nonexistent() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let run = catalog.get_query_run("qrun_nonexistent").await.unwrap();
+                assert!(run.is_none());
+            }
+
+            #[tokio::test]
+            async fn query_run_update_nonexistent() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let updated = catalog
+                    .update_query_run(
+                        "qrun_nonexistent",
+                        QueryRunUpdate::Failed {
+                            error_message: "test",
+                            execution_time_ms: None,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert!(!updated);
+            }
+
         }
     };
 }

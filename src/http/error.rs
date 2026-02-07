@@ -97,6 +97,12 @@ impl From<anyhow::Error> for ApiError {
             };
             return constructor(err.to_string());
         }
+        if err
+            .downcast_ref::<crate::engine::QueryInputError>()
+            .is_some()
+        {
+            return ApiError::bad_request(err.to_string());
+        }
         // Default to internal server error for unknown errors
         ApiError::internal_error(err.to_string())
     }

@@ -9,8 +9,9 @@ use chrono::{DateTime, Utc};
 use datafusion::prelude::SessionContext;
 use rand::RngCore;
 use runtimedb::catalog::{
-    CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
-    ResultStatus, ResultUpdate, SqliteCatalogManager, TableInfo, UploadInfo,
+    CatalogManager, ConnectionInfo, CreateQueryRun, DatasetInfo, OptimisticLock, PendingDeletion,
+    QueryResult, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus, ResultUpdate,
+    SqliteCatalogManager, TableInfo, UploadInfo,
 };
 use runtimedb::http::app_server::{AppServer, PATH_QUERY, PATH_RESULT, PATH_RESULTS};
 use runtimedb::secrets::{SecretMetadata, SecretStatus};
@@ -322,6 +323,28 @@ impl CatalogManager for FailingCatalog {
 
     async fn delete_dataset(&self, id: &str) -> Result<Option<DatasetInfo>> {
         self.inner.delete_dataset(id).await
+    }
+
+    // Query run methods
+
+    async fn create_query_run(&self, params: CreateQueryRun<'_>) -> Result<String> {
+        self.inner.create_query_run(params).await
+    }
+
+    async fn update_query_run(&self, id: &str, update: QueryRunUpdate<'_>) -> Result<bool> {
+        self.inner.update_query_run(id, update).await
+    }
+
+    async fn list_query_runs(
+        &self,
+        limit: usize,
+        cursor: Option<&QueryRunCursor>,
+    ) -> Result<(Vec<QueryRun>, bool)> {
+        self.inner.list_query_runs(limit, cursor).await
+    }
+
+    async fn get_query_run(&self, id: &str) -> Result<Option<QueryRun>> {
+        self.inner.get_query_run(id).await
     }
 }
 

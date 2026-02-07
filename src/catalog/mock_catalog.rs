@@ -4,8 +4,9 @@
 //! in tests to avoid needing a real database.
 
 use super::{
-    CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
-    ResultStatus, ResultUpdate, TableInfo, UploadInfo,
+    CatalogManager, ConnectionInfo, CreateQueryRun, DatasetInfo, OptimisticLock, PendingDeletion,
+    QueryResult, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus, ResultUpdate, TableInfo,
+    UploadInfo,
 };
 use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
@@ -288,6 +289,26 @@ impl CatalogManager for MockCatalog {
             }
         }
         Ok(count)
+    }
+
+    async fn create_query_run(&self, params: CreateQueryRun<'_>) -> Result<String> {
+        Ok(params.id.to_string())
+    }
+
+    async fn update_query_run(&self, _id: &str, _update: QueryRunUpdate<'_>) -> Result<bool> {
+        Ok(true)
+    }
+
+    async fn list_query_runs(
+        &self,
+        _limit: usize,
+        _cursor: Option<&QueryRunCursor>,
+    ) -> Result<(Vec<QueryRun>, bool)> {
+        Ok((vec![], false))
+    }
+
+    async fn get_query_run(&self, _id: &str) -> Result<Option<QueryRun>> {
+        Ok(None)
     }
 
     async fn count_connections_by_secret_id(&self, _secret_id: &str) -> Result<i64> {

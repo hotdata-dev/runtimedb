@@ -19,6 +19,8 @@ pub struct QueryRequest {
 /// - `"failed"`: Persistence failed (check `error_message` for details)
 #[derive(Debug, Serialize)]
 pub struct QueryResponse {
+    /// Unique identifier for the query run record (qrun...).
+    pub query_run_id: String,
     /// Unique identifier for retrieving this result via GET /results/{id}.
     /// Null if catalog registration failed (see `warning` field for details).
     /// When non-null, the result is being persisted asynchronously.
@@ -77,6 +79,48 @@ pub struct ListResultsResponse {
     pub limit: usize,
     /// Whether there are more results available after this page
     pub has_more: bool,
+}
+
+/// Query params for GET /query-runs
+#[derive(Debug, Deserialize)]
+pub struct ListQueryRunsParams {
+    pub limit: Option<usize>,
+    pub cursor: Option<String>,
+}
+
+/// Single query run for listing
+#[derive(Debug, Serialize)]
+pub struct QueryRunInfo {
+    pub id: String,
+    pub status: String,
+    pub sql_text: String,
+    pub sql_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_time_ms: Option<i64>,
+    pub created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Response body for GET /query-runs
+#[derive(Debug, Serialize)]
+pub struct ListQueryRunsResponse {
+    pub query_runs: Vec<QueryRunInfo>,
+    pub count: usize,
+    pub limit: usize,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 /// Column metadata for API responses

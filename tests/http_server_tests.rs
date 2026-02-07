@@ -2564,3 +2564,294 @@ async fn test_update_dataset_empty_label() -> Result<()> {
 
     Ok(())
 }
+
+// ==================== Query Run History Tests ====================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_query_returns_query_run_id() -> Result<()> {
+    let response = _send_query("SELECT 1 as num").await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    let query_run_id = json["query_run_id"].as_str().unwrap();
+    assert!(
+        query_run_id.starts_with("qrun"),
+        "query_run_id should start with 'qrun': {}",
+        query_run_id
+    );
+    assert_eq!(query_run_id.len(), 30);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_query_runs_empty() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/query-runs")
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert!(json["query_runs"].is_array());
+    assert_eq!(json["count"], 0);
+    assert!(!json["has_more"].as_bool().unwrap());
+    assert!(json["next_cursor"].is_null());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_query_run_lifecycle_and_list() -> Result<()> {
+    let (router, _tempdir) = setup_test().await?;
+
+    // Execute a query
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "sql": "SELECT 42 as answer"
+                }))?))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let query_json: serde_json::Value = serde_json::from_slice(&body)?;
+    let query_run_id = query_json["query_run_id"].as_str().unwrap().to_string();
+
+    // List query runs
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/query-runs?limit=10")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let list_json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(list_json["count"], 1);
+    let runs = list_json["query_runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["id"], query_run_id);
+    assert_eq!(runs[0]["status"], "succeeded");
+    assert_eq!(runs[0]["sql_text"], "SELECT 42 as answer");
+    assert!(runs[0]["row_count"].as_i64().unwrap() > 0);
+    assert!(runs[0]["execution_time_ms"].as_i64().is_some());
+    assert!(runs[0]["completed_at"].is_string());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_query_run_failed_query() -> Result<()> {
+    let (router, _tempdir) = setup_test().await?;
+
+    // Execute a bad query
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "sql": "SELECT * FROM nonexistent_table_xyz"
+                }))?))?,
+        )
+        .await?;
+    // Query should fail
+    assert_ne!(response.status(), StatusCode::OK);
+
+    // List query runs - should show the failed run
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/query-runs")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let list_json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(list_json["count"], 1);
+    let runs = list_json["query_runs"].as_array().unwrap();
+    assert_eq!(runs[0]["status"], "failed");
+    assert!(runs[0]["error_message"].is_string());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_query_run_pagination() -> Result<()> {
+    let (router, _tempdir) = setup_test().await?;
+
+    // Execute 3 queries
+    for i in 0..3 {
+        let _ = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(PATH_QUERY)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&json!({
+                        "sql": format!("SELECT {}", i)
+                    }))?))?,
+            )
+            .await?;
+    }
+
+    // First page: limit 2
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/query-runs?limit=2")
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let page1: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(page1["count"], 2);
+    assert!(page1["has_more"].as_bool().unwrap());
+    let next_cursor = page1["next_cursor"].as_str().unwrap();
+
+    // Second page using cursor
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/query-runs?limit=2&cursor={}", next_cursor))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let page2: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(page2["count"], 1);
+    assert!(!page2["has_more"].as_bool().unwrap());
+    assert!(page2["next_cursor"].is_null());
+
+    Ok(())
+}
+
+/// Regression: limit=0 used to produce an inconsistent page (has_more=true, next_cursor=null).
+/// The engine now clamps limit to at least 1.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_query_runs_limit_zero_clamps_to_one() -> Result<()> {
+    let (router, _tempdir) = setup_test().await?;
+
+    // Create one query run
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "sql": "SELECT 1"
+                }))?))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Request with limit=0 — should be clamped to 1
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/query-runs?limit=0")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // With limit clamped to 1, we should get exactly 1 result
+    assert_eq!(json["count"], 1);
+    assert_eq!(json["limit"], 1);
+    assert!(!json["has_more"].as_bool().unwrap());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_query_runs_invalid_cursor_returns_400() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/query-runs?cursor=not-valid-base64!!!")
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_query_with_very_large_sql() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    // Build a large SQL query (~30KB) using repeated column aliases
+    let columns: Vec<String> = (0..2000).map(|i| format!("{} as col_{}", i, i)).collect();
+    let large_sql = format!("SELECT {}", columns.join(", "));
+    assert!(large_sql.len() > 30_000);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "sql": large_sql
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert!(json["query_run_id"].as_str().unwrap().starts_with("qrun"));
+    assert_eq!(json["row_count"], 1);
+    assert_eq!(json["columns"].as_array().unwrap().len(), 2000);
+
+    Ok(())
+}

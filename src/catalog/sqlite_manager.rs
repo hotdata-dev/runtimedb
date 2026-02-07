@@ -1,7 +1,8 @@
 use crate::catalog::backend::CatalogBackend;
 use crate::catalog::manager::{
-    CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
-    QueryResultRow, ResultStatus, ResultUpdate, TableInfo, UploadInfo,
+    CatalogManager, ConnectionInfo, CreateQueryRun, DatasetInfo, OptimisticLock, PendingDeletion,
+    QueryResult, QueryResultRow, QueryRun, QueryRunCursor, QueryRunRow, QueryRunUpdate,
+    ResultStatus, ResultUpdate, TableInfo, UploadInfo,
 };
 use crate::catalog::migrations::{
     run_migrations, wrap_migration_sql, CatalogMigrations, Migration, SQLITE_MIGRATIONS,
@@ -660,6 +661,136 @@ impl CatalogManager for SqliteCatalogManager {
         .execute(self.backend.pool())
         .await?;
         Ok(result.rows_affected() as usize)
+    }
+
+    // Query run history methods
+
+    #[tracing::instrument(
+        name = "catalog_create_query_run",
+        skip(self, params),
+        fields(db = "sqlite", runtimedb.query_run_id = %params.id)
+    )]
+    async fn create_query_run(&self, params: CreateQueryRun<'_>) -> Result<String> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO query_runs (id, sql_text, sql_hash, trace_id, status, created_at)
+             VALUES (?, ?, ?, ?, 'running', ?)",
+        )
+        .bind(params.id)
+        .bind(params.sql_text)
+        .bind(params.sql_hash)
+        .bind(params.trace_id)
+        .bind(&now)
+        .execute(self.backend.pool())
+        .await?;
+        Ok(params.id.to_string())
+    }
+
+    #[tracing::instrument(
+        name = "catalog_update_query_run",
+        skip(self, update),
+        fields(db = "sqlite", runtimedb.query_run_id = %id)
+    )]
+    async fn update_query_run(&self, id: &str, update: QueryRunUpdate<'_>) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let result =
+            match update {
+                QueryRunUpdate::Succeeded {
+                    result_id,
+                    row_count,
+                    execution_time_ms,
+                    warning_message,
+                } => sqlx::query(
+                    "UPDATE query_runs SET status = 'succeeded', result_id = ?, row_count = ?, \
+                     execution_time_ms = ?, warning_message = ?, completed_at = ? WHERE id = ?",
+                )
+                .bind(result_id)
+                .bind(row_count)
+                .bind(execution_time_ms)
+                .bind(warning_message)
+                .bind(&now)
+                .bind(id)
+                .execute(self.backend.pool())
+                .await?,
+                QueryRunUpdate::Failed {
+                    error_message,
+                    execution_time_ms,
+                } => {
+                    sqlx::query(
+                        "UPDATE query_runs SET status = 'failed', error_message = ?, \
+                     execution_time_ms = ?, completed_at = ? WHERE id = ?",
+                    )
+                    .bind(error_message)
+                    .bind(execution_time_ms)
+                    .bind(&now)
+                    .bind(id)
+                    .execute(self.backend.pool())
+                    .await?
+                }
+            };
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[tracing::instrument(name = "catalog_list_query_runs", skip(self), fields(db = "sqlite"))]
+    async fn list_query_runs(
+        &self,
+        limit: usize,
+        cursor: Option<&QueryRunCursor>,
+    ) -> Result<(Vec<QueryRun>, bool)> {
+        let fetch_limit = (limit + 1) as i64;
+        let rows: Vec<QueryRunRow> = if let Some(cursor) = cursor {
+            let cursor_ts = cursor.created_at.to_rfc3339();
+            sqlx::query_as(
+                "SELECT id, sql_text, sql_hash, trace_id, status, result_id, \
+                 error_message, warning_message, row_count, execution_time_ms, created_at, completed_at \
+                 FROM query_runs \
+                 WHERE (created_at < ? OR (created_at = ? AND id < ?)) \
+                 ORDER BY created_at DESC, id DESC \
+                 LIMIT ?",
+            )
+            .bind(&cursor_ts)
+            .bind(&cursor_ts)
+            .bind(&cursor.id)
+            .bind(fetch_limit)
+            .fetch_all(self.backend.pool())
+            .await?
+        } else {
+            sqlx::query_as(
+                "SELECT id, sql_text, sql_hash, trace_id, status, result_id, \
+                 error_message, warning_message, row_count, execution_time_ms, created_at, completed_at \
+                 FROM query_runs \
+                 ORDER BY created_at DESC, id DESC \
+                 LIMIT ?",
+            )
+            .bind(fetch_limit)
+            .fetch_all(self.backend.pool())
+            .await?
+        };
+
+        let has_more = rows.len() > limit;
+        let runs = rows
+            .into_iter()
+            .take(limit)
+            .map(QueryRunRow::into_query_run)
+            .collect();
+        Ok((runs, has_more))
+    }
+
+    #[tracing::instrument(
+        name = "catalog_get_query_run",
+        skip(self),
+        fields(db = "sqlite", runtimedb.query_run_id = %id)
+    )]
+    async fn get_query_run(&self, id: &str) -> Result<Option<QueryRun>> {
+        let row: Option<QueryRunRow> = sqlx::query_as(
+            "SELECT id, sql_text, sql_hash, trace_id, status, result_id, \
+             error_message, warning_message, row_count, execution_time_ms, created_at, completed_at \
+             FROM query_runs WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(self.backend.pool())
+        .await?;
+        Ok(row.map(QueryRunRow::into_query_run))
     }
 
     #[tracing::instrument(

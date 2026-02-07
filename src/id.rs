@@ -120,6 +120,7 @@ define_resource_ids! {
     Secret => "secr",
     Upload => "upld",
     Dataset => "data",
+    QueryRun => "qrun",
 }
 
 /// Generate a 30-char ID: 4-char prefix + 26-char nanoid (lowercase alphanumeric).
@@ -151,6 +152,11 @@ pub fn generate_upload_id() -> String {
 /// Generate a dataset ID (prefix: "data").
 pub fn generate_dataset_id() -> String {
     generate_id(ResourceId::Dataset)
+}
+
+/// Generate a query run ID (prefix: "qrun").
+pub fn generate_query_run_id() -> String {
+    generate_id(ResourceId::QueryRun)
 }
 
 #[cfg(test)]
@@ -225,5 +231,16 @@ mod tests {
     fn test_resource_id_prefixes_include_new_types() {
         assert_eq!(ResourceId::Upload.prefix(), "upld");
         assert_eq!(ResourceId::Dataset.prefix(), "data");
+        assert_eq!(ResourceId::QueryRun.prefix(), "qrun");
+    }
+
+    #[test]
+    fn test_query_run_id_format() {
+        let id = generate_query_run_id();
+        assert_eq!(id.len(), 30);
+        assert!(id.starts_with("qrun"));
+        assert!(id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
     }
 }

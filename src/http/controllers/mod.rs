@@ -3,6 +3,7 @@ pub mod datasets_controller;
 pub mod health_controller;
 pub mod information_schema_controller;
 pub mod query_controller;
+pub mod query_runs_controller;
 pub mod refresh_controller;
 pub mod results_controller;
 pub mod secrets_controller;
@@ -18,6 +19,7 @@ pub use datasets_controller::{
 pub use health_controller::health_handler;
 pub use information_schema_controller::information_schema_handler;
 pub use query_controller::query_handler;
+pub use query_runs_controller::list_query_runs_handler;
 pub use refresh_controller::refresh_handler;
 pub use results_controller::{get_result_handler, list_results_handler};
 pub use secrets_controller::{

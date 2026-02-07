@@ -6,7 +6,6 @@ use axum::{extract::State, Json};
 use datafusion::arrow::datatypes::Schema;
 use datafusion::arrow::record_batch::RecordBatch;
 use std::sync::Arc;
-use std::time::Instant;
 
 /// Result type for serialized batch data: (columns, nullable flags, rows)
 pub(crate) type SerializedBatchData = (Vec<String>, Vec<bool>, Vec<Vec<serde_json::Value>>);
@@ -18,6 +17,7 @@ pub(crate) type SerializedBatchData = (Vec<String>, Vec<bool>, Vec<Vec<serde_jso
     fields(
         runtimedb.row_count = tracing::field::Empty,
         runtimedb.result_id = tracing::field::Empty,
+        runtimedb.query_run_id = tracing::field::Empty,
     )
 )]
 pub async fn query_handler(
@@ -29,36 +29,29 @@ pub async fn query_handler(
         return Err(ApiError::bad_request("SQL query cannot be empty"));
     }
 
-    // Execute query with async persistence
-    let start = Instant::now();
-    let (result, warning) = engine.execute_query_with_persistence(&request.sql).await?;
-    let execution_time_ms = start.elapsed().as_millis() as u64;
+    let result = engine
+        .execute_query_with_persistence(&request.sql)
+        .await
+        .map_err(|e| -> ApiError { e.into() })?;
 
-    let batches = &result.results;
-    let schema = &result.schema;
+    tracing::Span::current().record("runtimedb.query_run_id", &result.query_run_id);
+    tracing::Span::current().record("runtimedb.row_count", result.row_count);
+    if let Some(ref rid) = result.result_id {
+        tracing::Span::current().record("runtimedb.result_id", rid);
+    }
 
-    // Serialize results for HTTP response
-    let (columns, nullable, rows) = serialize_batches(schema, batches)?;
-    let row_count = rows.len();
-
-    // Determine result_id - empty string from engine means persistence failed
-    let result_id = if result.result_id.is_empty() {
-        None
-    } else {
-        tracing::Span::current().record("runtimedb.result_id", &result.result_id);
-        Some(result.result_id)
-    };
-
-    tracing::Span::current().record("runtimedb.row_count", row_count);
+    // Serialize Arrow batches for HTTP response
+    let (columns, nullable, rows) = serialize_batches(&result.schema, &result.results)?;
 
     Ok(Json(QueryResponse {
-        result_id,
+        query_run_id: result.query_run_id,
+        result_id: result.result_id,
         columns,
         nullable,
         rows,
-        row_count,
-        execution_time_ms,
-        warning,
+        row_count: result.row_count,
+        execution_time_ms: result.execution_time_ms,
+        warning: result.warning,
     }))
 }
 
