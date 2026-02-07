@@ -3,9 +3,13 @@
 //! These tests require a Redis instance. They use testcontainers to spin up
 //! a Redis container for testing.
 
-use runtimedb::catalog::{CachingCatalogManager, CatalogManager, SqliteCatalogManager};
+use runtimedb::catalog::{
+    CachingCatalogManager, CatalogManager, CreateQueryRun, QueryRunCursor, QueryRunUpdate,
+    SqliteCatalogManager,
+};
 use runtimedb::config::CacheConfig;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 use testcontainers::{runners::AsyncRunner, GenericImage};
 
@@ -640,6 +644,354 @@ async fn test_refresh_aborts_on_lock_loss() {
         "Refresh should stop writing after lock loss (keys before: {}, after: {})",
         count_after_lock_loss, count_after_wait
     );
+}
+
+/// Test that first-page query listing is cached on miss then served from cache on hit.
+#[tokio::test]
+async fn test_query_list_first_page_cache_miss_then_hit() {
+    let (_redis, redis_url) = start_redis().await;
+    let (_dir, inner) = create_sqlite_catalog().await;
+
+    let config = CacheConfig {
+        redis_url: Some(redis_url.clone()),
+        ttl_secs: 60,
+        refresh_interval_secs: 0,
+        key_prefix: "qlist_hit:".to_string(),
+    };
+
+    let caching = CachingCatalogManager::new(inner.clone(), &redis_url, config)
+        .await
+        .unwrap();
+
+    // Create a query run so the list is non-empty
+    let id = runtimedb::id::generate_query_run_id();
+    caching
+        .create_query_run(CreateQueryRun {
+            id: &id,
+            sql_text: "SELECT 1",
+            sql_hash: "abc123",
+            metadata: &serde_json::json!({}),
+            trace_id: None,
+        })
+        .await
+        .unwrap();
+
+    // First list call (cache miss) — should populate the cache
+    let (runs1, has_more1) = caching.list_query_runs(100, None).await.unwrap();
+    assert_eq!(runs1.len(), 1);
+    assert!(!has_more1);
+
+    // Verify the cache key was written in Redis
+    let client = redis::Client::open(redis_url.as_str()).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let exists: bool = redis::cmd("EXISTS")
+        .arg("qlist_hit:queries:first:limit:100")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!(exists, "First-page cache key should exist after miss");
+
+    // Second list call (cache hit) — should return the same data
+    let (runs2, has_more2) = caching.list_query_runs(100, None).await.unwrap();
+    assert_eq!(runs2.len(), 1);
+    assert_eq!(runs2[0].id, runs1[0].id);
+    assert!(!has_more2);
+}
+
+/// Test that create_query_run sets the dirty marker, which causes the next
+/// list_query_runs to serve stale and trigger revalidation that refreshes
+/// the cached contents.
+#[tokio::test]
+async fn test_query_list_dirty_marker_on_create() {
+    let (_redis, redis_url) = start_redis().await;
+    let (_dir, inner) = create_sqlite_catalog().await;
+
+    let config = CacheConfig {
+        redis_url: Some(redis_url.clone()),
+        ttl_secs: 60,
+        refresh_interval_secs: 0,
+        key_prefix: "qlist_dirty:".to_string(),
+    };
+
+    let caching = CachingCatalogManager::new(inner.clone(), &redis_url, config)
+        .await
+        .unwrap();
+
+    // Populate cache with an empty list (limit=100 is a cacheable limit)
+    let (runs, _) = caching.list_query_runs(100, None).await.unwrap();
+    assert!(runs.is_empty());
+
+    // Verify dirty marker does NOT exist yet
+    let client = redis::Client::open(redis_url.as_str()).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let dirty_before: Option<String> = redis::cmd("GET")
+        .arg("qlist_dirty:queries:dirty")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!(
+        dirty_before.is_none(),
+        "Dirty marker should not exist before write"
+    );
+
+    // Create a query run — should set dirty marker
+    let id = runtimedb::id::generate_query_run_id();
+    caching
+        .create_query_run(CreateQueryRun {
+            id: &id,
+            sql_text: "SELECT 42",
+            sql_hash: "def456",
+            metadata: &serde_json::json!({}),
+            trace_id: None,
+        })
+        .await
+        .unwrap();
+
+    // Verify dirty marker IS set
+    let dirty_after: Option<String> = redis::cmd("GET")
+        .arg("qlist_dirty:queries:dirty")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!(
+        dirty_after.is_some(),
+        "Dirty marker should be set after create_query_run"
+    );
+
+    // Read while dirty — should serve stale (empty) and trigger revalidation
+    let (runs_stale, _) = caching.list_query_runs(100, None).await.unwrap();
+    assert!(
+        runs_stale.is_empty(),
+        "Stale cache should still return empty list immediately"
+    );
+
+    // Poll until the cache reflects the new run (revalidation completes asynchronously)
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (runs_check, _) = caching.list_query_runs(100, None).await.unwrap();
+        if runs_check.len() == 1 {
+            assert_eq!(runs_check[0].id, id);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Timed out waiting for cache revalidation to reflect the new query run"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Test that update_query_run also sets the dirty marker.
+#[tokio::test]
+async fn test_query_list_dirty_marker_on_update() {
+    let (_redis, redis_url) = start_redis().await;
+    let (_dir, inner) = create_sqlite_catalog().await;
+
+    let config = CacheConfig {
+        redis_url: Some(redis_url.clone()),
+        ttl_secs: 60,
+        refresh_interval_secs: 0,
+        key_prefix: "qlist_upd:".to_string(),
+    };
+
+    let caching = CachingCatalogManager::new(inner.clone(), &redis_url, config)
+        .await
+        .unwrap();
+
+    // Create a query run
+    let id = runtimedb::id::generate_query_run_id();
+    caching
+        .create_query_run(CreateQueryRun {
+            id: &id,
+            sql_text: "SELECT 1",
+            sql_hash: "abc",
+            metadata: &serde_json::json!({}),
+            trace_id: None,
+        })
+        .await
+        .unwrap();
+
+    // Clear the dirty marker manually to isolate the update test
+    let client = redis::Client::open(redis_url.as_str()).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let _: () = redis::cmd("DEL")
+        .arg("qlist_upd:queries:dirty")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    // Update the query run — should re-set dirty marker
+    caching
+        .update_query_run(
+            &id,
+            QueryRunUpdate::Succeeded {
+                result_id: Some("rslt_test"),
+                row_count: 1,
+                execution_time_ms: 10,
+                warning_message: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let dirty: Option<String> = redis::cmd("GET")
+        .arg("qlist_upd:queries:dirty")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!(
+        dirty.is_some(),
+        "Dirty marker should be set after update_query_run"
+    );
+}
+
+/// Test that cursor-based requests and non-standard limits bypass the cache.
+#[tokio::test]
+async fn test_query_list_cache_bypass_for_cursors_and_odd_limits() {
+    let (_redis, redis_url) = start_redis().await;
+    let (_dir, inner) = create_sqlite_catalog().await;
+
+    let config = CacheConfig {
+        redis_url: Some(redis_url.clone()),
+        ttl_secs: 60,
+        refresh_interval_secs: 0,
+        key_prefix: "qlist_bypass:".to_string(),
+    };
+
+    let caching = CachingCatalogManager::new(inner.clone(), &redis_url, config)
+        .await
+        .unwrap();
+
+    // Create a query run
+    let id = runtimedb::id::generate_query_run_id();
+    caching
+        .create_query_run(CreateQueryRun {
+            id: &id,
+            sql_text: "SELECT 1",
+            sql_hash: "aaa",
+            metadata: &serde_json::json!({}),
+            trace_id: None,
+        })
+        .await
+        .unwrap();
+
+    // Request with non-cacheable limit (e.g. 30) — should NOT create a cache key
+    let (runs, _) = caching.list_query_runs(30, None).await.unwrap();
+    assert_eq!(runs.len(), 1);
+
+    let client = redis::Client::open(redis_url.as_str()).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let exists: bool = redis::cmd("EXISTS")
+        .arg("qlist_bypass:queries:first:limit:30")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!(
+        !exists,
+        "Non-standard limit should not create a cache entry"
+    );
+
+    // Request with cursor — should NOT create a cache key for limit=100
+    let cursor = QueryRunCursor {
+        created_at: runs[0].created_at,
+        id: runs[0].id.clone(),
+    };
+    let (runs2, _) = caching.list_query_runs(100, Some(&cursor)).await.unwrap();
+    assert!(runs2.is_empty());
+
+    // The first-page key for limit=100 should NOT exist (cursor request shouldn't populate it)
+    let exists: bool = redis::cmd("EXISTS")
+        .arg("qlist_bypass:queries:first:limit:100")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!(
+        !exists,
+        "Cursor request should not create first-page cache entry"
+    );
+}
+
+/// Test stale-while-revalidate: stale cache is served while background refresh happens.
+#[tokio::test]
+async fn test_query_list_stale_while_revalidate() {
+    let (_redis, redis_url) = start_redis().await;
+    let (_dir, inner) = create_sqlite_catalog().await;
+
+    let config = CacheConfig {
+        redis_url: Some(redis_url.clone()),
+        ttl_secs: 60,
+        refresh_interval_secs: 0,
+        key_prefix: "qlist_swr:".to_string(),
+    };
+
+    let caching = CachingCatalogManager::new(inner.clone(), &redis_url, config)
+        .await
+        .unwrap();
+
+    // Create first query run and populate cache
+    let id1 = runtimedb::id::generate_query_run_id();
+    caching
+        .create_query_run(CreateQueryRun {
+            id: &id1,
+            sql_text: "SELECT 1",
+            sql_hash: "hash1",
+            metadata: &serde_json::json!({}),
+            trace_id: None,
+        })
+        .await
+        .unwrap();
+
+    // Clear dirty marker, then populate cache
+    let client = redis::Client::open(redis_url.as_str()).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let _: () = redis::cmd("DEL")
+        .arg("qlist_swr:queries:dirty")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    let (runs, _) = caching.list_query_runs(100, None).await.unwrap();
+    assert_eq!(runs.len(), 1, "Should see 1 query run initially");
+
+    // Now create a second query run — this sets the dirty marker
+    let id2 = runtimedb::id::generate_query_run_id();
+    caching
+        .create_query_run(CreateQueryRun {
+            id: &id2,
+            sql_text: "SELECT 2",
+            sql_hash: "hash2",
+            metadata: &serde_json::json!({}),
+            trace_id: None,
+        })
+        .await
+        .unwrap();
+
+    // Immediately read — should get stale data (1 run) while triggering async revalidation
+    let (runs_stale, _) = caching.list_query_runs(100, None).await.unwrap();
+    assert_eq!(
+        runs_stale.len(),
+        1,
+        "Stale cache should still return 1 run (dirty marker triggers revalidation)"
+    );
+
+    // Poll until background revalidation clears the dirty marker and updates the cache
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let dirty_val: Option<String> = redis::cmd("GET")
+            .arg("qlist_swr:queries:dirty")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let (runs_check, _) = caching.list_query_runs(100, None).await.unwrap();
+        if dirty_val.is_none() && runs_check.len() == 2 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Timed out waiting for revalidation to clear dirty marker and update cache"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 #[tokio::test]
