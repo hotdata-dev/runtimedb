@@ -59,6 +59,7 @@ arrow-ipc-54 = { package = "arrow-ipc", version = "54" }
 arrow-ipc-56 = { package = "arrow-ipc", version = "56" }
 liquid-cache-client = { git = "https://github.com/XiangpengHao/liquid-cache", rev = "5e63d811132230a0e15fb6d4311be2eb5551cb4d" }
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+sha2 = "0.10"
 
 [build-dependencies]
 sha2 = "0.10"

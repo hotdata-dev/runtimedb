@@ -144,6 +144,171 @@ impl From<QueryResultRow> for QueryResult {
     }
 }
 
+/// Status of a query run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QueryRunStatus {
+    Running,
+    Succeeded,
+    Failed,
+}
+
+impl QueryRunStatus {
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "running" => Self::Running,
+            "succeeded" => Self::Succeeded,
+            "failed" => Self::Failed,
+            unknown => {
+                tracing::warn!(
+                    status = %unknown,
+                    "Unknown query run status in database, treating as failed"
+                );
+                Self::Failed
+            }
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl std::fmt::Display for QueryRunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// A query run record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryRun {
+    pub id: String,
+    pub sql_text: String,
+    pub sql_hash: String,
+    pub metadata: serde_json::Value,
+    pub trace_id: Option<String>,
+    pub status: QueryRunStatus,
+    pub result_id: Option<String>,
+    pub error_message: Option<String>,
+    pub warning_message: Option<String>,
+    pub row_count: Option<i64>,
+    pub execution_time_ms: Option<i64>,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Raw database row for query runs (used by sqlx in SQLite where timestamps are strings).
+#[derive(Debug, Clone, FromRow)]
+pub struct QueryRunRow {
+    pub id: String,
+    pub sql_text: String,
+    pub sql_hash: String,
+    pub metadata: String,
+    pub trace_id: Option<String>,
+    pub status: String,
+    pub result_id: Option<String>,
+    pub error_message: Option<String>,
+    pub warning_message: Option<String>,
+    pub row_count: Option<i64>,
+    pub execution_time_ms: Option<i64>,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
+impl QueryRunRow {
+    pub fn into_query_run(self) -> QueryRun {
+        QueryRun {
+            id: self.id,
+            sql_text: self.sql_text,
+            sql_hash: self.sql_hash,
+            metadata: serde_json::from_str(&self.metadata)
+                .unwrap_or(serde_json::Value::Object(Default::default())),
+            trace_id: self.trace_id,
+            status: QueryRunStatus::parse(&self.status),
+            result_id: self.result_id,
+            error_message: self.error_message,
+            warning_message: self.warning_message,
+            row_count: self.row_count,
+            execution_time_ms: self.execution_time_ms,
+            created_at: self.created_at.parse().unwrap_or_else(|_| Utc::now()),
+            completed_at: self.completed_at.and_then(|s| s.parse().ok()),
+        }
+    }
+}
+
+/// Raw database row for query runs in Postgres (native timestamps).
+#[derive(Debug, Clone, FromRow)]
+pub struct QueryRunRowPg {
+    pub id: String,
+    pub sql_text: String,
+    pub sql_hash: String,
+    pub metadata: serde_json::Value,
+    pub trace_id: Option<String>,
+    pub status: String,
+    pub result_id: Option<String>,
+    pub error_message: Option<String>,
+    pub warning_message: Option<String>,
+    pub row_count: Option<i64>,
+    pub execution_time_ms: Option<i64>,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+impl From<QueryRunRowPg> for QueryRun {
+    fn from(row: QueryRunRowPg) -> Self {
+        Self {
+            id: row.id,
+            sql_text: row.sql_text,
+            sql_hash: row.sql_hash,
+            metadata: row.metadata,
+            trace_id: row.trace_id,
+            status: QueryRunStatus::parse(&row.status),
+            result_id: row.result_id,
+            error_message: row.error_message,
+            warning_message: row.warning_message,
+            row_count: row.row_count,
+            execution_time_ms: row.execution_time_ms,
+            created_at: row.created_at,
+            completed_at: row.completed_at,
+        }
+    }
+}
+
+/// Parameters for creating a new query run.
+pub struct CreateQueryRun<'a> {
+    pub id: &'a str,
+    pub sql_text: &'a str,
+    pub sql_hash: &'a str,
+    pub metadata: &'a serde_json::Value,
+    pub trace_id: Option<&'a str>,
+}
+
+/// Parameters for completing a query run.
+pub enum QueryRunUpdate<'a> {
+    Succeeded {
+        result_id: Option<&'a str>,
+        row_count: i64,
+        execution_time_ms: i64,
+        warning_message: Option<&'a str>,
+    },
+    Failed {
+        error_message: &'a str,
+        execution_time_ms: Option<i64>,
+    },
+}
+
+/// Cursor for keyset pagination of query runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryRunCursor {
+    pub created_at: DateTime<Utc>,
+    pub id: String,
+}
+
 /// A pending file upload.
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct UploadInfo {
@@ -297,6 +462,27 @@ pub trait CatalogManager: Debug + Send + Sync {
 
     /// Count how many connections reference a given secret_id.
     async fn count_connections_by_secret_id(&self, secret_id: &str) -> Result<i64>;
+
+    // Query run history methods
+
+    /// Create a new query run record (status = 'running').
+    /// Returns the generated query run ID.
+    async fn create_query_run(&self, params: CreateQueryRun<'_>) -> Result<String>;
+
+    /// Update a query run on completion (success or failure).
+    /// Returns true if the query run was found and updated.
+    async fn update_query_run(&self, id: &str, update: QueryRunUpdate<'_>) -> Result<bool>;
+
+    /// List query runs with keyset (cursor) pagination.
+    /// Returns (runs, has_more).
+    async fn list_query_runs(
+        &self,
+        limit: usize,
+        cursor: Option<&QueryRunCursor>,
+    ) -> Result<(Vec<QueryRun>, bool)>;
+
+    /// Get a single query run by ID.
+    async fn get_query_run(&self, id: &str) -> Result<Option<QueryRun>>;
 
     // Query result persistence methods
 
