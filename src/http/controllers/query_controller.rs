@@ -34,7 +34,7 @@ pub async fn query_handler(
         .await
         .map_err(|e| -> ApiError { e.into() })?;
 
-    tracing::Span::current().record("runtimedb.query_run_id", &result.query_id);
+    tracing::Span::current().record("runtimedb.query_run_id", &result.query_run_id);
     tracing::Span::current().record("runtimedb.row_count", result.row_count);
     if let Some(ref rid) = result.result_id {
         tracing::Span::current().record("runtimedb.result_id", rid);
@@ -44,7 +44,7 @@ pub async fn query_handler(
     let (columns, nullable, rows) = serialize_batches(&result.schema, &result.results)?;
 
     Ok(Json(QueryResponse {
-        query_id: result.query_id,
+        query_run_id: result.query_run_id,
         result_id: result.result_id,
         columns,
         nullable,

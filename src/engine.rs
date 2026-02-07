@@ -92,12 +92,12 @@ pub struct QueryInputError(pub String);
 ///
 /// Returned by [`RuntimeEngine::execute_query_with_persistence`]. Contains all
 /// the information needed to build an HTTP response:
-/// - `query_id` identifies the query run record
+/// - `query_run_id` identifies the query run record
 /// - `result_id` can be used to retrieve the persisted result via `/results/{id}`
 /// - The result data is available immediately regardless of persistence status
 pub struct TrackedQueryResult {
     /// Unique identifier for the query run record (qrun...).
-    pub query_id: String,
+    pub query_run_id: String,
     /// Unique identifier for the persisted result, if persistence succeeded.
     pub result_id: Option<String>,
     /// Arrow schema describing the result columns.
@@ -670,7 +670,7 @@ impl RuntimeEngine {
         }
 
         Ok(TrackedQueryResult {
-            query_id: query_run_id,
+            query_run_id,
             result_id,
             schema: query_response.schema,
             results: query_response.results,

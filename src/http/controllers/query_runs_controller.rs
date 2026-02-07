@@ -5,16 +5,16 @@ use axum::extract::{Query, State};
 use axum::Json;
 use std::sync::Arc;
 
-/// Handler for GET /queries
+/// Handler for GET /query-runs
 #[tracing::instrument(
-    name = "handler_list_queries",
+    name = "handler_list_query_runs",
     skip(engine),
     fields(
         runtimedb.limit = tracing::field::Empty,
         runtimedb.has_cursor = tracing::field::Empty,
     )
 )]
-pub async fn list_queries_handler(
+pub async fn list_query_runs_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     Query(params): Query<ListQueryRunsParams>,
 ) -> Result<Json<ListQueryRunsResponse>, ApiError> {
@@ -27,7 +27,7 @@ pub async fn list_queries_handler(
 
     tracing::Span::current().record("runtimedb.limit", page.limit);
 
-    let queries: Vec<QueryRunInfo> = page
+    let query_runs: Vec<QueryRunInfo> = page
         .runs
         .into_iter()
         .map(|r| QueryRunInfo {
@@ -47,7 +47,7 @@ pub async fn list_queries_handler(
         .collect();
 
     Ok(Json(ListQueryRunsResponse {
-        queries,
+        query_runs,
         count: page.count,
         limit: page.limit,
         has_more: page.has_more,

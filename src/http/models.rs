@@ -20,7 +20,7 @@ pub struct QueryRequest {
 #[derive(Debug, Serialize)]
 pub struct QueryResponse {
     /// Unique identifier for the query run record (qrun...).
-    pub query_id: String,
+    pub query_run_id: String,
     /// Unique identifier for retrieving this result via GET /results/{id}.
     /// Null if catalog registration failed (see `warning` field for details).
     /// When non-null, the result is being persisted asynchronously.
@@ -81,7 +81,7 @@ pub struct ListResultsResponse {
     pub has_more: bool,
 }
 
-/// Query params for GET /queries
+/// Query params for GET /query-runs
 #[derive(Debug, Deserialize)]
 pub struct ListQueryRunsParams {
     pub limit: Option<usize>,
@@ -112,10 +112,10 @@ pub struct QueryRunInfo {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-/// Response body for GET /queries
+/// Response body for GET /query-runs
 #[derive(Debug, Serialize)]
 pub struct ListQueryRunsResponse {
-    pub queries: Vec<QueryRunInfo>,
+    pub query_runs: Vec<QueryRunInfo>,
     pub count: usize,
     pub limit: usize,
     pub has_more: bool,

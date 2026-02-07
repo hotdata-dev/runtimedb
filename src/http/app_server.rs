@@ -2,9 +2,9 @@ use crate::http::controllers::{
     create_connection_handler, create_dataset, create_secret_handler, delete_connection_handler,
     delete_dataset, delete_secret_handler, get_connection_handler, get_dataset, get_result_handler,
     get_secret_handler, health_handler, information_schema_handler, list_connections_handler,
-    list_datasets, list_queries_handler, list_results_handler, list_secrets_handler, list_uploads,
-    purge_connection_cache_handler, purge_table_cache_handler, query_handler, refresh_handler,
-    update_dataset, update_secret_handler, upload_file, MAX_UPLOAD_SIZE,
+    list_datasets, list_query_runs_handler, list_results_handler, list_secrets_handler,
+    list_uploads, purge_connection_cache_handler, purge_table_cache_handler, query_handler,
+    refresh_handler, update_dataset, update_secret_handler, upload_file, MAX_UPLOAD_SIZE,
 };
 use crate::RuntimeEngine;
 use axum::extract::DefaultBodyLimit;
@@ -84,7 +84,7 @@ pub const PATH_CONNECTION_CACHE: &str = "/connections/{connection_id}/cache";
 pub const PATH_TABLE_CACHE: &str = "/connections/{connection_id}/tables/{schema}/{table}/cache";
 pub const PATH_SECRETS: &str = "/secrets";
 pub const PATH_SECRET: &str = "/secrets/{name}";
-pub const PATH_QUERIES: &str = "/queries";
+pub const PATH_QUERY_RUNS: &str = "/query-runs";
 pub const PATH_RESULTS: &str = "/results";
 pub const PATH_RESULT: &str = "/results/{id}";
 pub const PATH_FILES: &str = "/v1/files";
@@ -123,7 +123,7 @@ impl AppServer {
                         .put(update_secret_handler)
                         .delete(delete_secret_handler),
                 )
-                .route(PATH_QUERIES, get(list_queries_handler))
+                .route(PATH_QUERY_RUNS, get(list_query_runs_handler))
                 .route(PATH_RESULTS, get(list_results_handler))
                 .route(PATH_RESULT, get(get_result_handler))
                 // Upload route with body limit to reject oversized requests before buffering
