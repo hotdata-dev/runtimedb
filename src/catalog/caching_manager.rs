@@ -277,17 +277,19 @@ impl CachingCatalogManager {
     }
 
     /// Trigger an async background revalidation of the first-page cache for a given limit.
-    /// Uses a distributed Redis lock (`SET NX EX`) so only one node revalidates at a time.
+    /// Uses a distributed Redis lock with a unique token and compare-and-delete release
+    /// so only the lock owner can release it, preventing races when lock TTL expires.
     fn trigger_query_list_revalidate(&self, limit: usize) {
         let state = Arc::clone(&self.state);
         let prefix = self.prefix().to_string();
         let lock_key = self.key_query_list_revalidate_lock();
+        let lock_token = nanoid::nanoid!();
         tokio::spawn(async move {
-            // Distributed singleflight: SET NX EX with a short TTL.
+            // Distributed singleflight: SET NX EX with a unique token.
             // If another node (or local task) already holds the lock, skip.
             let acquired: Result<bool, _> = redis::cmd("SET")
                 .arg(&lock_key)
-                .arg("1")
+                .arg(&lock_token)
                 .arg("NX")
                 .arg("EX")
                 .arg(QUERY_CACHE_HARD_TTL_SECS)
@@ -327,8 +329,22 @@ impl CachingCatalogManager {
                     warn!("cache: revalidate failed to fetch query runs: {}", e);
                 }
             }
-            // Release lock early so next revalidation can proceed
-            let _: Result<(), _> = state.redis.clone().del(&lock_key).await;
+            // Release lock only if we still own it (compare-and-delete).
+            // If the lock expired and another worker acquired it, this is a no-op.
+            let release_script = r#"
+                if redis.call("GET", KEYS[1]) == ARGV[1] then
+                    return redis.call("DEL", KEYS[1])
+                else
+                    return 0
+                end
+            "#;
+            let _: Result<i32, _> = redis::cmd("EVAL")
+                .arg(release_script)
+                .arg(1)
+                .arg(&lock_key)
+                .arg(&lock_token)
+                .query_async(&mut state.redis.clone())
+                .await;
         });
     }
 

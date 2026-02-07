@@ -104,6 +104,12 @@ pub struct QueryResponseWithId {
     pub execution_time: Duration,
 }
 
+/// Error for invalid query input (metadata shape, etc.).
+/// Maps to HTTP 400 via the `From<QueryInputError> for ApiError` conversion.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct QueryInputError(pub String);
+
 /// Result of a tracked query execution that includes query run history.
 ///
 /// Returned by [`RuntimeEngine::execute_tracked_query`]. Contains all the information
@@ -892,7 +898,7 @@ impl RuntimeEngine {
         let metadata = match metadata {
             Some(val) => {
                 if !val.is_object() {
-                    anyhow::bail!("metadata must be a JSON object");
+                    return Err(QueryInputError("metadata must be a JSON object".into()).into());
                 }
                 val
             }
