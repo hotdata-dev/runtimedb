@@ -1,4 +1,3 @@
-use crate::engine::current_trace_id;
 use crate::http::error::ApiError;
 use crate::http::models::{QueryRequest, QueryResponse};
 use crate::http::serialization::{encode_value_at, make_array_encoder};
@@ -30,10 +29,8 @@ pub async fn query_handler(
         return Err(ApiError::bad_request("SQL query cannot be empty"));
     }
 
-    let trace_id = current_trace_id();
-
     let result = engine
-        .execute_tracked_query(&request.sql, request.metadata, trace_id)
+        .execute_query_with_persistence(&request.sql, request.metadata)
         .await
         .map_err(|e| -> ApiError { e.into() })?;
 

@@ -82,38 +82,19 @@ pub struct QueryResponse {
     pub execution_time: Duration,
 }
 
-/// Result of a query execution with async persistence.
-///
-/// This struct is returned by [`RuntimeEngine::execute_query_with_persistence`].
-/// Unlike [`QueryResponse`], this includes a `result_id` that can be used to
-/// retrieve the persisted result later via the `/results/{id}` API endpoint.
-///
-/// The persistence happens asynchronously in a background task after this
-/// struct is returned. The result status can be checked via `GET /results/{id}`:
-/// - `"processing"` - Persistence is still in progress
-/// - `"ready"` - Result is fully persisted and available
-/// - `"failed"` - Persistence failed (check `error_message` for details)
-pub struct QueryResponseWithId {
-    /// Unique identifier for the persisted result.
-    pub result_id: String,
-    /// Arrow schema describing the result columns.
-    pub schema: Arc<Schema>,
-    /// The query result data (available immediately, regardless of persistence status).
-    pub results: Vec<RecordBatch>,
-    /// Time taken to execute the query (excluding persistence).
-    pub execution_time: Duration,
-}
-
 /// Error for invalid query input (metadata shape, etc.).
 /// Maps to HTTP 400 via the `From<QueryInputError> for ApiError` conversion.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct QueryInputError(pub String);
 
-/// Result of a tracked query execution that includes query run history.
+/// Result of a query execution with async persistence and run tracking.
 ///
-/// Returned by [`RuntimeEngine::execute_tracked_query`]. Contains all the information
-/// needed to build an HTTP response, with the query run lifecycle already managed.
+/// Returned by [`RuntimeEngine::execute_query_with_persistence`]. Contains all
+/// the information needed to build an HTTP response:
+/// - `query_id` identifies the query run record
+/// - `result_id` can be used to retrieve the persisted result via `/results/{id}`
+/// - The result data is available immediately regardless of persistence status
 pub struct TrackedQueryResult {
     /// Unique identifier for the query run record (qrun...).
     pub query_id: String,
@@ -153,7 +134,7 @@ pub fn sql_hash(sql: &str) -> String {
 }
 
 /// Extract the current span's trace ID if valid, else None.
-pub fn current_trace_id() -> Option<String> {
+fn current_trace_id() -> Option<String> {
     let ctx = tracing::Span::current().context();
     let span_ref = ctx.span();
     let span_context = span_ref.span_context();
@@ -581,73 +562,156 @@ impl RuntimeEngine {
         })
     }
 
-    /// Execute a SQL query and persist results asynchronously.
+    /// Execute a SQL query with result persistence and query run tracking.
     ///
     /// This method:
-    /// 1. Executes the query
-    /// 2. Generates a result ID
-    /// 3. Inserts a catalog entry with status "processing"
-    /// 4. Spawns a background task to write parquet and update status
-    /// 5. Returns immediately with the result ID
+    /// 1. Validates metadata is a JSON object (or defaults to `{}`)
+    /// 2. Creates a `query_runs` record with `status='running'`
+    /// 3. Executes the query
+    /// 4. Persists results asynchronously (background parquet write)
+    /// 5. Updates the query run as succeeded or failed
     ///
-    /// The result can be retrieved via GET /results/{id}. If status is "processing",
-    /// the client should poll again later.
+    /// Returns a [`TrackedQueryResult`] containing all data needed for the response.
+    /// The persisted result can be retrieved via `GET /results/{id}`.
     #[tracing::instrument(
         name = "execute_query_with_persistence",
-        skip(self, sql),
+        skip(self, sql, metadata),
         fields(
+            runtimedb.query_run_id = tracing::field::Empty,
             runtimedb.result_id = tracing::field::Empty,
+            runtimedb.row_count = tracing::field::Empty,
         )
     )]
     pub async fn execute_query_with_persistence(
         &self,
         sql: &str,
-    ) -> Result<(QueryResponseWithId, Option<String>)> {
-        // Execute the query first
-        let query_response = self.execute_query(sql).await?;
+        metadata: Option<serde_json::Value>,
+    ) -> Result<TrackedQueryResult> {
+        // Validate metadata shape
+        let metadata = match metadata {
+            Some(val) => {
+                if !val.is_object() {
+                    return Err(QueryInputError("metadata must be a JSON object".into()).into());
+                }
+                val
+            }
+            None => serde_json::Value::Object(Default::default()),
+        };
+
+        let query_run_id = crate::id::generate_query_run_id();
+        let hash = sql_hash(sql);
+        let trace_id = current_trace_id();
+
+        tracing::Span::current().record("runtimedb.query_run_id", &query_run_id);
+
+        // Insert query_run row with status='running'
+        self.catalog
+            .create_query_run(CreateQueryRun {
+                id: &query_run_id,
+                sql_text: sql,
+                sql_hash: &hash,
+                metadata: &metadata,
+                trace_id: trace_id.as_deref(),
+            })
+            .await?;
+
+        // Execute the query (timed for the query run record)
+        let start = Instant::now();
+        let query_response = match self.execute_query(sql).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                let execution_time_ms = start.elapsed().as_millis() as u64;
+                // Update query run as failed
+                if let Err(update_err) = self
+                    .catalog
+                    .update_query_run(
+                        &query_run_id,
+                        QueryRunUpdate::Failed {
+                            error_message: &e.to_string(),
+                            execution_time_ms: Some(execution_time_ms as i64),
+                        },
+                    )
+                    .await
+                {
+                    warn!(error = %update_err, query_run_id = %query_run_id, "Failed to update query run as failed");
+                }
+                return Err(e);
+            }
+        };
+
+        let execution_time_ms = start.elapsed().as_millis() as u64;
+        let row_count: usize = query_response.results.iter().map(|b| b.num_rows()).sum();
+
+        tracing::Span::current().record("runtimedb.row_count", row_count);
 
         // Create result in catalog - if this fails, return result with warning
-        // Note: create_result generates the ID and records it in the span
-        let result_id = match self.catalog.create_result(ResultStatus::Processing).await {
-            Ok(id) => id,
+        let (result_id, warning) = match self.catalog.create_result(ResultStatus::Processing).await
+        {
+            Ok(id) => {
+                tracing::Span::current().record("runtimedb.result_id", &id);
+                // Spawn background persistence
+                match self
+                    .schedule_persistence(&id, &query_response.schema, &query_response.results)
+                    .await
+                {
+                    Ok(()) => (Some(id), None),
+                    Err(warning_msg) => (None, Some(warning_msg)),
+                }
+            }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     "Failed to register result in catalog, returning without persistence"
                 );
-                // Return results with no persistence (empty result_id signals no persistence)
-                return Ok((
-                    QueryResponseWithId {
-                        result_id: String::new(), // Empty signals no persistence available
-                        schema: query_response.schema,
-                        results: query_response.results,
-                        execution_time: query_response.execution_time,
-                    },
-                    Some(format!("Result persistence unavailable: {}", e)),
-                ));
+                (None, Some(format!("Result persistence unavailable: {}", e)))
             }
         };
 
-        // Record result_id in span for traceability
-        tracing::Span::current().record("runtimedb.result_id", &result_id);
+        // Update query run as succeeded
+        if let Err(e) = self
+            .catalog
+            .update_query_run(
+                &query_run_id,
+                QueryRunUpdate::Succeeded {
+                    result_id: result_id.as_deref(),
+                    row_count: row_count as i64,
+                    execution_time_ms: execution_time_ms as i64,
+                    warning_message: warning.as_deref(),
+                },
+            )
+            .await
+        {
+            warn!(error = %e, query_run_id = %query_run_id, "Failed to update query run as succeeded");
+        }
 
-        // Clone what we need for the background task
-        let storage = Arc::clone(&self.storage);
-        let catalog = Arc::clone(&self.catalog);
-        let result_id_clone = result_id.clone();
-        let schema = Arc::clone(&query_response.schema);
-        let batches = query_response.results.clone();
+        Ok(TrackedQueryResult {
+            query_id: query_run_id,
+            result_id,
+            schema: query_response.schema,
+            results: query_response.results,
+            row_count,
+            execution_time_ms,
+            warning,
+        })
+    }
+
+    /// Schedule background persistence for query results.
+    ///
+    /// Acquires a semaphore permit and spawns a background task to write parquet.
+    /// Returns `Ok(())` on success, or `Err(warning_message)` if persistence
+    /// could not be initiated (e.g., during shutdown).
+    async fn schedule_persistence(
+        &self,
+        result_id: &str,
+        schema: &Arc<Schema>,
+        results: &[RecordBatch],
+    ) -> std::result::Result<(), String> {
         let semaphore = Arc::clone(&self.persistence_semaphore);
 
         // Acquire a persistence permit before spawning the background task.
         // This limits the number of concurrent persistence tasks to prevent unbounded
         // task spawning under burst load. If all permits are in use, this will block
-        // until one becomes available. The "schedule_result_persistence" span makes
-        // this wait time visible in traces - it should typically be near-zero, but
-        // will show contention if persistence tasks are backing up.
-        //
-        // If the semaphore is closed (e.g., during shutdown), we gracefully degrade
-        // by marking the result as failed rather than panicking.
+        // until one becomes available.
         let permit = match semaphore
             .acquire_owned()
             .instrument(tracing::info_span!(
@@ -666,7 +730,7 @@ impl RuntimeEngine {
                 match self
                     .catalog
                     .update_result(
-                        &result_id,
+                        result_id,
                         ResultUpdate::Failed {
                             error_message: Some("Server shutting down"),
                         },
@@ -688,17 +752,16 @@ impl RuntimeEngine {
                         );
                     }
                 }
-                return Ok((
-                    QueryResponseWithId {
-                        result_id: String::new(),
-                        schema: query_response.schema,
-                        results: query_response.results,
-                        execution_time: query_response.execution_time,
-                    },
-                    Some("Result persistence unavailable: server shutting down".to_string()),
-                ));
+                return Err("Result persistence unavailable: server shutting down".to_string());
             }
         };
+
+        // Clone what we need for the background task
+        let storage = Arc::clone(&self.storage);
+        let catalog = Arc::clone(&self.catalog);
+        let result_id_clone = result_id.to_string();
+        let schema = Arc::clone(schema);
+        let batches = results.to_vec();
 
         // Spawn background persistence task via JoinSet, which automatically removes
         // completed tasks when polled, preventing unbounded memory growth.
@@ -737,15 +800,7 @@ impl RuntimeEngine {
             });
         }
 
-        Ok((
-            QueryResponseWithId {
-                result_id,
-                schema: query_response.schema,
-                results: query_response.results,
-                execution_time: query_response.execution_time,
-            },
-            None, // No warning, persistence initiated successfully
-        ))
+        Ok(())
     }
 
     /// Get result metadata (status, etc.) without loading parquet data.
@@ -867,125 +922,6 @@ impl RuntimeEngine {
                 },
             )
             .await
-    }
-
-    /// Execute a query with full run-tracking lifecycle.
-    ///
-    /// This method:
-    /// 1. Validates metadata is a JSON object (or defaults to `{}`)
-    /// 2. Generates a query run ID and SQL hash
-    /// 3. Creates a `query_runs` record with `status='running'`
-    /// 4. Executes the query with result persistence
-    /// 5. Updates the query run as succeeded or failed
-    ///
-    /// Returns a [`TrackedQueryResult`] containing all data needed for the response.
-    #[tracing::instrument(
-        name = "engine.execute_tracked_query",
-        skip(self, sql, metadata),
-        fields(
-            runtimedb.query_run_id = tracing::field::Empty,
-            runtimedb.result_id = tracing::field::Empty,
-            runtimedb.row_count = tracing::field::Empty,
-        )
-    )]
-    pub async fn execute_tracked_query(
-        &self,
-        sql: &str,
-        metadata: Option<serde_json::Value>,
-        trace_id: Option<String>,
-    ) -> Result<TrackedQueryResult> {
-        // Validate metadata shape
-        let metadata = match metadata {
-            Some(val) => {
-                if !val.is_object() {
-                    return Err(QueryInputError("metadata must be a JSON object".into()).into());
-                }
-                val
-            }
-            None => serde_json::Value::Object(Default::default()),
-        };
-
-        let query_run_id = crate::id::generate_query_run_id();
-        let hash = sql_hash(sql);
-
-        tracing::Span::current().record("runtimedb.query_run_id", &query_run_id);
-
-        // Insert query_run row with status='running'
-        self.catalog
-            .create_query_run(CreateQueryRun {
-                id: &query_run_id,
-                sql_text: sql,
-                sql_hash: &hash,
-                metadata: &metadata,
-                trace_id: trace_id.as_deref(),
-            })
-            .await?;
-
-        // Execute query with async persistence
-        let start = Instant::now();
-        let query_result = self.execute_query_with_persistence(sql).await;
-        let execution_time_ms = start.elapsed().as_millis() as u64;
-
-        match query_result {
-            Ok((result, warning)) => {
-                let row_count = result.results.iter().map(|b| b.num_rows()).sum::<usize>();
-
-                // Determine result_id — empty string from engine means persistence failed
-                let result_id = if result.result_id.is_empty() {
-                    None
-                } else {
-                    tracing::Span::current().record("runtimedb.result_id", &result.result_id);
-                    Some(result.result_id.clone())
-                };
-
-                tracing::Span::current().record("runtimedb.row_count", row_count);
-
-                // Update query run as succeeded
-                if let Err(e) = self
-                    .catalog
-                    .update_query_run(
-                        &query_run_id,
-                        QueryRunUpdate::Succeeded {
-                            result_id: result_id.as_deref(),
-                            row_count: row_count as i64,
-                            execution_time_ms: execution_time_ms as i64,
-                            warning_message: warning.as_deref(),
-                        },
-                    )
-                    .await
-                {
-                    warn!(error = %e, query_run_id = %query_run_id, "Failed to update query run as succeeded");
-                }
-
-                Ok(TrackedQueryResult {
-                    query_id: query_run_id,
-                    result_id,
-                    schema: result.schema,
-                    results: result.results,
-                    row_count,
-                    execution_time_ms,
-                    warning,
-                })
-            }
-            Err(e) => {
-                // Update query run as failed
-                if let Err(update_err) = self
-                    .catalog
-                    .update_query_run(
-                        &query_run_id,
-                        QueryRunUpdate::Failed {
-                            error_message: &e.to_string(),
-                            execution_time_ms: Some(execution_time_ms as i64),
-                        },
-                    )
-                    .await
-                {
-                    warn!(error = %update_err, query_run_id = %query_run_id, "Failed to update query run as failed");
-                }
-
-                Err(e)
-            }
-        }
     }
 
     /// List query runs with cursor pagination.
