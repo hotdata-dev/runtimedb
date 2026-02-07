@@ -222,6 +222,16 @@ pub struct QueryRunRow {
 
 impl QueryRunRow {
     pub fn into_query_run(self) -> QueryRun {
+        let created_at = self.created_at.parse().unwrap_or_else(|e| {
+            tracing::warn!(
+                id = %self.id,
+                raw_timestamp = %self.created_at,
+                error = %e,
+                "Failed to parse query run created_at, falling back to now"
+            );
+            Utc::now()
+        });
+        let completed_at = self.completed_at.and_then(|s| s.parse().ok());
         QueryRun {
             id: self.id,
             sql_text: self.sql_text,
@@ -235,8 +245,8 @@ impl QueryRunRow {
             warning_message: self.warning_message,
             row_count: self.row_count,
             execution_time_ms: self.execution_time_ms,
-            created_at: self.created_at.parse().unwrap_or_else(|_| Utc::now()),
-            completed_at: self.completed_at.and_then(|s| s.parse().ok()),
+            created_at,
+            completed_at,
         }
     }
 }
