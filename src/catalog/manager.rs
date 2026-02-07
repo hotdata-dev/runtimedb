@@ -190,7 +190,6 @@ pub struct QueryRun {
     pub id: String,
     pub sql_text: String,
     pub sql_hash: String,
-    pub metadata: serde_json::Value,
     pub trace_id: Option<String>,
     pub status: QueryRunStatus,
     pub result_id: Option<String>,
@@ -208,7 +207,6 @@ pub struct QueryRunRow {
     pub id: String,
     pub sql_text: String,
     pub sql_hash: String,
-    pub metadata: String,
     pub trace_id: Option<String>,
     pub status: String,
     pub result_id: Option<String>,
@@ -236,8 +234,6 @@ impl QueryRunRow {
             id: self.id,
             sql_text: self.sql_text,
             sql_hash: self.sql_hash,
-            metadata: serde_json::from_str(&self.metadata)
-                .unwrap_or(serde_json::Value::Object(Default::default())),
             trace_id: self.trace_id,
             status: QueryRunStatus::parse(&self.status),
             result_id: self.result_id,
@@ -257,7 +253,6 @@ pub struct QueryRunRowPg {
     pub id: String,
     pub sql_text: String,
     pub sql_hash: String,
-    pub metadata: serde_json::Value,
     pub trace_id: Option<String>,
     pub status: String,
     pub result_id: Option<String>,
@@ -275,7 +270,6 @@ impl From<QueryRunRowPg> for QueryRun {
             id: row.id,
             sql_text: row.sql_text,
             sql_hash: row.sql_hash,
-            metadata: row.metadata,
             trace_id: row.trace_id,
             status: QueryRunStatus::parse(&row.status),
             result_id: row.result_id,
@@ -294,7 +288,6 @@ pub struct CreateQueryRun<'a> {
     pub id: &'a str,
     pub sql_text: &'a str,
     pub sql_hash: &'a str,
-    pub metadata: &'a serde_json::Value,
     pub trace_id: Option<&'a str>,
 }
 

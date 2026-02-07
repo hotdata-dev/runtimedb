@@ -82,7 +82,7 @@ pub struct QueryResponse {
     pub execution_time: Duration,
 }
 
-/// Error for invalid query input (metadata shape, etc.).
+/// Error for invalid query input (e.g. malformed pagination cursor).
 /// Maps to HTTP 400 via the `From<QueryInputError> for ApiError` conversion.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -565,8 +565,7 @@ impl RuntimeEngine {
     /// Execute a SQL query with result persistence and query run tracking.
     ///
     /// This method:
-    /// 1. Validates metadata is a JSON object (or defaults to `{}`)
-    /// 2. Creates a `query_runs` record with `status='running'`
+    /// 1. Creates a `query_runs` record with `status='running'`
     /// 3. Executes the query
     /// 4. Persists results asynchronously (background parquet write)
     /// 5. Updates the query run as succeeded or failed
@@ -583,8 +582,6 @@ impl RuntimeEngine {
         )
     )]
     pub async fn execute_query_with_persistence(&self, sql: &str) -> Result<TrackedQueryResult> {
-        let metadata = serde_json::Value::Object(Default::default());
-
         let query_run_id = crate::id::generate_query_run_id();
         let hash = sql_hash(sql);
         let trace_id = current_trace_id();
@@ -597,7 +594,6 @@ impl RuntimeEngine {
                 id: &query_run_id,
                 sql_text: sql,
                 sql_hash: &hash,
-                metadata: &metadata,
                 trace_id: trace_id.as_deref(),
             })
             .await?;

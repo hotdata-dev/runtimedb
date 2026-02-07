@@ -670,7 +670,7 @@ async fn test_query_list_first_page_cache_miss_then_hit() {
             id: &id,
             sql_text: "SELECT 1",
             sql_hash: "abc123",
-            metadata: &serde_json::json!({}),
+
             trace_id: None,
         })
         .await
@@ -741,7 +741,7 @@ async fn test_query_list_dirty_marker_on_create() {
             id: &id,
             sql_text: "SELECT 42",
             sql_hash: "def456",
-            metadata: &serde_json::json!({}),
+
             trace_id: None,
         })
         .await
@@ -805,7 +805,7 @@ async fn test_query_list_dirty_marker_on_update() {
             id: &id,
             sql_text: "SELECT 1",
             sql_hash: "abc",
-            metadata: &serde_json::json!({}),
+
             trace_id: None,
         })
         .await
@@ -869,7 +869,7 @@ async fn test_query_list_cache_bypass_for_cursors_and_odd_limits() {
             id: &id,
             sql_text: "SELECT 1",
             sql_hash: "aaa",
-            metadata: &serde_json::json!({}),
+
             trace_id: None,
         })
         .await
@@ -935,7 +935,7 @@ async fn test_query_list_stale_while_revalidate() {
             id: &id1,
             sql_text: "SELECT 1",
             sql_hash: "hash1",
-            metadata: &serde_json::json!({}),
+
             trace_id: None,
         })
         .await
@@ -960,7 +960,7 @@ async fn test_query_list_stale_while_revalidate() {
             id: &id2,
             sql_text: "SELECT 2",
             sql_hash: "hash2",
-            metadata: &serde_json::json!({}),
+
             trace_id: None,
         })
         .await
@@ -1020,7 +1020,7 @@ async fn test_revalidation_lock_ownership_safety() {
             id: &id1,
             sql_text: "SELECT 1",
             sql_hash: "own_test",
-            metadata: &serde_json::json!({}),
+
             trace_id: None,
         })
         .await
@@ -1043,7 +1043,7 @@ async fn test_revalidation_lock_ownership_safety() {
             id: &id2,
             sql_text: "SELECT 2",
             sql_hash: "own_test2",
-            metadata: &serde_json::json!({}),
+
             trace_id: None,
         })
         .await

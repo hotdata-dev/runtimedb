@@ -5,7 +5,6 @@ CREATE TABLE query_runs (
     id TEXT PRIMARY KEY,
     sql_text TEXT NOT NULL,
     sql_hash TEXT NOT NULL,
-    metadata TEXT NOT NULL DEFAULT '{}',
     trace_id TEXT,
     status TEXT NOT NULL,
     result_id TEXT,

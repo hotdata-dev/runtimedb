@@ -688,13 +688,13 @@ macro_rules! catalog_manager_tests {
                 let catalog = ctx.manager();
 
                 let id = runtimedb::id::generate_query_run_id();
-                let metadata = serde_json::json!({});
+
                 catalog
                     .create_query_run(CreateQueryRun {
                         id: &id,
                         sql_text: "SELECT 1",
                         sql_hash: "abc123",
-                        metadata: &metadata,
+
                         trace_id: Some("trace-000"),
                     })
                     .await
@@ -716,13 +716,13 @@ macro_rules! catalog_manager_tests {
                 let catalog = ctx.manager();
 
                 let id = runtimedb::id::generate_query_run_id();
-                let metadata = serde_json::json!({});
+
                 catalog
                     .create_query_run(CreateQueryRun {
                         id: &id,
                         sql_text: "SELECT 42",
                         sql_hash: "def456",
-                        metadata: &metadata,
+
                         trace_id: None,
                     })
                     .await
@@ -756,13 +756,13 @@ macro_rules! catalog_manager_tests {
                 let catalog = ctx.manager();
 
                 let id = runtimedb::id::generate_query_run_id();
-                let metadata = serde_json::json!({});
+
                 catalog
                     .create_query_run(CreateQueryRun {
                         id: &id,
                         sql_text: "SELECT bad",
                         sql_hash: "ghi789",
-                        metadata: &metadata,
+
                         trace_id: None,
                     })
                     .await
@@ -792,7 +792,7 @@ macro_rules! catalog_manager_tests {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();
 
-                let metadata = serde_json::json!({});
+
                 // Create 5 query runs
                 let mut ids = Vec::new();
                 for i in 0..5 {
@@ -802,7 +802,7 @@ macro_rules! catalog_manager_tests {
                             id: &id,
                             sql_text: &format!("SELECT {}", i),
                             sql_hash: &format!("hash{}", i),
-                            metadata: &metadata,
+
                             trace_id: None,
                         })
                         .await

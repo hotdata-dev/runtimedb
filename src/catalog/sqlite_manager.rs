@@ -671,16 +671,14 @@ impl CatalogManager for SqliteCatalogManager {
         fields(db = "sqlite", runtimedb.query_run_id = %params.id)
     )]
     async fn create_query_run(&self, params: CreateQueryRun<'_>) -> Result<String> {
-        let metadata_json = serde_json::to_string(params.metadata)?;
         let now = Utc::now();
         sqlx::query(
-            "INSERT INTO query_runs (id, sql_text, sql_hash, metadata, trace_id, status, created_at)
-             VALUES (?, ?, ?, ?, ?, 'running', ?)",
+            "INSERT INTO query_runs (id, sql_text, sql_hash, trace_id, status, created_at)
+             VALUES (?, ?, ?, ?, 'running', ?)",
         )
         .bind(params.id)
         .bind(params.sql_text)
         .bind(params.sql_hash)
-        .bind(&metadata_json)
         .bind(params.trace_id)
         .bind(now)
         .execute(self.backend.pool())
@@ -743,7 +741,7 @@ impl CatalogManager for SqliteCatalogManager {
         let rows: Vec<QueryRunRow> = if let Some(cursor) = cursor {
             let cursor_ts = cursor.created_at.to_rfc3339();
             sqlx::query_as(
-                "SELECT id, sql_text, sql_hash, metadata, trace_id, status, result_id, \
+                "SELECT id, sql_text, sql_hash, trace_id, status, result_id, \
                  error_message, warning_message, row_count, execution_time_ms, created_at, completed_at \
                  FROM query_runs \
                  WHERE (created_at < ? OR (created_at = ? AND id < ?)) \
@@ -758,7 +756,7 @@ impl CatalogManager for SqliteCatalogManager {
             .await?
         } else {
             sqlx::query_as(
-                "SELECT id, sql_text, sql_hash, metadata, trace_id, status, result_id, \
+                "SELECT id, sql_text, sql_hash, trace_id, status, result_id, \
                  error_message, warning_message, row_count, execution_time_ms, created_at, completed_at \
                  FROM query_runs \
                  ORDER BY created_at DESC, id DESC \
@@ -785,7 +783,7 @@ impl CatalogManager for SqliteCatalogManager {
     )]
     async fn get_query_run(&self, id: &str) -> Result<Option<QueryRun>> {
         let row: Option<QueryRunRow> = sqlx::query_as(
-            "SELECT id, sql_text, sql_hash, metadata, trace_id, status, result_id, \
+            "SELECT id, sql_text, sql_hash, trace_id, status, result_id, \
              error_message, warning_message, row_count, execution_time_ms, created_at, completed_at \
              FROM query_runs WHERE id = ?",
         )

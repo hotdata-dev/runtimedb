@@ -637,13 +637,12 @@ impl CatalogManager for PostgresCatalogManager {
     async fn create_query_run(&self, params: CreateQueryRun<'_>) -> Result<String> {
         let now = Utc::now();
         sqlx::query(
-            "INSERT INTO query_runs (id, sql_text, sql_hash, metadata, trace_id, status, created_at)
-             VALUES ($1, $2, $3, $4, $5, 'running', $6)",
+            "INSERT INTO query_runs (id, sql_text, sql_hash, trace_id, status, created_at)
+             VALUES ($1, $2, $3, $4, 'running', $5)",
         )
         .bind(params.id)
         .bind(params.sql_text)
         .bind(params.sql_hash)
-        .bind(params.metadata)
         .bind(params.trace_id)
         .bind(now)
         .execute(self.backend.pool())
@@ -705,7 +704,7 @@ impl CatalogManager for PostgresCatalogManager {
         let fetch_limit = (limit + 1) as i64;
         let rows: Vec<QueryRunRowPg> = if let Some(cursor) = cursor {
             sqlx::query_as(
-                "SELECT id, sql_text, sql_hash, metadata, trace_id, status, result_id, \
+                "SELECT id, sql_text, sql_hash, trace_id, status, result_id, \
                  error_message, warning_message, row_count, execution_time_ms, created_at, completed_at \
                  FROM query_runs \
                  WHERE (created_at < $1 OR (created_at = $1 AND id < $2)) \
@@ -719,7 +718,7 @@ impl CatalogManager for PostgresCatalogManager {
             .await?
         } else {
             sqlx::query_as(
-                "SELECT id, sql_text, sql_hash, metadata, trace_id, status, result_id, \
+                "SELECT id, sql_text, sql_hash, trace_id, status, result_id, \
                  error_message, warning_message, row_count, execution_time_ms, created_at, completed_at \
                  FROM query_runs \
                  ORDER BY created_at DESC, id DESC \
@@ -742,7 +741,7 @@ impl CatalogManager for PostgresCatalogManager {
     )]
     async fn get_query_run(&self, id: &str) -> Result<Option<QueryRun>> {
         let row: Option<QueryRunRowPg> = sqlx::query_as(
-            "SELECT id, sql_text, sql_hash, metadata, trace_id, status, result_id, \
+            "SELECT id, sql_text, sql_hash, trace_id, status, result_id, \
              error_message, warning_message, row_count, execution_time_ms, created_at, completed_at \
              FROM query_runs WHERE id = $1",
         )
