@@ -5,8 +5,8 @@
 
 use super::{
     CatalogManager, ConnectionInfo, CreateQueryRun, DatasetInfo, OptimisticLock, PendingDeletion,
-    QueryResult, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus, ResultUpdate, TableInfo,
-    UploadInfo,
+    QueryResult, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus, ResultUpdate, SavedQuery,
+    SavedQueryVersion, SqlSnapshot, TableInfo, UploadInfo,
 };
 use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
@@ -337,6 +337,60 @@ impl CatalogManager for MockCatalog {
 
     async fn release_upload(&self, _id: &str) -> Result<bool> {
         Ok(false)
+    }
+
+    async fn get_or_create_snapshot(&self, sql_text: &str) -> Result<SqlSnapshot> {
+        let hash = crate::catalog::manager::sql_hash(sql_text);
+        Ok(SqlSnapshot {
+            id: crate::id::generate_snapshot_id(),
+            sql_hash: hash,
+            sql_text: sql_text.to_string(),
+            created_at: chrono::Utc::now(),
+        })
+    }
+
+    async fn create_saved_query(&self, _name: &str, _snapshot_id: &str) -> Result<SavedQuery> {
+        Err(anyhow::anyhow!("Not implemented in mock"))
+    }
+
+    async fn get_saved_query(&self, _id: &str) -> Result<Option<SavedQuery>> {
+        Ok(None)
+    }
+
+    async fn list_saved_queries(
+        &self,
+        _limit: usize,
+        _offset: usize,
+    ) -> Result<(Vec<SavedQuery>, bool)> {
+        Ok((vec![], false))
+    }
+
+    async fn update_saved_query(
+        &self,
+        _id: &str,
+        _name: Option<&str>,
+        _snapshot_id: &str,
+    ) -> Result<Option<SavedQuery>> {
+        Ok(None)
+    }
+
+    async fn delete_saved_query(&self, _id: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn get_saved_query_version(
+        &self,
+        _saved_query_id: &str,
+        _version: i32,
+    ) -> Result<Option<SavedQueryVersion>> {
+        Ok(None)
+    }
+
+    async fn list_saved_query_versions(
+        &self,
+        _saved_query_id: &str,
+    ) -> Result<Vec<SavedQueryVersion>> {
+        Ok(vec![])
     }
 
     async fn create_dataset(&self, _dataset: &DatasetInfo) -> Result<()> {
