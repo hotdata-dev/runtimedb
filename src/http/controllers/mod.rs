@@ -6,6 +6,7 @@ pub mod query_controller;
 pub mod query_runs_controller;
 pub mod refresh_controller;
 pub mod results_controller;
+pub mod saved_queries_controller;
 pub mod secrets_controller;
 pub mod uploads_controller;
 
@@ -23,6 +24,10 @@ pub use query_controller::query_handler;
 pub use query_runs_controller::list_query_runs_handler;
 pub use refresh_controller::refresh_handler;
 pub use results_controller::{get_result_handler, list_results_handler};
+pub use saved_queries_controller::{
+    create_saved_query, delete_saved_query, execute_saved_query, get_saved_query,
+    list_saved_queries, list_saved_query_versions, update_saved_query,
+};
 pub use secrets_controller::{
     create_secret_handler, delete_secret_handler, get_secret_handler, list_secrets_handler,
     update_secret_handler,

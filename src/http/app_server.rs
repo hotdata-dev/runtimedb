@@ -1,11 +1,13 @@
 use crate::http::controllers::{
-    check_connection_health_handler, create_connection_handler, create_dataset,
-    create_secret_handler, delete_connection_handler, delete_dataset, delete_secret_handler,
-    get_connection_handler, get_dataset, get_result_handler, get_secret_handler, health_handler,
+    check_connection_health_handler, create_connection_handler, create_dataset, create_saved_query,
+    create_secret_handler, delete_connection_handler, delete_dataset, delete_saved_query,
+    delete_secret_handler, execute_saved_query, get_connection_handler, get_dataset,
+    get_result_handler, get_saved_query, get_secret_handler, health_handler,
     information_schema_handler, list_connections_handler, list_datasets, list_query_runs_handler,
-    list_results_handler, list_secrets_handler, list_uploads, purge_connection_cache_handler,
-    purge_table_cache_handler, query_handler, refresh_handler, update_dataset,
-    update_secret_handler, upload_file, MAX_UPLOAD_SIZE,
+    list_results_handler, list_saved_queries, list_saved_query_versions, list_secrets_handler,
+    list_uploads, purge_connection_cache_handler, purge_table_cache_handler, query_handler,
+    refresh_handler, update_dataset, update_saved_query, update_secret_handler, upload_file,
+    MAX_UPLOAD_SIZE,
 };
 use crate::RuntimeEngine;
 use axum::extract::DefaultBodyLimit;
@@ -92,6 +94,10 @@ pub const PATH_RESULT: &str = "/results/{id}";
 pub const PATH_FILES: &str = "/v1/files";
 pub const PATH_DATASETS: &str = "/v1/datasets";
 pub const PATH_DATASET: &str = "/v1/datasets/{id}";
+pub const PATH_SAVED_QUERIES: &str = "/v1/queries";
+pub const PATH_SAVED_QUERY: &str = "/v1/queries/{id}";
+pub const PATH_SAVED_QUERY_VERSIONS: &str = "/v1/queries/{id}/versions";
+pub const PATH_SAVED_QUERY_EXECUTE: &str = "/v1/queries/{id}/execute";
 
 impl AppServer {
     pub fn new(engine: RuntimeEngine) -> Self {
@@ -141,6 +147,18 @@ impl AppServer {
                     PATH_DATASET,
                     get(get_dataset).put(update_dataset).delete(delete_dataset),
                 )
+                .route(
+                    PATH_SAVED_QUERIES,
+                    post(create_saved_query).get(list_saved_queries),
+                )
+                .route(
+                    PATH_SAVED_QUERY,
+                    get(get_saved_query)
+                        .put(update_saved_query)
+                        .delete(delete_saved_query),
+                )
+                .route(PATH_SAVED_QUERY_VERSIONS, get(list_saved_query_versions))
+                .route(PATH_SAVED_QUERY_EXECUTE, post(execute_saved_query))
                 .with_state(engine.clone())
                 .layer(middleware::from_fn(trace_id_response_header))
                 .layer(

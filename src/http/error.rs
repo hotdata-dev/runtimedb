@@ -103,6 +103,9 @@ impl From<anyhow::Error> for ApiError {
         {
             return ApiError::bad_request(err.to_string());
         }
+        if err.downcast_ref::<crate::engine::NotFoundError>().is_some() {
+            return ApiError::not_found(err.to_string());
+        }
         // Default to internal server error for unknown errors
         ApiError::internal_error(err.to_string())
     }
