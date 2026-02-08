@@ -31,7 +31,11 @@ CREATE TABLE saved_query_versions (
     PRIMARY KEY (saved_query_id, version)
 );
 
--- 4) Backfill sql_snapshots from existing query_runs
+-- 4) Backfill sql_snapshots from existing query_runs.
+-- IDs use the 'snap' prefix + 26 hex chars from randomblob, matching the
+-- 30-char length of runtime nanoid-based IDs. The hex charset (0-9a-f) is
+-- narrower than the full nanoid alphabet but functionally equivalent since
+-- IDs are opaque.
 INSERT INTO sql_snapshots (id, sql_hash, sql_text, created_at)
 SELECT
     'snap' || lower(hex(randomblob(13))),

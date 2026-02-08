@@ -31,10 +31,14 @@ CREATE TABLE saved_query_versions (
     PRIMARY KEY (saved_query_id, version)
 );
 
--- 4) Backfill sql_snapshots from existing query_runs
+-- 4) Backfill sql_snapshots from existing query_runs.
+-- IDs use the 'snap' prefix + 26 hex chars from md5, matching the 30-char
+-- length of runtime nanoid-based IDs. The hex charset (0-9a-f) is narrower
+-- than the full nanoid alphabet but functionally equivalent since IDs are
+-- opaque. random() provides uniqueness without requiring pgcrypto.
 INSERT INTO sql_snapshots (id, sql_hash, sql_text, created_at)
 SELECT
-    'snap' || substr(md5(sql_hash || sql_text || gen_random_uuid()::text), 1, 26),
+    'snap' || substr(md5(sql_hash || sql_text || random()::text), 1, 26),
     sql_hash,
     sql_text,
     MIN(created_at)
