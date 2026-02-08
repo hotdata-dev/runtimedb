@@ -2,9 +2,9 @@ use crate::http::controllers::query_controller::serialize_batches;
 use crate::http::error::ApiError;
 use crate::http::models::{
     CreateSavedQueryRequest, CreateSavedQueryResponse, ExecuteSavedQueryRequest,
-    ListSavedQueriesParams, ListSavedQueriesResponse, ListSavedQueryVersionsResponse,
-    QueryResponse, SavedQueryDetail, SavedQuerySummary, SavedQueryVersionInfo,
-    UpdateSavedQueryRequest,
+    ListSavedQueriesParams, ListSavedQueriesResponse, ListSavedQueryVersionsParams,
+    ListSavedQueryVersionsResponse, QueryResponse, SavedQueryDetail, SavedQuerySummary,
+    SavedQueryVersionInfo, UpdateSavedQueryRequest,
 };
 use crate::RuntimeEngine;
 use axum::{
@@ -24,12 +24,6 @@ pub async fn create_saved_query(
     State(engine): State<Arc<RuntimeEngine>>,
     Json(request): Json<CreateSavedQueryRequest>,
 ) -> Result<(StatusCode, Json<CreateSavedQueryResponse>), ApiError> {
-    if request.name.len() > MAX_NAME_LENGTH || request.sql.len() > MAX_SQL_LENGTH {
-        return Err(ApiError::bad_request(
-            "Request field exceeds maximum length",
-        ));
-    }
-
     let name = request.name.trim().to_string();
     let sql = request.sql.trim().to_string();
 
@@ -155,19 +149,6 @@ pub async fn update_saved_query(
     Path(id): Path<String>,
     Json(request): Json<UpdateSavedQueryRequest>,
 ) -> Result<Json<SavedQueryDetail>, ApiError> {
-    if request.sql.len() > MAX_SQL_LENGTH {
-        return Err(ApiError::bad_request(
-            "Request field exceeds maximum length",
-        ));
-    }
-    if let Some(ref name) = request.name {
-        if name.len() > MAX_NAME_LENGTH {
-            return Err(ApiError::bad_request(
-                "Request field exceeds maximum length",
-            ));
-        }
-    }
-
     let sql = request.sql.trim().to_string();
     if sql.is_empty() {
         return Err(ApiError::bad_request("SQL cannot be empty"));
@@ -244,7 +225,11 @@ pub async fn delete_saved_query(
 pub async fn list_saved_query_versions(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(id): Path<String>,
+    QueryParams(params): QueryParams<ListSavedQueryVersionsParams>,
 ) -> Result<Json<ListSavedQueryVersionsResponse>, ApiError> {
+    let limit = params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let offset = params.offset.unwrap_or(0);
+
     // Verify saved query exists
     engine
         .get_saved_query(&id)
@@ -252,11 +237,12 @@ pub async fn list_saved_query_versions(
         .map_err(|e| -> ApiError { e.into() })?
         .ok_or_else(|| ApiError::not_found(format!("Saved query '{}' not found", id)))?;
 
-    let versions = engine
-        .list_saved_query_versions(&id)
+    let (versions, has_more) = engine
+        .list_saved_query_versions(&id, limit, offset)
         .await
         .map_err(|e| -> ApiError { e.into() })?;
 
+    let count = versions.len();
     let version_infos: Vec<SavedQueryVersionInfo> = versions
         .into_iter()
         .map(|v| SavedQueryVersionInfo {
@@ -270,6 +256,10 @@ pub async fn list_saved_query_versions(
     Ok(Json(ListSavedQueryVersionsResponse {
         saved_query_id: id,
         versions: version_infos,
+        count,
+        offset,
+        limit,
+        has_more,
     }))
 }
 
@@ -277,12 +267,14 @@ pub async fn list_saved_query_versions(
 pub async fn execute_saved_query(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(id): Path<String>,
-    Json(request): Json<ExecuteSavedQueryRequest>,
+    body: Option<Json<ExecuteSavedQueryRequest>>,
 ) -> Result<Json<QueryResponse>, ApiError> {
+    let version = body.and_then(|Json(r)| r.version);
+
     // engine.execute_saved_query returns NotFoundError (→ 404) if the saved
     // query or requested version does not exist, so no pre-check is needed.
     let result = engine
-        .execute_saved_query(&id, request.version)
+        .execute_saved_query(&id, version)
         .await
         .map_err(|e| -> ApiError { e.into() })?;
 

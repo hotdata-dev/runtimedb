@@ -634,11 +634,22 @@ pub struct SavedQueryVersionInfo {
     pub created_at: DateTime<Utc>,
 }
 
+/// Query params for GET /v1/queries/{id}/versions
+#[derive(Debug, Deserialize)]
+pub struct ListSavedQueryVersionsParams {
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
 /// Response body for GET /v1/queries/{id}/versions
 #[derive(Debug, Serialize)]
 pub struct ListSavedQueryVersionsResponse {
     pub saved_query_id: String,
     pub versions: Vec<SavedQueryVersionInfo>,
+    pub count: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub has_more: bool,
 }
 
 #[cfg(test)]
