@@ -121,6 +121,8 @@ define_resource_ids! {
     Upload => "upld",
     Dataset => "data",
     QueryRun => "qrun",
+    SavedQuery => "svqr",
+    SqlSnapshot => "snap",
 }
 
 /// Generate a 30-char ID: 4-char prefix + 26-char nanoid (lowercase alphanumeric).
@@ -157,6 +159,16 @@ pub fn generate_dataset_id() -> String {
 /// Generate a query run ID (prefix: "qrun").
 pub fn generate_query_run_id() -> String {
     generate_id(ResourceId::QueryRun)
+}
+
+/// Generate a saved query ID (prefix: "svqr").
+pub fn generate_saved_query_id() -> String {
+    generate_id(ResourceId::SavedQuery)
+}
+
+/// Generate a SQL snapshot ID (prefix: "snap").
+pub fn generate_snapshot_id() -> String {
+    generate_id(ResourceId::SqlSnapshot)
 }
 
 #[cfg(test)]
@@ -232,6 +244,8 @@ mod tests {
         assert_eq!(ResourceId::Upload.prefix(), "upld");
         assert_eq!(ResourceId::Dataset.prefix(), "data");
         assert_eq!(ResourceId::QueryRun.prefix(), "qrun");
+        assert_eq!(ResourceId::SavedQuery.prefix(), "svqr");
+        assert_eq!(ResourceId::SqlSnapshot.prefix(), "snap");
     }
 
     #[test]
@@ -239,6 +253,26 @@ mod tests {
         let id = generate_query_run_id();
         assert_eq!(id.len(), 30);
         assert!(id.starts_with("qrun"));
+        assert!(id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn test_saved_query_id_format() {
+        let id = generate_saved_query_id();
+        assert_eq!(id.len(), 30);
+        assert!(id.starts_with("svqr"));
+        assert!(id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn test_snapshot_id_format() {
+        let id = generate_snapshot_id();
+        assert_eq!(id.len(), 30);
+        assert!(id.starts_with("snap"));
         assert!(id
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));

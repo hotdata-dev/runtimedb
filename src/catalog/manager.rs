@@ -3,8 +3,16 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::FromRow;
 use std::fmt::Debug;
+
+/// Compute SHA-256 hex hash of SQL text.
+pub fn sql_hash(sql: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(sql.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
 
 /// Status of a persisted query result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,8 +196,12 @@ impl std::fmt::Display for QueryRunStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryRun {
     pub id: String,
+    /// SQL text, resolved from sql_snapshots via JOIN.
     pub sql_text: String,
+    /// SHA-256 hash of the SQL text, resolved from sql_snapshots via JOIN.
     pub sql_hash: String,
+    /// The sql_snapshot that contains the SQL text for this run.
+    pub snapshot_id: String,
     pub trace_id: Option<String>,
     pub status: QueryRunStatus,
     pub result_id: Option<String>,
@@ -197,16 +209,20 @@ pub struct QueryRun {
     pub warning_message: Option<String>,
     pub row_count: Option<i64>,
     pub execution_time_ms: Option<i64>,
+    pub saved_query_id: Option<String>,
+    pub saved_query_version: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
 
 /// Raw database row for query runs (used by sqlx in SQLite where timestamps are strings).
+/// sql_text is resolved from sql_snapshots via JOIN.
 #[derive(Debug, Clone, FromRow)]
 pub struct QueryRunRow {
     pub id: String,
     pub sql_text: String,
     pub sql_hash: String,
+    pub snapshot_id: String,
     pub trace_id: Option<String>,
     pub status: String,
     pub result_id: Option<String>,
@@ -214,6 +230,8 @@ pub struct QueryRunRow {
     pub warning_message: Option<String>,
     pub row_count: Option<i64>,
     pub execution_time_ms: Option<i64>,
+    pub saved_query_id: Option<String>,
+    pub saved_query_version: Option<i32>,
     pub created_at: String,
     pub completed_at: Option<String>,
 }
@@ -245,6 +263,7 @@ impl QueryRunRow {
             id: self.id,
             sql_text: self.sql_text,
             sql_hash: self.sql_hash,
+            snapshot_id: self.snapshot_id,
             trace_id: self.trace_id,
             status: QueryRunStatus::parse(&self.status),
             result_id: self.result_id,
@@ -252,6 +271,8 @@ impl QueryRunRow {
             warning_message: self.warning_message,
             row_count: self.row_count,
             execution_time_ms: self.execution_time_ms,
+            saved_query_id: self.saved_query_id,
+            saved_query_version: self.saved_query_version,
             created_at,
             completed_at,
         }
@@ -259,11 +280,13 @@ impl QueryRunRow {
 }
 
 /// Raw database row for query runs in Postgres (native timestamps).
+/// sql_text is resolved from sql_snapshots via JOIN.
 #[derive(Debug, Clone, FromRow)]
 pub struct QueryRunRowPg {
     pub id: String,
     pub sql_text: String,
     pub sql_hash: String,
+    pub snapshot_id: String,
     pub trace_id: Option<String>,
     pub status: String,
     pub result_id: Option<String>,
@@ -271,6 +294,8 @@ pub struct QueryRunRowPg {
     pub warning_message: Option<String>,
     pub row_count: Option<i64>,
     pub execution_time_ms: Option<i64>,
+    pub saved_query_id: Option<String>,
+    pub saved_query_version: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -281,6 +306,7 @@ impl From<QueryRunRowPg> for QueryRun {
             id: row.id,
             sql_text: row.sql_text,
             sql_hash: row.sql_hash,
+            snapshot_id: row.snapshot_id,
             trace_id: row.trace_id,
             status: QueryRunStatus::parse(&row.status),
             result_id: row.result_id,
@@ -288,6 +314,8 @@ impl From<QueryRunRowPg> for QueryRun {
             warning_message: row.warning_message,
             row_count: row.row_count,
             execution_time_ms: row.execution_time_ms,
+            saved_query_id: row.saved_query_id,
+            saved_query_version: row.saved_query_version,
             created_at: row.created_at,
             completed_at: row.completed_at,
         }
@@ -297,9 +325,10 @@ impl From<QueryRunRowPg> for QueryRun {
 /// Parameters for creating a new query run.
 pub struct CreateQueryRun<'a> {
     pub id: &'a str,
-    pub sql_text: &'a str,
-    pub sql_hash: &'a str,
+    pub snapshot_id: &'a str,
     pub trace_id: Option<&'a str>,
+    pub saved_query_id: Option<&'a str>,
+    pub saved_query_version: Option<i32>,
 }
 
 /// Parameters for completing a query run.
@@ -334,6 +363,208 @@ pub struct UploadInfo {
     pub size_bytes: i64,
     pub created_at: DateTime<Utc>,
     pub consumed_at: Option<DateTime<Utc>>,
+}
+
+/// A saved query with versioned SQL snapshots.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedQuery {
+    pub id: String,
+    pub name: String,
+    pub latest_version: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Raw database row for saved queries in SQLite (timestamps as strings).
+#[derive(Debug, Clone, FromRow)]
+pub struct SavedQueryRow {
+    pub id: String,
+    pub name: String,
+    pub latest_version: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl SavedQueryRow {
+    pub fn into_saved_query(self) -> SavedQuery {
+        let created_at = self.created_at.parse().unwrap_or_else(|e| {
+            tracing::warn!(
+                id = %self.id,
+                raw_timestamp = %self.created_at,
+                error = %e,
+                "Failed to parse saved query created_at, falling back to now"
+            );
+            Utc::now()
+        });
+        let updated_at = self.updated_at.parse().unwrap_or_else(|e| {
+            tracing::warn!(
+                id = %self.id,
+                raw_timestamp = %self.updated_at,
+                error = %e,
+                "Failed to parse saved query updated_at, falling back to now"
+            );
+            Utc::now()
+        });
+        SavedQuery {
+            id: self.id,
+            name: self.name,
+            latest_version: self.latest_version,
+            created_at,
+            updated_at,
+        }
+    }
+}
+
+/// Raw database row for saved queries in Postgres (native timestamps).
+#[derive(Debug, Clone, FromRow)]
+pub struct SavedQueryRowPg {
+    pub id: String,
+    pub name: String,
+    pub latest_version: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<SavedQueryRowPg> for SavedQuery {
+    fn from(row: SavedQueryRowPg) -> Self {
+        Self {
+            id: row.id,
+            name: row.name,
+            latest_version: row.latest_version,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+/// A content-addressable SQL snapshot. Deduplicated by (sql_hash, sql_text).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SqlSnapshot {
+    pub id: String,
+    pub sql_hash: String,
+    pub sql_text: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Raw database row for SQL snapshots in SQLite (timestamps as strings).
+#[derive(Debug, Clone, FromRow)]
+pub struct SqlSnapshotRow {
+    pub id: String,
+    pub sql_hash: String,
+    pub sql_text: String,
+    pub created_at: String,
+}
+
+impl SqlSnapshotRow {
+    pub fn into_sql_snapshot(self) -> SqlSnapshot {
+        let created_at = self.created_at.parse().unwrap_or_else(|e| {
+            tracing::warn!(
+                id = %self.id,
+                raw_timestamp = %self.created_at,
+                error = %e,
+                "Failed to parse sql snapshot created_at, falling back to now"
+            );
+            Utc::now()
+        });
+        SqlSnapshot {
+            id: self.id,
+            sql_hash: self.sql_hash,
+            sql_text: self.sql_text,
+            created_at,
+        }
+    }
+}
+
+/// Raw database row for SQL snapshots in Postgres (native timestamps).
+#[derive(Debug, Clone, FromRow)]
+pub struct SqlSnapshotRowPg {
+    pub id: String,
+    pub sql_hash: String,
+    pub sql_text: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<SqlSnapshotRowPg> for SqlSnapshot {
+    fn from(row: SqlSnapshotRowPg) -> Self {
+        Self {
+            id: row.id,
+            sql_hash: row.sql_hash,
+            sql_text: row.sql_text,
+            created_at: row.created_at,
+        }
+    }
+}
+
+/// An immutable SQL version under a saved query.
+/// The sql_text and sql_hash fields are resolved via JOIN to sql_snapshots at query time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedQueryVersion {
+    pub saved_query_id: String,
+    pub version: i32,
+    pub snapshot_id: String,
+    pub sql_text: String,
+    pub sql_hash: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Raw database row for saved query versions in SQLite (timestamps as strings).
+/// Fields sql_text and sql_hash come from JOIN to sql_snapshots.
+#[derive(Debug, Clone, FromRow)]
+pub struct SavedQueryVersionRow {
+    pub saved_query_id: String,
+    pub version: i32,
+    pub snapshot_id: String,
+    pub sql_text: String,
+    pub sql_hash: String,
+    pub created_at: String,
+}
+
+impl SavedQueryVersionRow {
+    pub fn into_saved_query_version(self) -> SavedQueryVersion {
+        let created_at = self.created_at.parse().unwrap_or_else(|e| {
+            tracing::warn!(
+                saved_query_id = %self.saved_query_id,
+                version = %self.version,
+                raw_timestamp = %self.created_at,
+                error = %e,
+                "Failed to parse saved query version created_at, falling back to now"
+            );
+            Utc::now()
+        });
+        SavedQueryVersion {
+            saved_query_id: self.saved_query_id,
+            version: self.version,
+            snapshot_id: self.snapshot_id,
+            sql_text: self.sql_text,
+            sql_hash: self.sql_hash,
+            created_at,
+        }
+    }
+}
+
+/// Raw database row for saved query versions in Postgres (native timestamps).
+/// Fields sql_text and sql_hash come from JOIN to sql_snapshots.
+#[derive(Debug, Clone, FromRow)]
+pub struct SavedQueryVersionRowPg {
+    pub saved_query_id: String,
+    pub version: i32,
+    pub snapshot_id: String,
+    pub sql_text: String,
+    pub sql_hash: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<SavedQueryVersionRowPg> for SavedQueryVersion {
+    fn from(row: SavedQueryVersionRowPg) -> Self {
+        Self {
+            saved_query_id: row.saved_query_id,
+            version: row.version,
+            snapshot_id: row.snapshot_id,
+            sql_text: row.sql_text,
+            sql_hash: row.sql_hash,
+            created_at: row.created_at,
+        }
+    }
 }
 
 /// A user-curated dataset.
@@ -549,6 +780,59 @@ pub trait CatalogManager: Debug + Send + Sync {
     /// Release a claimed upload back to pending state. Used when dataset creation fails
     /// after claiming but before consuming. Returns true if the upload was processing.
     async fn release_upload(&self, id: &str) -> Result<bool>;
+
+    // SQL snapshot methods
+
+    /// Get or create a content-addressable SQL snapshot.
+    /// Deduplicates by (sql_hash, sql_text). Returns the existing or newly created snapshot.
+    async fn get_or_create_snapshot(&self, sql_text: &str) -> Result<SqlSnapshot>;
+
+    // Saved query methods
+
+    /// Create a new saved query with its first version.
+    /// The snapshot_id should come from get_or_create_snapshot.
+    async fn create_saved_query(&self, name: &str, snapshot_id: &str) -> Result<SavedQuery>;
+
+    /// Get a saved query by ID.
+    async fn get_saved_query(&self, id: &str) -> Result<Option<SavedQuery>>;
+
+    /// List saved queries with offset pagination.
+    /// Returns (queries, has_more).
+    async fn list_saved_queries(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<SavedQuery>, bool)>;
+
+    /// Create a new version for a saved query, optionally updating its name.
+    /// The snapshot_id should come from get_or_create_snapshot.
+    /// Returns the updated saved query, or None if not found.
+    async fn update_saved_query(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        snapshot_id: &str,
+    ) -> Result<Option<SavedQuery>>;
+
+    /// Delete a saved query by ID. Returns true if it existed.
+    /// Versions are hard-deleted (explicitly for SQLite, via CASCADE for Postgres).
+    /// Query runs retain history via their snapshot_id FK to sql_snapshots.
+    async fn delete_saved_query(&self, id: &str) -> Result<bool>;
+
+    /// Get a specific version of a saved query.
+    /// sql_text and sql_hash are resolved via JOIN to sql_snapshots.
+    async fn get_saved_query_version(
+        &self,
+        saved_query_id: &str,
+        version: i32,
+    ) -> Result<Option<SavedQueryVersion>>;
+
+    /// List all versions of a saved query, ordered by version ascending.
+    /// sql_text and sql_hash are resolved via JOIN to sql_snapshots.
+    async fn list_saved_query_versions(
+        &self,
+        saved_query_id: &str,
+    ) -> Result<Vec<SavedQueryVersion>>;
 
     // Dataset management methods
 
