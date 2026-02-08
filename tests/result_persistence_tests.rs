@@ -10,8 +10,8 @@ use datafusion::prelude::SessionContext;
 use rand::RngCore;
 use runtimedb::catalog::{
     CatalogManager, ConnectionInfo, CreateQueryRun, DatasetInfo, OptimisticLock, PendingDeletion,
-    QueryResult, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus, ResultUpdate,
-    SqliteCatalogManager, TableInfo, UploadInfo,
+    QueryResult, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus, ResultUpdate, SavedQuery,
+    SavedQueryVersion, SqlSnapshot, SqliteCatalogManager, TableInfo, UploadInfo,
 };
 use runtimedb::http::app_server::{AppServer, PATH_QUERY, PATH_RESULT, PATH_RESULTS};
 use runtimedb::secrets::{SecretMetadata, SecretStatus};
@@ -345,6 +345,60 @@ impl CatalogManager for FailingCatalog {
 
     async fn get_query_run(&self, id: &str) -> Result<Option<QueryRun>> {
         self.inner.get_query_run(id).await
+    }
+
+    // SQL snapshot methods
+
+    async fn get_or_create_snapshot(&self, sql_text: &str) -> Result<SqlSnapshot> {
+        self.inner.get_or_create_snapshot(sql_text).await
+    }
+
+    // Saved query methods
+
+    async fn create_saved_query(&self, name: &str, snapshot_id: &str) -> Result<SavedQuery> {
+        self.inner.create_saved_query(name, snapshot_id).await
+    }
+
+    async fn get_saved_query(&self, id: &str) -> Result<Option<SavedQuery>> {
+        self.inner.get_saved_query(id).await
+    }
+
+    async fn list_saved_queries(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<SavedQuery>, bool)> {
+        self.inner.list_saved_queries(limit, offset).await
+    }
+
+    async fn update_saved_query(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        snapshot_id: &str,
+    ) -> Result<Option<SavedQuery>> {
+        self.inner.update_saved_query(id, name, snapshot_id).await
+    }
+
+    async fn delete_saved_query(&self, id: &str) -> Result<bool> {
+        self.inner.delete_saved_query(id).await
+    }
+
+    async fn get_saved_query_version(
+        &self,
+        saved_query_id: &str,
+        version: i32,
+    ) -> Result<Option<SavedQueryVersion>> {
+        self.inner
+            .get_saved_query_version(saved_query_id, version)
+            .await
+    }
+
+    async fn list_saved_query_versions(
+        &self,
+        saved_query_id: &str,
+    ) -> Result<Vec<SavedQueryVersion>> {
+        self.inner.list_saved_query_versions(saved_query_id).await
     }
 }
 

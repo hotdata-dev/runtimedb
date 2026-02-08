@@ -1,6 +1,7 @@
+#[allow(unused_imports)]
 use runtimedb::catalog::{
     CatalogManager, CreateQueryRun, PostgresCatalogManager, QueryRunCursor, QueryRunStatus,
-    QueryRunUpdate, SqliteCatalogManager,
+    QueryRunUpdate, SavedQuery, SavedQueryVersion, SqlSnapshot, SqliteCatalogManager,
 };
 use runtimedb::datasets::DEFAULT_SCHEMA;
 use sqlx::{PgPool, SqlitePool};
@@ -688,13 +689,14 @@ macro_rules! catalog_manager_tests {
                 let catalog = ctx.manager();
 
                 let id = runtimedb::id::generate_query_run_id();
+                let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
 
                 catalog
                     .create_query_run(CreateQueryRun {
                         id: &id,
-                        sql_text: "SELECT 1",
-                        sql_hash: "abc123",
-
+                        snapshot_id: &snap.id,
+                        saved_query_id: None,
+                        saved_query_version: None,
                         trace_id: Some("trace-000"),
                     })
                     .await
@@ -703,7 +705,7 @@ macro_rules! catalog_manager_tests {
                 let run = catalog.get_query_run(&id).await.unwrap().unwrap();
                 assert_eq!(run.id, id);
                 assert_eq!(run.sql_text, "SELECT 1");
-                assert_eq!(run.sql_hash, "abc123");
+                assert_eq!(run.snapshot_id, snap.id);
                 assert_eq!(run.trace_id.as_deref(), Some("trace-000"));
                 assert_eq!(run.status, QueryRunStatus::Running);
                 assert!(run.result_id.is_none());
@@ -716,13 +718,14 @@ macro_rules! catalog_manager_tests {
                 let catalog = ctx.manager();
 
                 let id = runtimedb::id::generate_query_run_id();
+                let snap = catalog.get_or_create_snapshot("SELECT 42").await.unwrap();
 
                 catalog
                     .create_query_run(CreateQueryRun {
                         id: &id,
-                        sql_text: "SELECT 42",
-                        sql_hash: "def456",
-
+                        snapshot_id: &snap.id,
+                        saved_query_id: None,
+                        saved_query_version: None,
                         trace_id: None,
                     })
                     .await
@@ -756,13 +759,14 @@ macro_rules! catalog_manager_tests {
                 let catalog = ctx.manager();
 
                 let id = runtimedb::id::generate_query_run_id();
+                let snap = catalog.get_or_create_snapshot("SELECT bad").await.unwrap();
 
                 catalog
                     .create_query_run(CreateQueryRun {
                         id: &id,
-                        sql_text: "SELECT bad",
-                        sql_hash: "ghi789",
-
+                        snapshot_id: &snap.id,
+                        saved_query_id: None,
+                        saved_query_version: None,
                         trace_id: None,
                     })
                     .await
@@ -797,12 +801,14 @@ macro_rules! catalog_manager_tests {
                 let mut ids = Vec::new();
                 for i in 0..5 {
                     let id = runtimedb::id::generate_query_run_id();
+                    let sql = format!("SELECT {}", i);
+                    let snap = catalog.get_or_create_snapshot(&sql).await.unwrap();
                     catalog
                         .create_query_run(CreateQueryRun {
                             id: &id,
-                            sql_text: &format!("SELECT {}", i),
-                            sql_hash: &format!("hash{}", i),
-
+                            snapshot_id: &snap.id,
+                            saved_query_id: None,
+                            saved_query_version: None,
                             trace_id: None,
                         })
                         .await
@@ -867,6 +873,330 @@ macro_rules! catalog_manager_tests {
                     .await
                     .unwrap();
                 assert!(!updated);
+            }
+
+            // ───────────────────────────────────────────────────────────
+            // Saved query tests
+            // ───────────────────────────────────────────────────────────
+
+            #[tokio::test]
+            async fn saved_query_create_and_get() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+                let sq = catalog
+                    .create_saved_query("my query", &snap.id)
+                    .await
+                    .unwrap();
+
+                assert!(!sq.id.is_empty());
+                assert_eq!(sq.name, "my query");
+                assert_eq!(sq.latest_version, 1);
+
+                let fetched = catalog.get_saved_query(&sq.id).await.unwrap().unwrap();
+                assert_eq!(fetched.id, sq.id);
+                assert_eq!(fetched.name, "my query");
+                assert_eq!(fetched.latest_version, 1);
+            }
+
+            #[tokio::test]
+            async fn saved_query_version_created_on_create() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let snap = catalog.get_or_create_snapshot("SELECT 42").await.unwrap();
+                let sq = catalog
+                    .create_saved_query("q1", &snap.id)
+                    .await
+                    .unwrap();
+
+                let version = catalog
+                    .get_saved_query_version(&sq.id, 1)
+                    .await
+                    .unwrap()
+                    .expect("version 1 should exist");
+
+                assert_eq!(version.saved_query_id, sq.id);
+                assert_eq!(version.version, 1);
+                assert_eq!(version.snapshot_id, snap.id);
+                assert_eq!(version.sql_text, "SELECT 42");
+                assert_eq!(version.sql_hash, snap.sql_hash);
+            }
+
+            #[tokio::test]
+            async fn saved_query_update_creates_new_version() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let snap1 = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+                let sq = catalog
+                    .create_saved_query("q1", &snap1.id)
+                    .await
+                    .unwrap();
+
+                let snap2 = catalog.get_or_create_snapshot("SELECT 2").await.unwrap();
+                let updated = catalog
+                    .update_saved_query(&sq.id, None, &snap2.id)
+                    .await
+                    .unwrap()
+                    .expect("update should return saved query");
+
+                assert_eq!(updated.latest_version, 2);
+
+                // Both versions should exist
+                let v1 = catalog
+                    .get_saved_query_version(&sq.id, 1)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(v1.sql_text, "SELECT 1");
+
+                let v2 = catalog
+                    .get_saved_query_version(&sq.id, 2)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(v2.sql_text, "SELECT 2");
+            }
+
+            #[tokio::test]
+            async fn saved_query_list_with_pagination() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                for i in 0..5 {
+                    let snap = catalog
+                        .get_or_create_snapshot(&format!("SELECT {}", i))
+                        .await
+                        .unwrap();
+                    catalog
+                        .create_saved_query(
+                            &format!("query_{}", i),
+                            &snap.id,
+                        )
+                        .await
+                        .unwrap();
+                }
+
+                let (page1, has_more) = catalog.list_saved_queries(3, 0).await.unwrap();
+                assert_eq!(page1.len(), 3);
+                assert!(has_more);
+
+                let (page2, has_more) = catalog.list_saved_queries(3, 3).await.unwrap();
+                assert_eq!(page2.len(), 2);
+                assert!(!has_more);
+            }
+
+            #[tokio::test]
+            async fn saved_query_delete() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+                let sq = catalog
+                    .create_saved_query("to_delete", &snap.id)
+                    .await
+                    .unwrap();
+
+                let deleted = catalog.delete_saved_query(&sq.id).await.unwrap();
+                assert!(deleted);
+
+                let fetched = catalog.get_saved_query(&sq.id).await.unwrap();
+                assert!(fetched.is_none());
+
+                // Versions should be cascade-deleted
+                let versions = catalog.list_saved_query_versions(&sq.id).await.unwrap();
+                assert!(versions.is_empty());
+            }
+
+            #[tokio::test]
+            async fn saved_query_delete_nonexistent() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let deleted = catalog.delete_saved_query("svqr_nope").await.unwrap();
+                assert!(!deleted);
+            }
+
+            #[tokio::test]
+            async fn saved_query_get_nonexistent() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let result = catalog.get_saved_query("svqr_nope").await.unwrap();
+                assert!(result.is_none());
+            }
+
+            #[tokio::test]
+            async fn saved_query_update_nonexistent() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+                let result = catalog
+                    .update_saved_query("svqr_nope", None, &snap.id)
+                    .await
+                    .unwrap();
+                assert!(result.is_none());
+            }
+
+            #[tokio::test]
+            async fn saved_query_rename() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let snap1 = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+                let sq = catalog
+                    .create_saved_query("original", &snap1.id)
+                    .await
+                    .unwrap();
+
+                let snap2 = catalog.get_or_create_snapshot("SELECT 2").await.unwrap();
+                let updated = catalog
+                    .update_saved_query(&sq.id, Some("renamed"), &snap2.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+
+                assert_eq!(updated.name, "renamed");
+                assert_eq!(updated.latest_version, 2);
+
+                let fetched = catalog.get_saved_query(&sq.id).await.unwrap().unwrap();
+                assert_eq!(fetched.name, "renamed");
+            }
+
+            #[tokio::test]
+            async fn saved_query_list_versions() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let snap1 = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+                let sq = catalog
+                    .create_saved_query("q1", &snap1.id)
+                    .await
+                    .unwrap();
+                let snap2 = catalog.get_or_create_snapshot("SELECT 2").await.unwrap();
+                catalog
+                    .update_saved_query(&sq.id, None, &snap2.id)
+                    .await
+                    .unwrap();
+                let snap3 = catalog.get_or_create_snapshot("SELECT 3").await.unwrap();
+                catalog
+                    .update_saved_query(&sq.id, None, &snap3.id)
+                    .await
+                    .unwrap();
+
+                let versions = catalog.list_saved_query_versions(&sq.id).await.unwrap();
+                assert_eq!(versions.len(), 3);
+                assert_eq!(versions[0].version, 1);
+                assert_eq!(versions[1].version, 2);
+                assert_eq!(versions[2].version, 3);
+                assert_eq!(versions[0].sql_text, "SELECT 1");
+                assert_eq!(versions[2].sql_text, "SELECT 3");
+            }
+
+            #[tokio::test]
+            async fn saved_query_version_nonexistent() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+                let sq = catalog
+                    .create_saved_query("q1", &snap.id)
+                    .await
+                    .unwrap();
+
+                let v = catalog
+                    .get_saved_query_version(&sq.id, 99)
+                    .await
+                    .unwrap();
+                assert!(v.is_none());
+            }
+
+            #[tokio::test]
+            async fn query_run_with_saved_query_linkage() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+                let sq = catalog
+                    .create_saved_query("linked", &snap.id)
+                    .await
+                    .unwrap();
+
+                let id = runtimedb::id::generate_query_run_id();
+                catalog
+                    .create_query_run(CreateQueryRun {
+                        id: &id,
+                        snapshot_id: &snap.id,
+                        saved_query_id: Some(&sq.id),
+                        saved_query_version: Some(1),
+                        trace_id: None,
+                    })
+                    .await
+                    .unwrap();
+
+                let run = catalog.get_query_run(&id).await.unwrap().unwrap();
+                assert_eq!(run.saved_query_id.as_deref(), Some(sq.id.as_str()));
+                assert_eq!(run.saved_query_version, Some(1));
+                assert_eq!(run.sql_text, "SELECT 1");
+                assert_eq!(run.snapshot_id, snap.id);
+            }
+
+            #[tokio::test]
+            async fn get_or_create_snapshot_dedup() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let snap1 = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+                let snap2 = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+
+                // Same SQL should return the same snapshot id
+                assert_eq!(snap1.id, snap2.id);
+                assert_eq!(snap1.sql_hash, snap2.sql_hash);
+                assert_eq!(snap1.sql_text, "SELECT 1");
+
+                // Different SQL should return a different snapshot id
+                let snap3 = catalog.get_or_create_snapshot("SELECT 2").await.unwrap();
+                assert_ne!(snap1.id, snap3.id);
+                assert_ne!(snap1.sql_hash, snap3.sql_hash);
+                assert_eq!(snap3.sql_text, "SELECT 2");
+            }
+
+            #[tokio::test]
+            async fn delete_saved_query_preserves_query_run_history() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                // Create a saved query
+                let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+                let sq = catalog
+                    .create_saved_query("ephemeral", &snap.id)
+                    .await
+                    .unwrap();
+
+                // Create a query run linked to that saved query
+                let run_id = runtimedb::id::generate_query_run_id();
+                catalog
+                    .create_query_run(CreateQueryRun {
+                        id: &run_id,
+                        snapshot_id: &snap.id,
+                        saved_query_id: Some(&sq.id),
+                        saved_query_version: Some(1),
+                        trace_id: None,
+                    })
+                    .await
+                    .unwrap();
+
+                // Delete the saved query
+                let deleted = catalog.delete_saved_query(&sq.id).await.unwrap();
+                assert!(deleted);
+
+                // The query run should still exist with resolvable sql_text
+                let run = catalog.get_query_run(&run_id).await.unwrap().unwrap();
+                assert_eq!(run.sql_text, "SELECT 1");
+                assert_eq!(run.snapshot_id, snap.id);
             }
 
         }
