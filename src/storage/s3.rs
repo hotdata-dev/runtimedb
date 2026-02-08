@@ -232,15 +232,14 @@ impl S3Storage {
     pub fn new_with_endpoint(
         bucket: &str,
         endpoint: &str,
-        access_key: Option<&str>,
-        secret_key: Option<&str>,
+        credentials: Option<(&str, &str)>,
         region: &str,
         allow_http: bool,
         s3_compat: bool,
         authorization_header: Option<&str>,
     ) -> Result<Self> {
         let skip_signature = authorization_header.is_some();
-        let credentials = Self::resolve_endpoint_credentials(access_key, secret_key)?;
+        let credentials = Self::build_endpoint_credentials(credentials);
         let client_options = Self::build_client_options(allow_http, authorization_header)?;
 
         let mut builder = AmazonS3Builder::new()
@@ -281,20 +280,11 @@ impl S3Storage {
         })
     }
 
-    fn resolve_endpoint_credentials(
-        access_key: Option<&str>,
-        secret_key: Option<&str>,
-    ) -> Result<Option<S3Creds>> {
-        match (access_key, secret_key) {
-            (Some(access_key), Some(secret_key)) => Ok(Some(S3Creds {
-                access_key: access_key.to_string(),
-                secret_key: secret_key.to_string(),
-            })),
-            (None, None) => Ok(None),
-            _ => anyhow::bail!(
-                "S3 endpoint configuration requires both access_key and secret_key when using explicit credentials"
-            ),
-        }
+    fn build_endpoint_credentials(credentials: Option<(&str, &str)>) -> Option<S3Creds> {
+        credentials.map(|(access_key, secret_key)| S3Creds {
+            access_key: access_key.to_string(),
+            secret_key: secret_key.to_string(),
+        })
     }
 
     fn build_client_options(
@@ -675,17 +665,18 @@ mod tests {
 
     #[test]
     fn test_new_with_endpoint_allows_skip_signature_without_credentials() {
-        let credentials =
-            S3Storage::resolve_endpoint_credentials(None, None).expect("credentials are optional");
+        let credentials = S3Storage::build_endpoint_credentials(None);
 
         assert!(credentials.is_none());
     }
 
     #[test]
-    fn test_new_with_endpoint_rejects_partial_credentials() {
-        let result = S3Storage::resolve_endpoint_credentials(Some("access-key"), None);
+    fn test_new_with_endpoint_accepts_credentials_tuple() {
+        let credentials = S3Storage::build_endpoint_credentials(Some(("access-key", "secret-key")))
+            .expect("credential tuple should be accepted");
 
-        assert!(result.is_err(), "partial credentials should be rejected");
+        assert_eq!(credentials.access_key, "access-key");
+        assert_eq!(credentials.secret_key, "secret-key");
     }
 
     #[test]

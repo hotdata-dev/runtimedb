@@ -76,8 +76,7 @@ impl MinioTestInfra {
         let storage = S3Storage::new_with_endpoint(
             MINIO_BUCKET,
             &minio_endpoint,
-            Some(MINIO_ROOT_USER),
-            Some(MINIO_ROOT_PASSWORD),
+            Some((MINIO_ROOT_USER, MINIO_ROOT_PASSWORD)),
             MINIO_REGION,
             true,
             false,

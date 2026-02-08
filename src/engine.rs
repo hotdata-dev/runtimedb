@@ -334,14 +334,14 @@ impl RuntimeEngine {
                     } else {
                         Some(secret_key.as_deref().unwrap_or("minioadmin"))
                     };
+                    let endpoint_credentials = endpoint_access_key.zip(endpoint_secret_key);
 
                     let allow_http = endpoint.starts_with("http://");
 
                     Ok(Arc::new(crate::storage::S3Storage::new_with_endpoint(
                         bucket,
                         endpoint,
-                        endpoint_access_key,
-                        endpoint_secret_key,
+                        endpoint_credentials,
                         region,
                         allow_http,
                         config.storage.s3_compat,
