@@ -321,7 +321,7 @@ impl RuntimeEngine {
 
                 // Custom endpoint (for MinIO/localstack) - uses path-style URLs
                 if let Some(endpoint) = &config.storage.endpoint {
-                    let authorization_header = config.storage.s3_authorization_header();
+                    let authorization_header = config.storage.authorization_header.as_deref();
                     let skip_signature = authorization_header.is_some();
 
                     let endpoint_access_key = if skip_signature {
@@ -3211,7 +3211,7 @@ mod tests {
                 endpoint: None,
                 access_key: None,
                 secret_key: None,
-                s3: Default::default(),
+                authorization_header: None,
                 s3_compat: false,
             },
             paths: PathsConfig {

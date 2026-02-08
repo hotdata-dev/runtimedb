@@ -24,9 +24,8 @@ type = "filesystem"
 #endpoint = "http://localhost:9000"
 #
 ## Optional: for JWT auth with S3-compatible storage (e.g. AIStore)
-## Env var equivalent: RUNTIMEDB_STORAGE_S3_AUTHORIZATION_HEADER
-#[storage.s3.authorization]
-#header = "Bearer <jwt-token>"
+## Env var equivalent: RUNTIMEDB_STORAGE__AUTHORIZATION_HEADER
+#authorization_header = "Bearer <jwt-token>"
 
 [paths]
 #cache_dir = "~/.hotdata/runtimedb/cache"
