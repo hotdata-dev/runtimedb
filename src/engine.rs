@@ -321,18 +321,31 @@ impl RuntimeEngine {
 
                 // Custom endpoint (for MinIO/localstack) - uses path-style URLs
                 if let Some(endpoint) = &config.storage.endpoint {
-                    let access_key = access_key.unwrap_or_else(|| "minioadmin".to_string());
-                    let secret_key = secret_key.unwrap_or_else(|| "minioadmin".to_string());
+                    let authorization_header = config.storage.s3_authorization_header();
+                    let skip_signature = authorization_header.is_some();
+
+                    let endpoint_access_key = if skip_signature {
+                        None
+                    } else {
+                        Some(access_key.as_deref().unwrap_or("minioadmin"))
+                    };
+                    let endpoint_secret_key = if skip_signature {
+                        None
+                    } else {
+                        Some(secret_key.as_deref().unwrap_or("minioadmin"))
+                    };
+
                     let allow_http = endpoint.starts_with("http://");
 
                     Ok(Arc::new(crate::storage::S3Storage::new_with_endpoint(
                         bucket,
                         endpoint,
-                        &access_key,
-                        &secret_key,
+                        endpoint_access_key,
+                        endpoint_secret_key,
                         region,
                         allow_http,
                         config.storage.s3_compat,
+                        authorization_header,
                     )?))
                 } else if let (Some(access_key), Some(secret_key)) = (access_key, secret_key) {
                     // AWS S3 with explicit credentials from config/env
@@ -3198,6 +3211,7 @@ mod tests {
                 endpoint: None,
                 access_key: None,
                 secret_key: None,
+                s3: Default::default(),
                 s3_compat: false,
             },
             paths: PathsConfig {

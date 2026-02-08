@@ -22,6 +22,11 @@ type = "filesystem"
 #region = "us-east-1"
 ## Optional: for MinIO/localstack
 #endpoint = "http://localhost:9000"
+#
+## Optional: for JWT auth with S3-compatible storage (e.g. AIStore)
+## Env var equivalent: RUNTIMEDB_STORAGE_S3_AUTHORIZATION_HEADER
+#[storage.s3.authorization]
+#header = "Bearer <jwt-token>"
 
 [paths]
 #cache_dir = "~/.hotdata/runtimedb/cache"

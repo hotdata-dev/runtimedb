@@ -54,10 +54,35 @@ pub struct StorageConfig {
     pub endpoint: Option<String>,
     pub access_key: Option<String>,
     pub secret_key: Option<String>,
+    /// S3-specific options under `storage.s3`.
+    #[serde(default)]
+    pub s3: StorageS3Config,
     /// Enable S3 compatibility layer for non-standard S3 backends (e.g. NVIDIA AIStore).
     /// Wraps the object store to handle quirks like non-standard HTTP error codes.
     #[serde(default)]
     pub s3_compat: bool,
+}
+
+impl StorageConfig {
+    pub fn s3_authorization_header(&self) -> Option<&str> {
+        self.s3.authorization.header.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct StorageS3Config {
+    #[serde(default)]
+    pub authorization: StorageS3AuthorizationConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct StorageS3AuthorizationConfig {
+    /// Optional raw `Authorization` header value for S3 endpoint requests.
+    ///
+    /// Example: `Bearer <jwt-token>`.
+    /// When this is set, RuntimeDB disables SigV4 signing for endpoint storage
+    /// so this value is preserved on outbound requests.
+    pub header: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
