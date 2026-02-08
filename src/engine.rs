@@ -1,7 +1,7 @@
 use crate::catalog::{
     is_dataset_table_name_conflict, CachingCatalogManager, CatalogManager, ConnectionInfo,
     CreateQueryRun, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus, ResultUpdate,
-    SqliteCatalogManager, TableInfo,
+    SavedQuery, SavedQueryVersion, SqliteCatalogManager, TableInfo,
 };
 use crate::datafetch::native::StreamingParquetWriter;
 use crate::datafetch::{BatchWriter, FetchOrchestrator, NativeFetcher};
@@ -28,7 +28,6 @@ use instrumented_object_store::instrument_object_store;
 use liquid_cache_client::LiquidCacheClientBuilder;
 use object_store::ObjectStore;
 use opentelemetry::trace::TraceContextExt;
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -88,6 +87,12 @@ pub struct QueryResponse {
 #[error("{0}")]
 pub struct QueryInputError(pub String);
 
+/// Error for a resource that was not found.
+/// Maps to HTTP 404 via the `From<anyhow::Error> for ApiError` conversion.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct NotFoundError(pub String);
+
 /// Result of a query execution with async persistence and run tracking.
 ///
 /// Returned by [`RuntimeEngine::execute_query_with_persistence`]. Contains all
@@ -124,13 +129,6 @@ pub struct QueryRunPage {
     pub has_more: bool,
     /// Base64url-encoded cursor for the next page, if has_more is true.
     pub next_cursor: Option<String>,
-}
-
-/// Compute SHA-256 hex hash of SQL text.
-pub fn sql_hash(sql: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(sql.as_bytes());
-    format!("{:x}", hasher.finalize())
 }
 
 /// Extract the current span's trace ID if valid, else None.
@@ -613,8 +611,14 @@ impl RuntimeEngine {
     /// **Note:** If the server crashes between step 1 and step 4, the query run will
     /// remain in `running` status indefinitely. A periodic cleanup job to mark stale
     /// `running` records as `failed` should be added in a future iteration.
+    pub async fn execute_query_with_persistence(&self, sql: &str) -> Result<TrackedQueryResult> {
+        self.execute_query_with_persistence_inner(sql, None, None)
+            .await
+    }
+
+    /// Inner method that supports optional saved query linkage.
     #[tracing::instrument(
-        name = "execute_query_with_persistence",
+        name = "execute_query_with_persistence_inner",
         skip(self, sql),
         fields(
             runtimedb.query_run_id = tracing::field::Empty,
@@ -622,10 +626,15 @@ impl RuntimeEngine {
             runtimedb.row_count = tracing::field::Empty,
         )
     )]
-    pub async fn execute_query_with_persistence(&self, sql: &str) -> Result<TrackedQueryResult> {
+    async fn execute_query_with_persistence_inner(
+        &self,
+        sql: &str,
+        saved_query_id: Option<&str>,
+        saved_query_version: Option<i32>,
+    ) -> Result<TrackedQueryResult> {
         let start = Instant::now();
         let query_run_id = crate::id::generate_query_run_id();
-        let hash = sql_hash(sql);
+        let snapshot = self.catalog.get_or_create_snapshot(sql).await?;
         let trace_id = current_trace_id();
 
         tracing::Span::current().record("runtimedb.query_run_id", &query_run_id);
@@ -634,9 +643,10 @@ impl RuntimeEngine {
         self.catalog
             .create_query_run(CreateQueryRun {
                 id: &query_run_id,
-                sql_text: sql,
-                sql_hash: &hash,
+                snapshot_id: &snapshot.id,
                 trace_id: trace_id.as_deref(),
+                saved_query_id,
+                saved_query_version,
             })
             .await?;
 
@@ -999,6 +1009,95 @@ impl RuntimeEngine {
             has_more,
             next_cursor,
         })
+    }
+
+    // Saved query methods
+
+    pub async fn create_saved_query(&self, name: &str, sql: &str) -> Result<SavedQuery> {
+        let snapshot = self.catalog.get_or_create_snapshot(sql).await?;
+        self.catalog.create_saved_query(name, &snapshot.id).await
+    }
+
+    pub async fn get_saved_query(&self, id: &str) -> Result<Option<SavedQuery>> {
+        self.catalog.get_saved_query(id).await
+    }
+
+    pub async fn list_saved_queries(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<SavedQuery>, bool)> {
+        self.catalog.list_saved_queries(limit, offset).await
+    }
+
+    pub async fn update_saved_query(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        sql: &str,
+    ) -> Result<Option<SavedQuery>> {
+        let snapshot = self.catalog.get_or_create_snapshot(sql).await?;
+        self.catalog
+            .update_saved_query(id, name, &snapshot.id)
+            .await
+    }
+
+    pub async fn delete_saved_query(&self, id: &str) -> Result<bool> {
+        self.catalog.delete_saved_query(id).await
+    }
+
+    pub async fn get_saved_query_version(
+        &self,
+        saved_query_id: &str,
+        version: i32,
+    ) -> Result<Option<SavedQueryVersion>> {
+        self.catalog
+            .get_saved_query_version(saved_query_id, version)
+            .await
+    }
+
+    pub async fn list_saved_query_versions(
+        &self,
+        saved_query_id: &str,
+    ) -> Result<Vec<SavedQueryVersion>> {
+        self.catalog.list_saved_query_versions(saved_query_id).await
+    }
+
+    /// Execute a saved query by ID, optionally pinned to a specific version.
+    /// Resolves the SQL from the saved query version and creates a query run
+    /// with saved query linkage.
+    pub async fn execute_saved_query(
+        &self,
+        saved_query_id: &str,
+        version: Option<i32>,
+    ) -> Result<TrackedQueryResult> {
+        // Look up the saved query
+        let saved_query = self
+            .catalog
+            .get_saved_query(saved_query_id)
+            .await?
+            .ok_or_else(|| NotFoundError(format!("Saved query '{}' not found", saved_query_id)))?;
+
+        // Resolve the version to execute
+        let target_version = version.unwrap_or(saved_query.latest_version);
+        let version_record = self
+            .catalog
+            .get_saved_query_version(saved_query_id, target_version)
+            .await?
+            .ok_or_else(|| {
+                NotFoundError(format!(
+                    "Version {} not found for saved query '{}'",
+                    target_version, saved_query_id
+                ))
+            })?;
+
+        // Execute with saved query linkage
+        self.execute_query_with_persistence_inner(
+            &version_record.sql_text,
+            Some(saved_query_id),
+            Some(target_version),
+        )
+        .await
     }
 
     /// Purge all cached data for a connection (clears parquet files and resets sync state).
