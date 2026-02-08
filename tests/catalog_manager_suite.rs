@@ -1206,6 +1206,44 @@ macro_rules! catalog_manager_tests {
 catalog_manager_tests!(sqlite, create_sqlite_catalog);
 catalog_manager_tests!(postgres, create_postgres_catalog);
 
+/// Test that concurrent SQLite updates to the same saved query don't race on
+/// the (saved_query_id, version) primary key. BEGIN IMMEDIATE serializes the
+/// read-then-increment pattern so both updates succeed with distinct versions.
+#[tokio::test]
+async fn sqlite_concurrent_saved_query_updates() {
+    let ctx = create_sqlite_catalog().await;
+    let catalog = ctx.manager();
+
+    let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+    let sq = catalog
+        .create_saved_query("concurrent-test", &snap.id)
+        .await
+        .unwrap();
+    assert_eq!(sq.latest_version, 1);
+
+    let snap2 = catalog.get_or_create_snapshot("SELECT 2").await.unwrap();
+    let snap3 = catalog.get_or_create_snapshot("SELECT 3").await.unwrap();
+
+    // Launch two updates concurrently against the same saved query.
+    let (r1, r2) = tokio::join!(
+        catalog.update_saved_query(&sq.id, None, &snap2.id),
+        catalog.update_saved_query(&sq.id, None, &snap3.id),
+    );
+
+    // Both must succeed — no PK violation.
+    let u1 = r1.unwrap().expect("update 1 should find the query");
+    let u2 = r2.unwrap().expect("update 2 should find the query");
+
+    // One should be version 2, the other version 3, in either order.
+    let mut versions = vec![u1.latest_version, u2.latest_version];
+    versions.sort();
+    assert_eq!(versions, vec![2, 3]);
+
+    // Final state should be version 3.
+    let final_sq = catalog.get_saved_query(&sq.id).await.unwrap().unwrap();
+    assert_eq!(final_sq.latest_version, 3);
+}
+
 /// Test that migration hash mismatch is detected on startup.
 /// This simulates the scenario where a migration SQL file was modified after
 /// being applied to a database.

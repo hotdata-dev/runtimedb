@@ -964,40 +964,55 @@ impl CatalogManager for SqliteCatalogManager {
         let id = crate::id::generate_saved_query_id();
         let now = Utc::now().to_rfc3339();
 
-        let mut tx = self.backend.pool().begin().await?;
+        // Use BEGIN IMMEDIATE to acquire a RESERVED lock up front, preventing
+        // concurrent writers from interleaving reads before locks are held.
+        let mut conn = self.backend.pool().acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
 
-        sqlx::query(
-            "INSERT INTO saved_queries (id, name, latest_version, created_at, updated_at) \
-             VALUES (?, ?, 1, ?, ?)",
-        )
-        .bind(&id)
-        .bind(name)
-        .bind(&now)
-        .bind(&now)
-        .execute(&mut *tx)
-        .await?;
+        let result: Result<SavedQuery> = async {
+            sqlx::query(
+                "INSERT INTO saved_queries (id, name, latest_version, created_at, updated_at) \
+                 VALUES (?, ?, 1, ?, ?)",
+            )
+            .bind(&id)
+            .bind(name)
+            .bind(&now)
+            .bind(&now)
+            .execute(&mut *conn)
+            .await?;
 
-        sqlx::query(
-            "INSERT INTO saved_query_versions (saved_query_id, version, snapshot_id, created_at) \
-             VALUES (?, 1, ?, ?)",
-        )
-        .bind(&id)
-        .bind(snapshot_id)
-        .bind(&now)
-        .execute(&mut *tx)
-        .await?;
+            sqlx::query(
+                "INSERT INTO saved_query_versions (saved_query_id, version, snapshot_id, created_at) \
+                 VALUES (?, 1, ?, ?)",
+            )
+            .bind(&id)
+            .bind(snapshot_id)
+            .bind(&now)
+            .execute(&mut *conn)
+            .await?;
 
-        let row: SavedQueryRow = sqlx::query_as(
-            "SELECT id, name, latest_version, created_at, updated_at \
-             FROM saved_queries WHERE id = ?",
-        )
-        .bind(&id)
-        .fetch_one(&mut *tx)
-        .await?;
+            let row: SavedQueryRow = sqlx::query_as(
+                "SELECT id, name, latest_version, created_at, updated_at \
+                 FROM saved_queries WHERE id = ?",
+            )
+            .bind(&id)
+            .fetch_one(&mut *conn)
+            .await?;
 
-        tx.commit().await?;
+            Ok(row.into_saved_query())
+        }
+        .await;
 
-        Ok(row.into_saved_query())
+        match &result {
+            Ok(_) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+            }
+            Err(_) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            }
+        }
+
+        result
     }
 
     #[tracing::instrument(
@@ -1055,60 +1070,75 @@ impl CatalogManager for SqliteCatalogManager {
         name: Option<&str>,
         snapshot_id: &str,
     ) -> Result<Option<SavedQuery>> {
-        // SQLite acquires an exclusive database-level lock on the first write
-        // within a transaction, so explicit row-level locking (FOR UPDATE) is
-        // unnecessary — concurrent writers are serialized at the engine level.
-        let mut tx = self.backend.pool().begin().await?;
+        // Use BEGIN IMMEDIATE to acquire a RESERVED lock up front, so the
+        // read of latest_version and subsequent insert of the next version are
+        // atomic. A deferred BEGIN would only take a SHARED lock on the read,
+        // allowing two concurrent updates to read the same latest_version and
+        // race on the (saved_query_id, version) primary key.
+        let mut conn = self.backend.pool().acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
 
-        let existing: Option<SavedQueryRow> = sqlx::query_as(
-            "SELECT id, name, latest_version, created_at, updated_at \
-             FROM saved_queries WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let result: Result<Option<SavedQuery>> = async {
+            let existing: Option<SavedQueryRow> = sqlx::query_as(
+                "SELECT id, name, latest_version, created_at, updated_at \
+                 FROM saved_queries WHERE id = ?",
+            )
+            .bind(id)
+            .fetch_optional(&mut *conn)
+            .await?;
 
-        let existing = match existing {
-            Some(row) => row,
-            None => return Ok(None),
-        };
+            let existing = match existing {
+                Some(row) => row,
+                None => return Ok(None),
+            };
 
-        let new_version = existing.latest_version + 1;
-        let now = Utc::now().to_rfc3339();
+            let new_version = existing.latest_version + 1;
+            let now = Utc::now().to_rfc3339();
 
-        sqlx::query(
-            "INSERT INTO saved_query_versions (saved_query_id, version, snapshot_id, created_at) \
-             VALUES (?, ?, ?, ?)",
-        )
-        .bind(id)
-        .bind(new_version)
-        .bind(snapshot_id)
-        .bind(&now)
-        .execute(&mut *tx)
-        .await?;
+            sqlx::query(
+                "INSERT INTO saved_query_versions (saved_query_id, version, snapshot_id, created_at) \
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(new_version)
+            .bind(snapshot_id)
+            .bind(&now)
+            .execute(&mut *conn)
+            .await?;
 
-        let effective_name = name.unwrap_or(&existing.name);
-        sqlx::query(
-            "UPDATE saved_queries SET name = ?, latest_version = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(effective_name)
-        .bind(new_version)
-        .bind(&now)
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
+            let effective_name = name.unwrap_or(&existing.name);
+            sqlx::query(
+                "UPDATE saved_queries SET name = ?, latest_version = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(effective_name)
+            .bind(new_version)
+            .bind(&now)
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
 
-        let row: SavedQueryRow = sqlx::query_as(
-            "SELECT id, name, latest_version, created_at, updated_at \
-             FROM saved_queries WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_one(&mut *tx)
-        .await?;
+            let row: SavedQueryRow = sqlx::query_as(
+                "SELECT id, name, latest_version, created_at, updated_at \
+                 FROM saved_queries WHERE id = ?",
+            )
+            .bind(id)
+            .fetch_one(&mut *conn)
+            .await?;
 
-        tx.commit().await?;
+            Ok(Some(row.into_saved_query()))
+        }
+        .await;
 
-        Ok(Some(row.into_saved_query()))
+        match &result {
+            Ok(_) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+            }
+            Err(_) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            }
+        }
+
+        result
     }
 
     #[tracing::instrument(
@@ -1117,24 +1147,38 @@ impl CatalogManager for SqliteCatalogManager {
         fields(db = "sqlite", runtimedb.saved_query_id = %id)
     )]
     async fn delete_saved_query(&self, id: &str) -> Result<bool> {
-        let mut tx = self.backend.pool().begin().await?;
+        // Use BEGIN IMMEDIATE for consistency with other write transactions.
+        let mut conn = self.backend.pool().acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
 
-        // Explicitly delete child versions first (SQLite PRAGMA foreign_keys is
-        // not guaranteed to be ON, so we cannot rely on ON DELETE CASCADE).
-        // Query runs retain history via their snapshot_id FK to sql_snapshots.
-        sqlx::query("DELETE FROM saved_query_versions WHERE saved_query_id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+        let result: Result<bool> = async {
+            // Explicitly delete child versions first (SQLite PRAGMA foreign_keys is
+            // not guaranteed to be ON, so we cannot rely on ON DELETE CASCADE).
+            // Query runs retain history via their snapshot_id FK to sql_snapshots.
+            sqlx::query("DELETE FROM saved_query_versions WHERE saved_query_id = ?")
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
 
-        let result = sqlx::query("DELETE FROM saved_queries WHERE id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+            let del = sqlx::query("DELETE FROM saved_queries WHERE id = ?")
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
 
-        tx.commit().await?;
+            Ok(del.rows_affected() > 0)
+        }
+        .await;
 
-        Ok(result.rows_affected() > 0)
+        match &result {
+            Ok(_) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+            }
+            Err(_) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            }
+        }
+
+        result
     }
 
     #[tracing::instrument(
