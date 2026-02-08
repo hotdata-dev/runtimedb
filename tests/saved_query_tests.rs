@@ -369,12 +369,14 @@ async fn test_list_saved_query_versions() -> Result<()> {
     let json = response_json(response).await?;
 
     assert_eq!(json["saved_query_id"], id);
+    assert!(json["has_more"].is_boolean());
     let versions = json["versions"].as_array().unwrap();
     assert_eq!(versions.len(), 3);
-    assert_eq!(versions[0]["version"], 1);
-    assert_eq!(versions[0]["sql"], "SELECT 1");
-    assert_eq!(versions[2]["version"], 3);
-    assert_eq!(versions[2]["sql"], "SELECT 3");
+    // Ordered by version DESC (newest first)
+    assert_eq!(versions[0]["version"], 3);
+    assert_eq!(versions[0]["sql"], "SELECT 3");
+    assert_eq!(versions[2]["version"], 1);
+    assert_eq!(versions[2]["sql"], "SELECT 1");
 
     Ok(())
 }

@@ -397,8 +397,12 @@ impl CatalogManager for FailingCatalog {
     async fn list_saved_query_versions(
         &self,
         saved_query_id: &str,
-    ) -> Result<Vec<SavedQueryVersion>> {
-        self.inner.list_saved_query_versions(saved_query_id).await
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<SavedQueryVersion>, bool)> {
+        self.inner
+            .list_saved_query_versions(saved_query_id, limit, offset)
+            .await
     }
 }
 

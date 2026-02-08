@@ -1,7 +1,6 @@
-#[allow(unused_imports)]
 use runtimedb::catalog::{
     CatalogManager, CreateQueryRun, PostgresCatalogManager, QueryRunCursor, QueryRunStatus,
-    QueryRunUpdate, SavedQuery, SavedQueryVersion, SqlSnapshot, SqliteCatalogManager,
+    QueryRunUpdate, SqliteCatalogManager,
 };
 use runtimedb::datasets::DEFAULT_SCHEMA;
 use sqlx::{PgPool, SqlitePool};
@@ -1006,7 +1005,7 @@ macro_rules! catalog_manager_tests {
                 assert!(fetched.is_none());
 
                 // Versions should be cascade-deleted
-                let versions = catalog.list_saved_query_versions(&sq.id).await.unwrap();
+                let (versions, _) = catalog.list_saved_query_versions(&sq.id, 100, 0).await.unwrap();
                 assert!(versions.is_empty());
             }
 
@@ -1087,13 +1086,15 @@ macro_rules! catalog_manager_tests {
                     .await
                     .unwrap();
 
-                let versions = catalog.list_saved_query_versions(&sq.id).await.unwrap();
+                let (versions, has_more) = catalog.list_saved_query_versions(&sq.id, 100, 0).await.unwrap();
+                assert!(!has_more);
                 assert_eq!(versions.len(), 3);
-                assert_eq!(versions[0].version, 1);
+                // Ordered by version DESC (newest first)
+                assert_eq!(versions[0].version, 3);
                 assert_eq!(versions[1].version, 2);
-                assert_eq!(versions[2].version, 3);
-                assert_eq!(versions[0].sql_text, "SELECT 1");
-                assert_eq!(versions[2].sql_text, "SELECT 3");
+                assert_eq!(versions[2].version, 1);
+                assert_eq!(versions[0].sql_text, "SELECT 3");
+                assert_eq!(versions[2].sql_text, "SELECT 1");
             }
 
             #[tokio::test]

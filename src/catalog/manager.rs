@@ -827,12 +827,15 @@ pub trait CatalogManager: Debug + Send + Sync {
         version: i32,
     ) -> Result<Option<SavedQueryVersion>>;
 
-    /// List all versions of a saved query, ordered by version ascending.
+    /// List versions of a saved query, ordered by version descending.
     /// sql_text and sql_hash are resolved via JOIN to sql_snapshots.
+    /// Returns (versions, has_more) for pagination.
     async fn list_saved_query_versions(
         &self,
         saved_query_id: &str,
-    ) -> Result<Vec<SavedQueryVersion>>;
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<SavedQueryVersion>, bool)>;
 
     // Dataset management methods
 

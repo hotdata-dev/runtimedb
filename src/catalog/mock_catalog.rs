@@ -21,6 +21,7 @@ use std::sync::{Mutex, RwLock};
 pub struct MockCatalog {
     tables: Mutex<HashMap<(String, String, String), TableInfo>>,
     results: RwLock<HashMap<String, QueryResult>>,
+    snapshots: Mutex<HashMap<String, SqlSnapshot>>,
     fail_update: AtomicBool,
     next_id: AtomicUsize,
 }
@@ -30,6 +31,7 @@ impl MockCatalog {
         Self {
             tables: Mutex::new(HashMap::new()),
             results: RwLock::new(HashMap::new()),
+            snapshots: Mutex::new(HashMap::new()),
             fail_update: AtomicBool::new(false),
             next_id: AtomicUsize::new(1),
         }
@@ -341,12 +343,19 @@ impl CatalogManager for MockCatalog {
 
     async fn get_or_create_snapshot(&self, sql_text: &str) -> Result<SqlSnapshot> {
         let hash = crate::catalog::manager::sql_hash(sql_text);
-        Ok(SqlSnapshot {
+        let mut snapshots = self.snapshots.lock().unwrap();
+        // Deduplicate by sql_hash — return existing snapshot if one exists
+        if let Some(existing) = snapshots.get(&hash) {
+            return Ok(existing.clone());
+        }
+        let snapshot = SqlSnapshot {
             id: crate::id::generate_snapshot_id(),
-            sql_hash: hash,
+            sql_hash: hash.clone(),
             sql_text: sql_text.to_string(),
             created_at: chrono::Utc::now(),
-        })
+        };
+        snapshots.insert(hash, snapshot.clone());
+        Ok(snapshot)
     }
 
     async fn create_saved_query(&self, _name: &str, _snapshot_id: &str) -> Result<SavedQuery> {
@@ -389,8 +398,10 @@ impl CatalogManager for MockCatalog {
     async fn list_saved_query_versions(
         &self,
         _saved_query_id: &str,
-    ) -> Result<Vec<SavedQueryVersion>> {
-        Ok(vec![])
+        _limit: usize,
+        _offset: usize,
+    ) -> Result<(Vec<SavedQueryVersion>, bool)> {
+        Ok((vec![], false))
     }
 
     async fn create_dataset(&self, _dataset: &DatasetInfo) -> Result<()> {

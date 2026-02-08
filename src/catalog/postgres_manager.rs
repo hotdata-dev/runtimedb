@@ -1109,20 +1109,33 @@ impl CatalogManager for PostgresCatalogManager {
     async fn list_saved_query_versions(
         &self,
         saved_query_id: &str,
-    ) -> Result<Vec<SavedQueryVersion>> {
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<SavedQueryVersion>, bool)> {
+        let fetch_limit = limit.saturating_add(1);
         let rows: Vec<SavedQueryVersionRowPg> = sqlx::query_as(
             "SELECT sqv.saved_query_id, sqv.version, sqv.snapshot_id, \
              snap.sql_text, snap.sql_hash, sqv.created_at \
              FROM saved_query_versions sqv \
              JOIN sql_snapshots snap ON snap.id = sqv.snapshot_id \
              WHERE sqv.saved_query_id = $1 \
-             ORDER BY sqv.version ASC",
+             ORDER BY sqv.version DESC \
+             LIMIT $2 OFFSET $3",
         )
         .bind(saved_query_id)
+        .bind(fetch_limit as i64)
+        .bind(offset as i64)
         .fetch_all(self.backend.pool())
         .await?;
 
-        Ok(rows.into_iter().map(SavedQueryVersion::from).collect())
+        let has_more = rows.len() > limit;
+        let versions = rows
+            .into_iter()
+            .take(limit)
+            .map(SavedQueryVersion::from)
+            .collect();
+
+        Ok((versions, has_more))
     }
 
     // Dataset management methods

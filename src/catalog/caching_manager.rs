@@ -1174,8 +1174,12 @@ impl CatalogManager for CachingCatalogManager {
     async fn list_saved_query_versions(
         &self,
         saved_query_id: &str,
-    ) -> Result<Vec<SavedQueryVersion>> {
-        self.inner().list_saved_query_versions(saved_query_id).await
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<SavedQueryVersion>, bool)> {
+        self.inner()
+            .list_saved_query_versions(saved_query_id, limit, offset)
+            .await
     }
 
     // Dataset management methods (with cache invalidation for list_dataset_table_names)

@@ -1214,23 +1214,33 @@ impl CatalogManager for SqliteCatalogManager {
     async fn list_saved_query_versions(
         &self,
         saved_query_id: &str,
-    ) -> Result<Vec<SavedQueryVersion>> {
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<SavedQueryVersion>, bool)> {
+        let fetch_limit = limit.saturating_add(1);
         let rows: Vec<SavedQueryVersionRow> = sqlx::query_as(
             "SELECT sqv.saved_query_id, sqv.version, sqv.snapshot_id, \
              snap.sql_text, snap.sql_hash, sqv.created_at \
              FROM saved_query_versions sqv \
              JOIN sql_snapshots snap ON snap.id = sqv.snapshot_id \
              WHERE sqv.saved_query_id = ? \
-             ORDER BY sqv.version ASC",
+             ORDER BY sqv.version DESC \
+             LIMIT ? OFFSET ?",
         )
         .bind(saved_query_id)
+        .bind(fetch_limit as i64)
+        .bind(offset as i64)
         .fetch_all(self.backend.pool())
         .await?;
 
-        Ok(rows
+        let has_more = rows.len() > limit;
+        let versions = rows
             .into_iter()
+            .take(limit)
             .map(SavedQueryVersionRow::into_saved_query_version)
-            .collect())
+            .collect();
+
+        Ok((versions, has_more))
     }
 
     // Dataset management methods
