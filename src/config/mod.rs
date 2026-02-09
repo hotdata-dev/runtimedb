@@ -54,6 +54,12 @@ pub struct StorageConfig {
     pub endpoint: Option<String>,
     pub access_key: Option<String>,
     pub secret_key: Option<String>,
+    /// Optional raw `Authorization` header value for endpoint S3 requests.
+    ///
+    /// Example: `Bearer <jwt-token>`.
+    /// When this is set, RuntimeDB disables SigV4 signing for endpoint storage
+    /// so this value is preserved on outbound requests.
+    pub authorization_header: Option<String>,
     /// Enable S3 compatibility layer for non-standard S3 backends (e.g. NVIDIA AIStore).
     /// Wraps the object store to handle quirks like non-standard HTTP error codes.
     #[serde(default)]
@@ -171,10 +177,11 @@ impl AppConfig {
         builder = builder.add_source(config::File::with_name(config_path));
 
         // Add environment variables with prefix RUNTIMEDB_
-        // Example: RUNTIMEDB_SERVER_PORT=8080
+        // Example: RUNTIMEDB_SERVER__PORT=8080
         builder = builder.add_source(
             config::Environment::with_prefix("RUNTIMEDB")
-                .separator("_")
+                .prefix_separator("_")
+                .separator("__")
                 .try_parsing(true),
         );
 
@@ -234,5 +241,50 @@ impl AppConfig {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    #[test]
+    fn test_load_supports_double_underscore_env_separator() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let temp_file = tempfile::Builder::new().suffix(".toml").tempfile().unwrap();
+        std::fs::write(
+            temp_file.path(),
+            r#"
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[catalog]
+type = "sqlite"
+
+[storage]
+type = "filesystem"
+"#,
+        )
+        .unwrap();
+
+        std::env::set_var(
+            "RUNTIMEDB_STORAGE__AUTHORIZATION_HEADER",
+            "Bearer test-token",
+        );
+        std::env::set_var("RUNTIMEDB_SERVER__PORT", "3111");
+
+        let config = AppConfig::load(temp_file.path().to_str().unwrap()).unwrap();
+        assert_eq!(
+            config.storage.authorization_header.as_deref(),
+            Some("Bearer test-token")
+        );
+        assert_eq!(config.server.port, 3111);
+
+        std::env::remove_var("RUNTIMEDB_STORAGE__AUTHORIZATION_HEADER");
+        std::env::remove_var("RUNTIMEDB_SERVER__PORT");
     }
 }

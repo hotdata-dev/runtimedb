@@ -1,13 +1,15 @@
 // src/storage/s3.rs
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::SessionContext;
 use futures::stream::BoxStream;
 use futures::TryStreamExt;
+use http::header::AUTHORIZATION;
+use http::{HeaderMap, HeaderValue};
 use object_store::aws::AmazonS3Builder;
 use object_store::buffered::BufWriter;
-use object_store::{path::Path as ObjectPath, ObjectStore};
+use object_store::{path::Path as ObjectPath, ClientOptions, ObjectStore};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -223,24 +225,41 @@ impl S3Storage {
     /// Uses path-style URLs. When `s3_compat` is true, wraps the store with
     /// S3CompatObjectStore to handle backends (e.g. NVIDIA AIStore) that return
     /// non-standard HTTP error codes.
+    ///
+    /// When `authorization_header` is set, requests are not signed with SigV4.
+    /// This allows S3-compatible backends to authenticate via a custom
+    /// `Authorization` header.
     pub fn new_with_endpoint(
         bucket: &str,
         endpoint: &str,
-        access_key: &str,
-        secret_key: &str,
+        credentials: Option<(&str, &str)>,
         region: &str,
         allow_http: bool,
         s3_compat: bool,
+        authorization_header: Option<&str>,
     ) -> Result<Self> {
-        let builder = AmazonS3Builder::new()
+        let skip_signature = authorization_header.is_some();
+        let credentials = Self::build_endpoint_credentials(credentials);
+        let client_options = Self::build_client_options(allow_http, authorization_header)?;
+
+        let mut builder = AmazonS3Builder::new()
             .with_bucket_name(bucket)
             .with_endpoint(endpoint)
-            .with_access_key_id(access_key)
-            .with_secret_access_key(secret_key)
             .with_region(region)
             .with_allow_http(allow_http)
+            .with_client_options(client_options)
             // For MinIO/AIStore, we need to use path-style URLs
             .with_virtual_hosted_style_request(false);
+
+        if let Some(credentials) = &credentials {
+            builder = builder
+                .with_access_key_id(credentials.access_key.as_str())
+                .with_secret_access_key(credentials.secret_key.as_str());
+        }
+
+        if skip_signature {
+            builder = builder.with_skip_signature(true);
+        }
 
         let store = builder.build()?;
         let store: Arc<dyn ObjectStore> = if s3_compat {
@@ -256,12 +275,33 @@ impl S3Storage {
                 region: region.to_string(),
                 endpoint: Some(endpoint.to_string()),
                 allow_http,
-                credentials: Some(S3Creds {
-                    access_key: access_key.to_string(),
-                    secret_key: secret_key.to_string(),
-                }),
+                credentials,
             },
         })
+    }
+
+    fn build_endpoint_credentials(credentials: Option<(&str, &str)>) -> Option<S3Creds> {
+        credentials.map(|(access_key, secret_key)| S3Creds {
+            access_key: access_key.to_string(),
+            secret_key: secret_key.to_string(),
+        })
+    }
+
+    fn build_client_options(
+        allow_http: bool,
+        authorization_header: Option<&str>,
+    ) -> Result<ClientOptions> {
+        let mut client_options = ClientOptions::new().with_allow_http(allow_http);
+
+        if let Some(authorization_header) = authorization_header {
+            let mut headers = HeaderMap::new();
+            let header_value = HeaderValue::from_str(authorization_header)
+                .context("Invalid S3 authorization header value")?;
+            headers.insert(AUTHORIZATION, header_value);
+            client_options = client_options.with_default_headers(headers);
+        }
+
+        Ok(client_options)
     }
 
     fn url_to_path(&self, url: &str) -> Result<ObjectPath> {
@@ -621,6 +661,22 @@ mod tests {
             allow_http: false,
             credentials: None,
         }
+    }
+
+    #[test]
+    fn test_new_with_endpoint_allows_skip_signature_without_credentials() {
+        let credentials = S3Storage::build_endpoint_credentials(None);
+
+        assert!(credentials.is_none());
+    }
+
+    #[test]
+    fn test_new_with_endpoint_accepts_credentials_tuple() {
+        let credentials = S3Storage::build_endpoint_credentials(Some(("access-key", "secret-key")))
+            .expect("credential tuple should be accepted");
+
+        assert_eq!(credentials.access_key, "access-key");
+        assert_eq!(credentials.secret_key, "secret-key");
     }
 
     #[test]
