@@ -599,6 +599,7 @@ impl RuntimeEngine {
         )
     )]
     pub async fn execute_query_with_persistence(&self, sql: &str) -> Result<TrackedQueryResult> {
+        let start = Instant::now();
         let query_run_id = crate::id::generate_query_run_id();
         let hash = sql_hash(sql);
         let trace_id = current_trace_id();
@@ -616,7 +617,6 @@ impl RuntimeEngine {
             .await?;
 
         // Execute the query (timed for the query run record)
-        let start = Instant::now();
         let query_response = match self.execute_query(sql).await {
             Ok(resp) => resp,
             Err(e) => {
@@ -641,7 +641,6 @@ impl RuntimeEngine {
             }
         };
 
-        let execution_time_ms = start.elapsed().as_millis() as u64;
         let row_count: usize = query_response.results.iter().map(|b| b.num_rows()).sum();
 
         tracing::Span::current().record("runtimedb.row_count", row_count);
@@ -669,6 +668,7 @@ impl RuntimeEngine {
             }
         };
 
+        let execution_time_ms = start.elapsed().as_millis() as u64;
         // Update query run as succeeded
         if let Err(e) = self
             .catalog
