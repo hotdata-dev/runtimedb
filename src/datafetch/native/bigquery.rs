@@ -21,10 +21,7 @@ use crate::source::Source;
 
 /// Build a BigQuery client from source credentials.
 /// The credential is expected to be a GCP service account key JSON string.
-async fn build_client(
-    source: &Source,
-    secrets: &SecretManager,
-) -> Result<Client, DataFetchError> {
+async fn build_client(source: &Source, secrets: &SecretManager) -> Result<Client, DataFetchError> {
     let credential = match source {
         Source::Bigquery { credential, .. } => credential,
         _ => {
@@ -234,7 +231,8 @@ pub async fn fetch_table(
                     return None;
                 }
                 let col_name = cell_to_string(&cells[0])?;
-                let data_type_str = cell_to_string(&cells[1]).unwrap_or_else(|| "STRING".to_string());
+                let data_type_str =
+                    cell_to_string(&cells[1]).unwrap_or_else(|| "STRING".to_string());
                 let is_nullable = cell_to_string(&cells[2])
                     .map(|s| s.to_uppercase() == "YES")
                     .unwrap_or(true);
@@ -380,7 +378,6 @@ fn rows_to_batch(
     rows: &[gcp_bigquery_client::model::table_row::TableRow],
     schema: &Schema,
 ) -> Result<RecordBatch, DataFetchError> {
-    let num_cols = schema.fields().len();
     let num_rows = rows.len();
 
     let mut builders: Vec<Box<dyn ArrayBuilder>> = schema
@@ -390,11 +387,11 @@ fn rows_to_batch(
         .collect();
 
     for row in rows {
-        let cells = row.columns.as_ref().map(|c| c.as_slice()).unwrap_or(&[]);
-        for col_idx in 0..num_cols {
+        let cells = row.columns.as_deref().unwrap_or(&[]);
+        for (col_idx, builder) in builders.iter_mut().enumerate() {
             let cell = cells.get(col_idx);
             let data_type = schema.field(col_idx).data_type();
-            append_cell(&mut builders[col_idx], cell, data_type);
+            append_cell(builder, cell, data_type);
         }
     }
 
@@ -431,13 +428,11 @@ fn append_cell(
     cell: Option<&TableCell>,
     data_type: &DataType,
 ) {
-    let value_str = cell
-        .and_then(|c| c.value.as_ref())
-        .and_then(|v| match v {
-            serde_json::Value::String(s) => Some(s.as_str()),
-            serde_json::Value::Null => None,
-            _ => None,
-        });
+    let value_str = cell.and_then(|c| c.value.as_ref()).and_then(|v| match v {
+        serde_json::Value::String(s) => Some(s.as_str()),
+        serde_json::Value::Null => None,
+        _ => None,
+    });
 
     match data_type {
         DataType::Boolean => {
@@ -501,10 +496,17 @@ fn append_cell(
                         }
                     } else {
                         // DATETIME: value is ISO-like "2021-01-01 12:00:00" or "2021-01-01T12:00:00"
-                        let parsed = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
-                            .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f"))
-                            .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))
-                            .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"));
+                        let parsed =
+                            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
+                                .or_else(|_| {
+                                    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+                                })
+                                .or_else(|_| {
+                                    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+                                })
+                                .or_else(|_| {
+                                    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                                });
                         match parsed {
                             Ok(dt) => b.append_value(dt.and_utc().timestamp_micros()),
                             Err(_) => {
@@ -524,10 +526,12 @@ fn append_cell(
                 .unwrap();
             match value_str {
                 // BigQuery BYTES are base64 encoded
-                Some(s) => match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s) {
-                    Ok(bytes) => b.append_value(&bytes),
-                    Err(_) => b.append_value(s.as_bytes()),
-                },
+                Some(s) => {
+                    match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s) {
+                        Ok(bytes) => b.append_value(&bytes),
+                        Err(_) => b.append_value(s.as_bytes()),
+                    }
+                }
                 None => b.append_null(),
             }
         }
@@ -618,14 +622,8 @@ mod tests {
             bigquery_type_to_arrow("SMALLINT"),
             DataType::Int64
         ));
-        assert!(matches!(
-            bigquery_type_to_arrow("TINYINT"),
-            DataType::Int64
-        ));
-        assert!(matches!(
-            bigquery_type_to_arrow("BYTEINT"),
-            DataType::Int64
-        ));
+        assert!(matches!(bigquery_type_to_arrow("TINYINT"), DataType::Int64));
+        assert!(matches!(bigquery_type_to_arrow("BYTEINT"), DataType::Int64));
     }
 
     #[test]
@@ -885,7 +883,6 @@ mod tests {
 
     #[test]
     fn test_rows_to_batch_basic() {
-
         let schema = Schema::new(vec![
             Field::new("name", DataType::Utf8, true),
             Field::new("age", DataType::Int64, true),
@@ -937,7 +934,6 @@ mod tests {
 
     #[test]
     fn test_rows_to_batch_with_nulls() {
-
         let schema = Schema::new(vec![
             Field::new("value", DataType::Utf8, true),
             Field::new("count", DataType::Int64, true),
@@ -960,7 +956,6 @@ mod tests {
 
     #[test]
     fn test_rows_to_batch_boolean() {
-
         let schema = Schema::new(vec![Field::new("flag", DataType::Boolean, true)]);
 
         let rows = vec![
@@ -988,7 +983,6 @@ mod tests {
 
     #[test]
     fn test_rows_to_batch_date() {
-
         let schema = Schema::new(vec![Field::new("d", DataType::Date32, true)]);
 
         let rows = vec![TableRow {
@@ -1012,7 +1006,6 @@ mod tests {
 
     #[test]
     fn test_rows_to_batch_timestamp() {
-
         let schema = Schema::new(vec![Field::new(
             "ts",
             DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
@@ -1038,7 +1031,6 @@ mod tests {
 
     #[test]
     fn test_rows_to_batch_float() {
-
         let schema = Schema::new(vec![Field::new("f", DataType::Float64, true)]);
 
         let rows = vec![TableRow {
