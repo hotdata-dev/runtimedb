@@ -274,8 +274,7 @@ pub async fn fetch_table(
 
     let job_id = data_response
         .job_reference
-        .as_ref()
-        .and_then(|jr| jr.job_id.clone())
+        .and_then(|jr| jr.job_id)
         .ok_or_else(|| DataFetchError::Query("No job_id in query response".to_string()))?;
 
     // Process first page + paginate through remaining results
