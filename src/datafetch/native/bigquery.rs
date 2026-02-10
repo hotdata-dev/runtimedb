@@ -53,12 +53,13 @@ pub async fn discover_tables(
 ) -> Result<Vec<TableMetadata>, DataFetchError> {
     let client = build_client(source, secrets).await?;
 
-    let (project_id, dataset_filter) = match source {
+    let (project_id, dataset_filter, region) = match source {
         Source::Bigquery {
             project_id,
             dataset,
+            region,
             ..
-        } => (project_id.as_str(), dataset.as_deref()),
+        } => (project_id.as_str(), dataset.as_deref(), region.as_str()),
         _ => {
             return Err(DataFetchError::Connection(
                 "Expected BigQuery source".to_string(),
@@ -102,8 +103,8 @@ pub async fn discover_tables(
                 c.data_type,
                 c.is_nullable,
                 c.ordinal_position
-            FROM `{project_id}`.`region-us`.INFORMATION_SCHEMA.COLUMNS c
-            JOIN `{project_id}`.`region-us`.INFORMATION_SCHEMA.TABLES t
+            FROM `{project_id}`.`region-{region}`.INFORMATION_SCHEMA.COLUMNS c
+            JOIN `{project_id}`.`region-{region}`.INFORMATION_SCHEMA.TABLES t
                 ON c.table_catalog = t.table_catalog
                 AND c.table_schema = t.table_schema
                 AND c.table_name = t.table_name
@@ -111,6 +112,7 @@ pub async fn discover_tables(
             ORDER BY c.table_schema, c.table_name, c.ordinal_position
             "#,
             project_id = project_id.replace('`', "\\`"),
+            region = region.replace('`', "\\`"),
         )
     };
 
