@@ -1035,7 +1035,7 @@ mod tests {
 
         let rows = vec![TableRow {
             columns: Some(vec![TableCell {
-                value: Some(serde_json::Value::String("3.14".to_string())),
+                value: Some(serde_json::Value::String("2.72".to_string())),
             }]),
         }];
 
@@ -1045,7 +1045,7 @@ mod tests {
             .as_any()
             .downcast_ref::<datafusion::arrow::array::Float64Array>()
             .unwrap();
-        assert!((col.value(0) - 3.14).abs() < f64::EPSILON);
+        assert_eq!(col.value(0), 2.72_f64);
     }
 
     #[test]
