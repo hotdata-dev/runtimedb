@@ -80,6 +80,7 @@ pub async fn create_connection_handler(
             ("password", "password"),
             ("token", "token"),
             ("bearer_token", "bearer_token"),
+            ("credentials_json", "credentials_json"),
         ];
 
         // Skip inline credential processing if user already provided a secret_name

@@ -1268,6 +1268,86 @@ async fn test_create_connection_with_password_auto_creates_secret() -> Result<()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_create_bigquery_connection_with_credentials_json_auto_creates_secret() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    let fake_sa_json = serde_json::to_string(&json!({
+        "type": "service_account",
+        "project_id": "test-project",
+        "private_key_id": "key123",
+        "private_key": "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----\n",
+        "client_email": "test@test-project.iam.gserviceaccount.com",
+        "client_id": "123456789",
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token"
+    }))?;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_CONNECTIONS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "my_bq",
+                    "source_type": "bigquery",
+                    "config": {
+                        "project_id": "test-project",
+                        "credentials_json": fake_sa_json,
+                        "dataset": "my_dataset"
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(json["name"], "my_bq");
+    assert_eq!(json["source_type"], "bigquery");
+    // Discovery fails because no BigQuery server, but the important thing is it's not
+    // "no credential configured" - it should be a connection/auth error
+    assert_eq!(json["discovery_status"], "failed");
+    let error = json["discovery_error"].as_str().unwrap();
+    assert!(
+        !error.contains("no credential configured"),
+        "Error should not be 'no credential configured', got: {}",
+        error
+    );
+
+    // Verify the secret was auto-created with the expected name
+    let secrets_response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(PATH_SECRETS)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(secrets_response.status(), StatusCode::OK);
+
+    let secrets_body = axum::body::to_bytes(secrets_response.into_body(), usize::MAX).await?;
+    let secrets_json: serde_json::Value = serde_json::from_slice(&secrets_body)?;
+
+    let secrets = secrets_json["secrets"].as_array().unwrap();
+    assert_eq!(
+        secrets.len(),
+        1,
+        "Expected exactly one secret to be created"
+    );
+    assert_eq!(
+        secrets[0]["name"], "conn-my_bq-credentials_json",
+        "Secret should be named 'conn-my_bq-credentials_json'"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_create_connection_with_secret_name() -> Result<()> {
     let (app, _tempdir) = setup_test().await?;
 

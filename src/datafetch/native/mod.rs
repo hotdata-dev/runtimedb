@@ -1,5 +1,6 @@
 // Backend modules - public for type mapping function access in tests
 // The type mapping functions are the authoritative implementations that tests validate against.
+pub mod bigquery;
 pub mod duckdb;
 pub mod iceberg;
 pub mod mysql;
@@ -178,6 +179,7 @@ impl DataFetcher for NativeFetcher {
             Source::Iceberg { .. } => iceberg::discover_tables(source, secrets).await,
             Source::Mysql { .. } => mysql::discover_tables(source, secrets).await,
             Source::Snowflake { .. } => snowflake::discover_tables(source, secrets).await,
+            Source::Bigquery { .. } => bigquery::discover_tables(source, secrets).await,
         }?;
         tracing::Span::current().record("runtimedb.tables_found", tables.len());
         Ok(tables)
@@ -216,6 +218,9 @@ impl DataFetcher for NativeFetcher {
             }
             Source::Snowflake { .. } => {
                 snowflake::fetch_table(source, secrets, catalog, schema, table, writer).await
+            }
+            Source::Bigquery { .. } => {
+                bigquery::fetch_table(source, secrets, catalog, schema, table, writer).await
             }
         }
     }
