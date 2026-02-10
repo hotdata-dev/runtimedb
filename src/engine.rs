@@ -1037,27 +1037,6 @@ impl RuntimeEngine {
         sql: &str,
     ) -> Result<Option<SavedQuery>> {
         let snapshot = self.catalog.get_or_create_snapshot(sql).await?;
-
-        // Skip version creation when neither SQL nor name actually changed.
-        if let Some(ref sq) = self.catalog.get_saved_query(id).await? {
-            let effective_name = name.unwrap_or(&sq.name);
-            if let Some(current) = self
-                .catalog
-                .get_saved_query_version(id, sq.latest_version)
-                .await?
-            {
-                if current.snapshot_id == snapshot.id && effective_name == sq.name {
-                    return Ok(Some(SavedQuery {
-                        id: sq.id.clone(),
-                        name: sq.name.clone(),
-                        latest_version: sq.latest_version,
-                        created_at: sq.created_at,
-                        updated_at: sq.updated_at,
-                    }));
-                }
-            }
-        }
-
         self.catalog
             .update_saved_query(id, name, &snapshot.id)
             .await

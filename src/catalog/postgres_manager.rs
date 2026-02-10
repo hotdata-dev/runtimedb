@@ -977,7 +977,7 @@ impl CatalogManager for PostgresCatalogManager {
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<SavedQuery>, bool)> {
-        let fetch_limit = limit.saturating_add(1) as i64;
+        let fetch_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
         let rows: Vec<SavedQueryRowPg> = sqlx::query_as(
             "SELECT id, name, latest_version, created_at, updated_at \
              FROM saved_queries \
@@ -985,7 +985,7 @@ impl CatalogManager for PostgresCatalogManager {
              LIMIT $1 OFFSET $2",
         )
         .bind(fetch_limit)
-        .bind(offset as i64)
+        .bind(i64::try_from(offset).unwrap_or(i64::MAX))
         .fetch_all(self.backend.pool())
         .await?;
 
@@ -1022,6 +1022,27 @@ impl CatalogManager for PostgresCatalogManager {
             None => return Ok(None),
         };
 
+        let effective_name = name.unwrap_or(&existing.name);
+
+        // Check if the latest version already points to the same snapshot
+        // and the name is unchanged — skip creating a redundant version.
+        // This check runs inside the FOR UPDATE lock, so no TOCTOU race.
+        let current_snapshot: Option<(String,)> = sqlx::query_as(
+            "SELECT snapshot_id FROM saved_query_versions \
+             WHERE saved_query_id = $1 AND version = $2",
+        )
+        .bind(id)
+        .bind(existing.latest_version)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if let Some((current_sid,)) = current_snapshot {
+            if current_sid == snapshot_id && effective_name == existing.name {
+                tx.commit().await?;
+                return Ok(Some(SavedQuery::from(existing)));
+            }
+        }
+
         let new_version = existing.latest_version + 1;
         let now = Utc::now();
 
@@ -1036,7 +1057,6 @@ impl CatalogManager for PostgresCatalogManager {
         .execute(&mut *tx)
         .await?;
 
-        let effective_name = name.unwrap_or(&existing.name);
         sqlx::query(
             "UPDATE saved_queries SET name = $1, latest_version = $2, updated_at = $3 WHERE id = $4",
         )
@@ -1123,8 +1143,8 @@ impl CatalogManager for PostgresCatalogManager {
              LIMIT $2 OFFSET $3",
         )
         .bind(saved_query_id)
-        .bind(fetch_limit as i64)
-        .bind(offset as i64)
+        .bind(i64::try_from(fetch_limit).unwrap_or(i64::MAX))
+        .bind(i64::try_from(offset).unwrap_or(i64::MAX))
         .fetch_all(self.backend.pool())
         .await?;
 

@@ -1045,8 +1045,8 @@ impl CatalogManager for SqliteCatalogManager {
              ORDER BY name ASC \
              LIMIT ? OFFSET ?",
         )
-        .bind(fetch_limit as i64)
-        .bind(offset as i64)
+        .bind(i64::try_from(fetch_limit).unwrap_or(i64::MAX))
+        .bind(i64::try_from(offset).unwrap_or(i64::MAX))
         .fetch_all(self.backend.pool())
         .await?;
 
@@ -1092,6 +1092,25 @@ impl CatalogManager for SqliteCatalogManager {
                 None => return Ok(None),
             };
 
+            let effective_name = name.unwrap_or(&existing.name);
+
+            // Check if the latest version already points to the same snapshot
+            // and the name is unchanged — skip creating a redundant version.
+            let current_snapshot: Option<(String,)> = sqlx::query_as(
+                "SELECT snapshot_id FROM saved_query_versions \
+                 WHERE saved_query_id = ? AND version = ?",
+            )
+            .bind(id)
+            .bind(existing.latest_version)
+            .fetch_optional(&mut *conn)
+            .await?;
+
+            if let Some((current_sid,)) = current_snapshot {
+                if current_sid == snapshot_id && effective_name == existing.name {
+                    return Ok(Some(existing.into_saved_query()));
+                }
+            }
+
             let new_version = existing.latest_version + 1;
             let now = Utc::now().to_rfc3339();
 
@@ -1106,7 +1125,6 @@ impl CatalogManager for SqliteCatalogManager {
             .execute(&mut *conn)
             .await?;
 
-            let effective_name = name.unwrap_or(&existing.name);
             sqlx::query(
                 "UPDATE saved_queries SET name = ?, latest_version = ?, updated_at = ? WHERE id = ?",
             )
@@ -1228,8 +1246,8 @@ impl CatalogManager for SqliteCatalogManager {
              LIMIT ? OFFSET ?",
         )
         .bind(saved_query_id)
-        .bind(fetch_limit as i64)
-        .bind(offset as i64)
+        .bind(i64::try_from(fetch_limit).unwrap_or(i64::MAX))
+        .bind(i64::try_from(offset).unwrap_or(i64::MAX))
         .fetch_all(self.backend.pool())
         .await?;
 
