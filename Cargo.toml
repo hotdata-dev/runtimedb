@@ -50,6 +50,7 @@ iceberg = "0.7"
 iceberg-catalog-rest = "0.7"
 iceberg-catalog-glue = "0.7"
 snowflake-api = "0.11"
+gcp-bigquery-client = "0.28.0"
 # Arrow 55 for iceberg compatibility (iceberg uses arrow 55, datafusion uses arrow 57)
 arrow-array-55 = { package = "arrow-array", version = "55" }
 arrow-ipc-55 = { package = "arrow-ipc", version = "55" }

@@ -124,6 +124,13 @@ pub enum Source {
         #[serde(default)]
         credential: Credential,
     },
+    Bigquery {
+        project_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        dataset: Option<String>,
+        #[serde(default)]
+        credential: Credential,
+    },
 }
 
 impl Source {
@@ -136,6 +143,7 @@ impl Source {
             Source::Duckdb { .. } => "duckdb",
             Source::Iceberg { .. } => "iceberg",
             Source::Mysql { .. } => "mysql",
+            Source::Bigquery { .. } => "bigquery",
         }
     }
 
@@ -160,6 +168,7 @@ impl Source {
                 IcebergCatalogType::Glue { credential, .. } => credential,
             },
             Source::Mysql { credential, .. } => credential,
+            Source::Bigquery { credential, .. } => credential,
         }
     }
 
@@ -237,6 +246,15 @@ impl Source {
                 port,
                 user,
                 database,
+                credential,
+            },
+            Source::Bigquery {
+                project_id,
+                dataset,
+                ..
+            } => Source::Bigquery {
+                project_id,
+                dataset,
                 credential,
             },
         }
@@ -693,5 +711,72 @@ mod tests {
     fn test_credential_none_has_no_id() {
         let cred = Credential::None;
         assert_eq!(cred.secret_id(), None);
+    }
+
+    #[test]
+    fn test_bigquery_serialization() {
+        let source = Source::Bigquery {
+            project_id: "my-gcp-project".to_string(),
+            dataset: Some("my_dataset".to_string()),
+            credential: Credential::SecretRef {
+                id: "secr_bq".to_string(),
+            },
+        };
+
+        let json = serde_json::to_string(&source).unwrap();
+        assert!(json.contains(r#""type":"bigquery""#));
+        assert!(json.contains(r#""project_id":"my-gcp-project""#));
+        assert!(json.contains(r#""dataset":"my_dataset""#));
+
+        let parsed: Source = serde_json::from_str(&json).unwrap();
+        assert_eq!(source, parsed);
+    }
+
+    #[test]
+    fn test_bigquery_without_dataset() {
+        let source = Source::Bigquery {
+            project_id: "my-gcp-project".to_string(),
+            dataset: None,
+            credential: Credential::None,
+        };
+
+        let json = serde_json::to_string(&source).unwrap();
+        assert!(!json.contains(r#""dataset""#));
+
+        let parsed: Source = serde_json::from_str(&json).unwrap();
+        assert_eq!(source, parsed);
+    }
+
+    #[test]
+    fn test_bigquery_source_type() {
+        let bq = Source::Bigquery {
+            project_id: "proj".to_string(),
+            dataset: None,
+            credential: Credential::None,
+        };
+        assert_eq!(bq.source_type(), "bigquery");
+    }
+
+    #[test]
+    fn test_bigquery_credential_accessor() {
+        let with_secret = Source::Bigquery {
+            project_id: "proj".to_string(),
+            dataset: None,
+            credential: Credential::SecretRef {
+                id: "secr_bq".to_string(),
+            },
+        };
+        assert!(matches!(
+            with_secret.credential(),
+            Credential::SecretRef { id } if id == "secr_bq"
+        ));
+        assert_eq!(with_secret.secret_id(), Some("secr_bq"));
+
+        let without_cred = Source::Bigquery {
+            project_id: "proj".to_string(),
+            dataset: None,
+            credential: Credential::None,
+        };
+        assert!(matches!(without_cred.credential(), Credential::None));
     }
 }
