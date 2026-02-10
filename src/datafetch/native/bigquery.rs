@@ -279,7 +279,7 @@ pub async fn fetch_table(
 
     // Process first page + paginate through remaining results
     let mut row_buffer: Vec<TableRow> = Vec::with_capacity(BATCH_SIZE);
-    let mut page_token = data_response.page_token.clone();
+    let mut page_token = data_response.page_token;
 
     // Buffer rows from the first page
     if let Some(rows) = data_response.rows {
