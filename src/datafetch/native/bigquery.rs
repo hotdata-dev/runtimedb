@@ -6,8 +6,10 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
+use gcp_bigquery_client::model::get_query_results_parameters::GetQueryResultsParameters;
 use gcp_bigquery_client::model::query_request::QueryRequest;
 use gcp_bigquery_client::model::table_cell::TableCell;
+use gcp_bigquery_client::model::table_row::TableRow;
 use gcp_bigquery_client::Client;
 use std::sync::Arc;
 use tracing::warn;
@@ -180,6 +182,8 @@ pub async fn discover_tables(
     Ok(tables)
 }
 
+const BATCH_SIZE: usize = 10_000;
+
 /// Fetch table data and write to Parquet
 pub async fn fetch_table(
     source: &Source,
@@ -268,15 +272,64 @@ pub async fn fetch_table(
         .await
         .map_err(|e| DataFetchError::Query(format!("Fetch query failed: {}", e)))?;
 
-    match &data_response.rows {
-        Some(rows) if !rows.is_empty() => {
-            let batch = rows_to_batch(rows, &arrow_schema)?;
-            writer.write_batch(&batch)?;
+    let job_id = data_response
+        .job_reference
+        .as_ref()
+        .and_then(|jr| jr.job_id.clone())
+        .ok_or_else(|| DataFetchError::Query("No job_id in query response".to_string()))?;
+
+    // Process first page + paginate through remaining results
+    let mut row_buffer: Vec<TableRow> = Vec::with_capacity(BATCH_SIZE);
+    let mut page_token = data_response.page_token.clone();
+
+    // Buffer rows from the first page
+    if let Some(rows) = data_response.rows {
+        for row in rows {
+            row_buffer.push(row);
+            if row_buffer.len() >= BATCH_SIZE {
+                let batch = rows_to_batch(&row_buffer, &arrow_schema)?;
+                writer.write_batch(&batch)?;
+                row_buffer.clear();
+            }
         }
-        _ => {
-            let empty_batch = RecordBatch::new_empty(Arc::new(arrow_schema));
-            writer.write_batch(&empty_batch)?;
+    }
+
+    // Fetch subsequent pages
+    while let Some(token) = page_token {
+        let result = client
+            .job()
+            .get_query_results(
+                project_id,
+                &job_id,
+                GetQueryResultsParameters {
+                    page_token: Some(token),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| DataFetchError::Query(format!("Pagination query failed: {}", e)))?;
+
+        if let Some(rows) = result.rows {
+            for row in rows {
+                row_buffer.push(row);
+                if row_buffer.len() >= BATCH_SIZE {
+                    let batch = rows_to_batch(&row_buffer, &arrow_schema)?;
+                    writer.write_batch(&batch)?;
+                    row_buffer.clear();
+                }
+            }
         }
+
+        page_token = result.page_token;
+    }
+
+    // Flush remaining rows
+    if row_buffer.is_empty() {
+        let empty_batch = RecordBatch::new_empty(Arc::new(arrow_schema));
+        writer.write_batch(&empty_batch)?;
+    } else {
+        let batch = rows_to_batch(&row_buffer, &arrow_schema)?;
+        writer.write_batch(&batch)?;
     }
 
     Ok(())
@@ -827,7 +880,6 @@ mod tests {
 
     #[test]
     fn test_rows_to_batch_basic() {
-        use gcp_bigquery_client::model::table_row::TableRow;
 
         let schema = Schema::new(vec![
             Field::new("name", DataType::Utf8, true),
@@ -880,7 +932,6 @@ mod tests {
 
     #[test]
     fn test_rows_to_batch_with_nulls() {
-        use gcp_bigquery_client::model::table_row::TableRow;
 
         let schema = Schema::new(vec![
             Field::new("value", DataType::Utf8, true),
@@ -904,7 +955,6 @@ mod tests {
 
     #[test]
     fn test_rows_to_batch_boolean() {
-        use gcp_bigquery_client::model::table_row::TableRow;
 
         let schema = Schema::new(vec![Field::new("flag", DataType::Boolean, true)]);
 
@@ -933,7 +983,6 @@ mod tests {
 
     #[test]
     fn test_rows_to_batch_date() {
-        use gcp_bigquery_client::model::table_row::TableRow;
 
         let schema = Schema::new(vec![Field::new("d", DataType::Date32, true)]);
 
@@ -958,7 +1007,6 @@ mod tests {
 
     #[test]
     fn test_rows_to_batch_timestamp() {
-        use gcp_bigquery_client::model::table_row::TableRow;
 
         let schema = Schema::new(vec![Field::new(
             "ts",
@@ -985,7 +1033,6 @@ mod tests {
 
     #[test]
     fn test_rows_to_batch_float() {
-        use gcp_bigquery_client::model::table_row::TableRow;
 
         let schema = Schema::new(vec![Field::new("f", DataType::Float64, true)]);
 
