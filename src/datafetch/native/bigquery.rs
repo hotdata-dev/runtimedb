@@ -533,13 +533,18 @@ fn append_cell(
         }
         _ => {
             // Default: store as string (Utf8)
+            // For complex types (ARRAY, STRUCT, JSON), BigQuery may return non-string
+            // JSON values. Fall back to serializing the raw JSON when value_str is None.
             let b = builder
                 .as_any_mut()
                 .downcast_mut::<StringBuilder>()
                 .unwrap();
             match value_str {
                 Some(s) => b.append_value(s),
-                None => b.append_null(),
+                None => match cell.and_then(|c| c.value.as_ref()) {
+                    Some(serde_json::Value::Null) | None => b.append_null(),
+                    Some(v) => b.append_value(v.to_string()),
+                },
             }
         }
     }
@@ -548,6 +553,7 @@ fn append_cell(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion::arrow::array::Array;
     use gcp_bigquery_client::model::field_type::FieldType;
     use gcp_bigquery_client::model::table_field_schema::TableFieldSchema;
 
@@ -1048,5 +1054,106 @@ mod tests {
             .downcast_ref::<datafusion::arrow::array::Float64Array>()
             .unwrap();
         assert!((col.value(0) - 3.14).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_rows_to_batch_complex_json_values_with_nulls() {
+        // BigQuery returns ARRAY, STRUCT, and JSON columns as non-string JSON values.
+        // These map to Utf8 and must be serialized rather than dropped as null.
+        // Test multiple rows with nulls interspersed to cover all branches.
+        let schema = Schema::new(vec![
+            Field::new("tags", DataType::Utf8, true),
+            Field::new("metadata", DataType::Utf8, true),
+            Field::new("count", DataType::Utf8, true),
+        ]);
+
+        let rows = vec![
+            // Row 0: all non-string JSON values (array, object, number)
+            TableRow {
+                columns: Some(vec![
+                    TableCell {
+                        value: Some(serde_json::json!(["tag_a", "tag_b"])),
+                    },
+                    TableCell {
+                        value: Some(serde_json::json!({"level": 1, "tier": "bronze"})),
+                    },
+                    TableCell {
+                        value: Some(serde_json::json!(42)),
+                    },
+                ]),
+            },
+            // Row 1: all nulls (JSON null, None, JSON null)
+            TableRow {
+                columns: Some(vec![
+                    TableCell {
+                        value: Some(serde_json::Value::Null),
+                    },
+                    TableCell { value: None },
+                    TableCell {
+                        value: Some(serde_json::Value::Null),
+                    },
+                ]),
+            },
+            // Row 2: mix of values and nulls
+            TableRow {
+                columns: Some(vec![
+                    TableCell {
+                        value: Some(serde_json::json!(["tag_c"])),
+                    },
+                    TableCell { value: None },
+                    TableCell {
+                        value: Some(serde_json::Value::String("plain_string".to_string())),
+                    },
+                ]),
+            },
+            // Row 3: boolean JSON value (non-string primitive)
+            TableRow {
+                columns: Some(vec![
+                    TableCell { value: None },
+                    TableCell {
+                        value: Some(serde_json::json!({"nested": [1, 2, 3]})),
+                    },
+                    TableCell {
+                        value: Some(serde_json::json!(true)),
+                    },
+                ]),
+            },
+        ];
+
+        let batch = rows_to_batch(&rows, &schema).unwrap();
+        assert_eq!(batch.num_rows(), 4);
+
+        let tags = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StringArray>()
+            .unwrap();
+        assert_eq!(tags.value(0), r#"["tag_a","tag_b"]"#);
+        assert!(tags.is_null(1));
+        assert_eq!(tags.value(2), r#"["tag_c"]"#);
+        assert!(tags.is_null(3));
+
+        let meta = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StringArray>()
+            .unwrap();
+        let meta0: serde_json::Value = serde_json::from_str(meta.value(0)).unwrap();
+        assert_eq!(meta0["level"], 1);
+        assert_eq!(meta0["tier"], "bronze");
+        assert!(meta.is_null(1));
+        assert!(meta.is_null(2));
+        let meta3: serde_json::Value = serde_json::from_str(meta.value(3)).unwrap();
+        assert_eq!(meta3["nested"], serde_json::json!([1, 2, 3]));
+
+        let count = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StringArray>()
+            .unwrap();
+        assert_eq!(count.value(0), "42");
+        assert!(count.is_null(1));
+        assert_eq!(count.value(2), "plain_string");
+        assert_eq!(count.value(3), "true");
     }
 }
