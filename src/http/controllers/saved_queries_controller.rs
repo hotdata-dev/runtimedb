@@ -18,12 +18,22 @@ const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 1000;
 const MAX_NAME_LENGTH: usize = 255;
 const MAX_SQL_LENGTH: usize = 1_000_000;
+/// Upper bound on raw (pre-trim) input length to avoid spending CPU trimming
+/// extremely large whitespace payloads. Any input exceeding this cannot be
+/// valid after trimming since the post-trim limits are well below this.
+const MAX_RAW_INPUT_LENGTH: usize = 2_000_000;
 
 /// Handler for POST /v1/queries
 pub async fn create_saved_query(
     State(engine): State<Arc<RuntimeEngine>>,
     Json(request): Json<CreateSavedQueryRequest>,
 ) -> Result<(StatusCode, Json<CreateSavedQueryResponse>), ApiError> {
+    if request.name.len() > MAX_RAW_INPUT_LENGTH || request.sql.len() > MAX_RAW_INPUT_LENGTH {
+        return Err(ApiError::bad_request(
+            "Request field exceeds maximum length",
+        ));
+    }
+
     let name = request.name.trim().to_string();
     let sql = request.sql.trim().to_string();
 
@@ -149,6 +159,17 @@ pub async fn update_saved_query(
     Path(id): Path<String>,
     Json(request): Json<UpdateSavedQueryRequest>,
 ) -> Result<Json<SavedQueryDetail>, ApiError> {
+    let raw_too_large = request.sql.len() > MAX_RAW_INPUT_LENGTH
+        || request
+            .name
+            .as_ref()
+            .is_some_and(|n| n.len() > MAX_RAW_INPUT_LENGTH);
+    if raw_too_large {
+        return Err(ApiError::bad_request(
+            "Request field exceeds maximum length",
+        ));
+    }
+
     let sql = request.sql.trim().to_string();
     if sql.is_empty() {
         return Err(ApiError::bad_request("SQL cannot be empty"));
