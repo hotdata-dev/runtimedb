@@ -55,6 +55,7 @@ impl LazyTableProvider {
     }
 
     /// Create a provider with index preset support.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_index_presets(
         schema: SchemaRef,
         source: Arc<Source>,
@@ -104,7 +105,9 @@ impl LazyTableProvider {
                         "Selected preset index for filter match"
                     );
                     // Preset indexes default to ASC
-                    let cols_with_dir: Vec<(String, bool)> = preset.sort_columns.iter()
+                    let cols_with_dir: Vec<(String, bool)> = preset
+                        .sort_columns
+                        .iter()
                         .map(|c| (c.clone(), false))
                         .collect();
                     return Some((preset.name.clone(), cols_with_dir));
@@ -381,25 +384,30 @@ impl TableProvider for LazyTableProvider {
 
         // Check if we should use a sorted index for better row group pruning or ORDER BY
         // Priority: 1. Catalog indexes (user-created via SQL), 2. Index presets (hardcoded)
-        let (final_url, sort_columns) = if let Some((index_url, sort_cols)) =
-            self.select_catalog_index(filters).await
-        {
-            // Use catalog index - index_url is the full path to the index directory
-            span.record("runtimedb.index_used", format!("catalog:{}", index_url).as_str());
-            (index_url, Some(sort_cols))
-        } else if let Some((preset_name, sort_cols)) = self.select_preset_index(filters) {
-            // Use preset index path: {base_url}/presets/{name}
-            let preset_url = format!(
-                "{}/presets/{}",
-                parquet_url.trim_end_matches('/'),
-                preset_name
-            );
-            span.record("runtimedb.index_used", format!("preset:{}", preset_name).as_str());
-            (preset_url, Some(sort_cols))
-        } else {
-            span.record("runtimedb.index_used", "none");
-            (parquet_url, None)
-        };
+        let (final_url, sort_columns) =
+            if let Some((index_url, sort_cols)) = self.select_catalog_index(filters).await {
+                // Use catalog index - index_url is the full path to the index directory
+                span.record(
+                    "runtimedb.index_used",
+                    format!("catalog:{}", index_url).as_str(),
+                );
+                (index_url, Some(sort_cols))
+            } else if let Some((preset_name, sort_cols)) = self.select_preset_index(filters) {
+                // Use preset index path: {base_url}/presets/{name}
+                let preset_url = format!(
+                    "{}/presets/{}",
+                    parquet_url.trim_end_matches('/'),
+                    preset_name
+                );
+                span.record(
+                    "runtimedb.index_used",
+                    format!("preset:{}", preset_name).as_str(),
+                );
+                (preset_url, Some(sort_cols))
+            } else {
+                span.record("runtimedb.index_used", "none");
+                (parquet_url, None)
+            };
 
         // Load the parquet file and create execution plan with projection and limit pushdown.
         // Filter pushdown is handled by the physical optimizer on DataSourceExec.

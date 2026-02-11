@@ -592,9 +592,7 @@ impl RuntimeEngine {
 
         // Intercept CREATE INDEX statements
         if let Some(create_index) = parse_create_index(sql) {
-            return self
-                .execute_create_index_query(create_index, start)
-                .await;
+            return self.execute_create_index_query(create_index, start).await;
         }
 
         // Intercept DROP INDEX statements
@@ -708,9 +706,7 @@ impl RuntimeEngine {
                 .catalog
                 .get_connection_by_name(&stmt.catalog)
                 .await?
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Connection '{}' not found", stmt.catalog)
-                })?;
+                .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", stmt.catalog))?;
             conn.id
         };
 
@@ -779,9 +775,7 @@ impl RuntimeEngine {
                 .catalog
                 .get_connection_by_name(&stmt.catalog)
                 .await?
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Connection '{}' not found", stmt.catalog)
-                })?;
+                .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", stmt.catalog))?;
             conn.id
         };
 
@@ -819,11 +813,7 @@ impl RuntimeEngine {
 
     /// Execute a SHOW INDEXES statement and return results.
     /// Format: SHOW INDEXES ON catalog.schema.table
-    async fn execute_show_indexes_query(
-        &self,
-        sql: &str,
-        start: Instant,
-    ) -> Result<QueryResponse> {
+    async fn execute_show_indexes_query(&self, sql: &str, start: Instant) -> Result<QueryResponse> {
         use datafusion::arrow::array::{StringArray, TimestampMicrosecondArray};
         use datafusion::arrow::datatypes::{DataType, Field, TimeUnit};
 
@@ -853,9 +843,7 @@ impl RuntimeEngine {
             .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", catalog))?;
 
         // Get indexes
-        let indexes = self
-            .list_indexes(&conn.id, schema_name, table_name)
-            .await?;
+        let indexes = self.list_indexes(&conn.id, schema_name, table_name).await?;
 
         // Build result schema
         let result_schema = Arc::new(Schema::new(vec![
@@ -883,10 +871,7 @@ impl RuntimeEngine {
             .iter()
             .map(|i| i.sort_columns_vec().join(", "))
             .collect();
-        let paths: Vec<Option<&str>> = indexes
-            .iter()
-            .map(|i| i.parquet_path.as_deref())
-            .collect();
+        let paths: Vec<Option<&str>> = indexes.iter().map(|i| i.parquet_path.as_deref()).collect();
         let created_ats: Vec<i64> = indexes
             .iter()
             .map(|i| i.created_at.timestamp_micros())
@@ -900,10 +885,7 @@ impl RuntimeEngine {
                     columns.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                 )),
                 Arc::new(StringArray::from(paths)),
-                Arc::new(
-                    TimestampMicrosecondArray::from(created_ats)
-                        .with_timezone("UTC"),
-                ),
+                Arc::new(TimestampMicrosecondArray::from(created_ats).with_timezone("UTC")),
             ],
         )?;
 
@@ -1843,7 +1825,10 @@ impl RuntimeEngine {
         };
 
         if parquet_files.is_empty() {
-            return Err(anyhow::anyhow!("No parquet files found at {}", parquet_path));
+            return Err(anyhow::anyhow!(
+                "No parquet files found at {}",
+                parquet_path
+            ));
         }
 
         // Read all batches from the source files
@@ -1852,12 +1837,8 @@ impl RuntimeEngine {
         let mut schema = None;
 
         for file_path in &parquet_files {
-            ctx.register_parquet(
-                "source",
-                file_path.to_str().unwrap(),
-                Default::default(),
-            )
-            .await?;
+            ctx.register_parquet("source", file_path.to_str().unwrap(), Default::default())
+                .await?;
 
             let df = ctx.table("source").await?;
             if schema.is_none() {
@@ -1898,10 +1879,8 @@ impl RuntimeEngine {
 
         // Sort and write using DataFusion
         let schema_ref = Arc::new(schema.clone());
-        let mem_table = datafusion::datasource::MemTable::try_new(
-            schema_ref.clone(),
-            vec![all_batches],
-        )?;
+        let mem_table =
+            datafusion::datasource::MemTable::try_new(schema_ref.clone(), vec![all_batches])?;
 
         ctx.register_table("data", Arc::new(mem_table))?;
 
@@ -3092,7 +3071,10 @@ impl RuntimeEngineBuilder {
     }
 
     /// Set a custom index preset registry.
-    pub fn index_preset_registry(mut self, registry: crate::datafetch::IndexPresetRegistry) -> Self {
+    pub fn index_preset_registry(
+        mut self,
+        registry: crate::datafetch::IndexPresetRegistry,
+    ) -> Self {
         self.index_preset_registry = Some(registry);
         self
     }

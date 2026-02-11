@@ -23,8 +23,8 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rand::RngCore;
-use runtimedb::http::app_server::{AppServer, PATH_CONNECTIONS};
 use runtimedb::datafetch::ParquetConfig;
+use runtimedb::http::app_server::{AppServer, PATH_CONNECTIONS};
 use runtimedb::RuntimeEngine;
 use serde_json::json;
 use std::sync::Arc;
@@ -781,19 +781,19 @@ struct TpchBenchmarkHarness {
 impl TpchBenchmarkHarness {
     /// Create a new harness with TPC-H data at the specified scale factor
     async fn new(scale_factor: f64) -> Result<Self> {
-        Self::new_with_projections(scale_factor, false).await
+        Self::new_with_index_presets(scale_factor, false).await
     }
 
-    /// Create a new harness with TPC-H optimized projections enabled
-    async fn new_with_projections(scale_factor: f64, enable_projections: bool) -> Result<Self> {
+    /// Create a new harness with TPC-H optimized index presets enabled
+    async fn new_with_index_presets(scale_factor: f64, enable_presets: bool) -> Result<Self> {
         let temp_dir = tempfile::tempdir()?;
 
         let mut builder = RuntimeEngine::builder()
             .base_dir(temp_dir.path())
             .secret_key(generate_test_secret_key());
 
-        if enable_projections {
-            builder = builder.with_tpch_projections();
+        if enable_presets {
+            builder = builder.with_tpch_index_presets();
         }
 
         let engine = builder.build().await?;
@@ -1210,20 +1210,20 @@ async fn test_tpch_benchmark() -> Result<()> {
     Ok(())
 }
 
-/// TPC-H benchmark with projections enabled
-/// Run with: TPCH_SCALE_FACTOR=1.0 cargo test tpch_benchmark_projections --release -- --nocapture --test-threads=1
+/// TPC-H benchmark with index presets enabled
+/// Run with: TPCH_SCALE_FACTOR=1.0 cargo test tpch_benchmark_presets --release -- --nocapture --test-threads=1
 #[tokio::test(flavor = "multi_thread")]
-async fn test_tpch_benchmark_projections() -> Result<()> {
+async fn test_tpch_benchmark_presets() -> Result<()> {
     let scale_factor = get_scale_factor(0.01);
 
     println!(
-        "Setting up TPC-H benchmark WITH PROJECTIONS (SF={})...",
+        "Setting up TPC-H benchmark WITH INDEX PRESETS (SF={})...",
         scale_factor
     );
     let setup_start = Instant::now();
 
-    // Enable TPC-H optimized projections
-    let harness = TpchBenchmarkHarness::new_with_projections(scale_factor, true).await?;
+    // Enable TPC-H optimized index presets
+    let harness = TpchBenchmarkHarness::new_with_index_presets(scale_factor, true).await?;
 
     let data_gen_time = setup_start.elapsed();
     println!("  Data Generation: {:.3}s", data_gen_time.as_secs_f64());
@@ -1376,7 +1376,10 @@ async fn test_custom_query() -> Result<()> {
     let _conn = harness.create_connection().await?;
 
     // Sync
-    let _ = harness.engine.execute_query("SELECT COUNT(*) FROM tpch.main.orders").await?;
+    let _ = harness
+        .engine
+        .execute_query("SELECT COUNT(*) FROM tpch.main.orders")
+        .await?;
 
     // Warmup
     let _ = harness.engine.execute_query(query).await?;
@@ -1390,7 +1393,11 @@ async fn test_custom_query() -> Result<()> {
         let r = harness.engine.execute_query(query).await?;
         let elapsed = start.elapsed();
         let rows: usize = r.results.iter().map(|b| b.num_rows()).sum();
-        println!("  ORDER BY DESC LIMIT 5: {:.2}ms, {} rows", elapsed.as_secs_f64() * 1000.0, rows);
+        println!(
+            "  ORDER BY DESC LIMIT 5: {:.2}ms, {} rows",
+            elapsed.as_secs_f64() * 1000.0,
+            rows
+        );
         times.push(elapsed);
     }
     times.sort();
@@ -1402,7 +1409,11 @@ async fn test_custom_query() -> Result<()> {
         let r = harness.engine.execute_query(filter_query).await?;
         let elapsed = start.elapsed();
         let rows: usize = r.results.iter().map(|b| b.num_rows()).sum();
-        println!("  Filter+ORDER BY:       {:.2}ms, {} rows", elapsed.as_secs_f64() * 1000.0, rows);
+        println!(
+            "  Filter+ORDER BY:       {:.2}ms, {} rows",
+            elapsed.as_secs_f64() * 1000.0,
+            rows
+        );
         times.push(elapsed);
     }
     times.sort();
@@ -1411,8 +1422,14 @@ async fn test_custom_query() -> Result<()> {
     // === Create index ===
     println!("\nCreating index on o_orderdate...");
     let idx_start = Instant::now();
-    harness.engine.execute_query("CREATE INDEX idx_orderdate ON tpch.main.orders (o_orderdate)").await?;
-    println!("  Index created in {:.2}ms\n", idx_start.elapsed().as_secs_f64() * 1000.0);
+    harness
+        .engine
+        .execute_query("CREATE INDEX idx_orderdate ON tpch.main.orders (o_orderdate)")
+        .await?;
+    println!(
+        "  Index created in {:.2}ms\n",
+        idx_start.elapsed().as_secs_f64() * 1000.0
+    );
 
     // Warmup after index creation (stabilize system)
     for _ in 0..3 {
@@ -1428,7 +1445,11 @@ async fn test_custom_query() -> Result<()> {
         let r = harness.engine.execute_query(query).await?;
         let elapsed = start.elapsed();
         let rows: usize = r.results.iter().map(|b| b.num_rows()).sum();
-        println!("  ORDER BY DESC LIMIT 5: {:.2}ms, {} rows", elapsed.as_secs_f64() * 1000.0, rows);
+        println!(
+            "  ORDER BY DESC LIMIT 5: {:.2}ms, {} rows",
+            elapsed.as_secs_f64() * 1000.0,
+            rows
+        );
         times.push(elapsed);
     }
     times.sort();
@@ -1440,7 +1461,11 @@ async fn test_custom_query() -> Result<()> {
         let r = harness.engine.execute_query(filter_query).await?;
         let elapsed = start.elapsed();
         let rows: usize = r.results.iter().map(|b| b.num_rows()).sum();
-        println!("  Filter+ORDER BY:       {:.2}ms, {} rows", elapsed.as_secs_f64() * 1000.0, rows);
+        println!(
+            "  Filter+ORDER BY:       {:.2}ms, {} rows",
+            elapsed.as_secs_f64() * 1000.0,
+            rows
+        );
         times.push(elapsed);
     }
     times.sort();
@@ -1450,7 +1475,11 @@ async fn test_custom_query() -> Result<()> {
     println!("\n=== EXPLAIN (with index) ===");
     for q in [query, filter_query] {
         println!("Query: {}", q);
-        if let Ok(r) = harness.engine.execute_query(&format!("EXPLAIN {}", q)).await {
+        if let Ok(r) = harness
+            .engine
+            .execute_query(&format!("EXPLAIN {}", q))
+            .await
+        {
             for batch in &r.results {
                 use datafusion::arrow::array::StringArray;
                 if let Some(col) = batch.column(1).as_any().downcast_ref::<StringArray>() {
@@ -1465,7 +1494,10 @@ async fn test_custom_query() -> Result<()> {
 
     // === Summary ===
     println!("=== Results ===");
-    println!("{:<25} {:>12} {:>12} {:>10}", "Query", "No Index", "With Index", "Speedup");
+    println!(
+        "{:<25} {:>12} {:>12} {:>10}",
+        "Query", "No Index", "With Index", "Speedup"
+    );
     println!("{}", "-".repeat(62));
     println!(
         "{:<25} {:>10.2}ms {:>10.2}ms {:>9.2}x",
@@ -1555,12 +1587,25 @@ async fn test_create_index_sql() -> Result<()> {
         .await;
     match &result {
         Ok(r) => {
-            println!("  SHOW INDEXES returned {} rows:", r.results.iter().map(|b| b.num_rows()).sum::<usize>());
+            println!(
+                "  SHOW INDEXES returned {} rows:",
+                r.results.iter().map(|b| b.num_rows()).sum::<usize>()
+            );
             if let Some(batch) = r.results.first() {
                 use datafusion::arrow::array::StringArray;
                 for i in 0..batch.num_rows() {
-                    let name = batch.column(0).as_any().downcast_ref::<StringArray>().map(|a| a.value(i)).unwrap_or("");
-                    let cols = batch.column(1).as_any().downcast_ref::<StringArray>().map(|a| a.value(i)).unwrap_or("");
+                    let name = batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .map(|a| a.value(i))
+                        .unwrap_or("");
+                    let cols = batch
+                        .column(1)
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .map(|a| a.value(i))
+                        .unwrap_or("");
                     println!("    - {} (columns: {})", name, cols);
                 }
             }
@@ -1633,7 +1678,7 @@ async fn test_create_index_sql() -> Result<()> {
 
 /// Index performance benchmark — compares TPC-H Q1-Q22 with and without indexes.
 ///
-/// Creates 6 indexes matching the tpch_optimized projection configuration:
+/// Creates 6 indexes matching the tpch_optimized index preset configuration:
 ///   1. lineitem(l_shipdate)  — range filters in Q1, Q3, Q6, Q7, Q14, Q15, Q20
 ///   2. orders(o_orderdate)   — range filters in Q3, Q4, Q5, Q8, Q10
 ///   3. lineitem(l_partkey)   — join key in Q2, Q9, Q14, Q17, Q19, Q20
@@ -1692,7 +1737,7 @@ async fn test_index_performance() -> Result<()> {
     println!("{}", "-".repeat(55));
     println!("Baseline Total: {:.3}s", baseline_total.as_secs_f64());
 
-    // ── Create 6 indexes (matches tpch_optimized projections) ──
+    // ── Create 6 indexes (matches tpch_optimized index presets) ──
     println!("\n--- Creating indexes ---");
 
     let indexes = [
@@ -1796,7 +1841,11 @@ async fn test_index_performance() -> Result<()> {
         "TOTAL",
         baseline_total.as_secs_f64() * 1000.0,
         indexed_total.as_secs_f64() * 1000.0,
-        if indexed_total < baseline_total { "" } else { "+" },
+        if indexed_total < baseline_total {
+            ""
+        } else {
+            "+"
+        },
         (indexed_total.as_secs_f64() - baseline_total.as_secs_f64()) * 1000.0,
     );
 
@@ -1819,7 +1868,10 @@ async fn test_index_performance() -> Result<()> {
 async fn test_old_vs_current_config() -> Result<()> {
     let scale_factor = get_scale_factor(0.1);
 
-    println!("=== Old (1M+bloom) vs Current (100K+indexes) Benchmark (SF={}) ===", scale_factor);
+    println!(
+        "=== Old (1M+bloom) vs Current (100K+indexes) Benchmark (SF={}) ===",
+        scale_factor
+    );
 
     // ── OLD CONFIG: 1M row groups + bloom filters ──────────────
     println!("\n--- Setting up OLD config (1M row groups + bloom filters) ---");
@@ -1829,8 +1881,12 @@ async fn test_old_vs_current_config() -> Result<()> {
         max_row_group_size: 1_000_000,
         bloom_filter_enabled: true,
     };
-    let old_harness = TpchBenchmarkHarness::new_with_parquet_config(scale_factor, old_config).await?;
-    println!("  Engine setup: {:.3}s", old_setup_start.elapsed().as_secs_f64());
+    let old_harness =
+        TpchBenchmarkHarness::new_with_parquet_config(scale_factor, old_config).await?;
+    println!(
+        "  Engine setup: {:.3}s",
+        old_setup_start.elapsed().as_secs_f64()
+    );
 
     let _old_conn = old_harness.create_connection().await?;
 
@@ -1858,7 +1914,10 @@ async fn test_old_vs_current_config() -> Result<()> {
 
     // Use default config (100K, no bloom)
     let new_harness = TpchBenchmarkHarness::new(scale_factor).await?;
-    println!("  Engine setup: {:.3}s", new_setup_start.elapsed().as_secs_f64());
+    println!(
+        "  Engine setup: {:.3}s",
+        new_setup_start.elapsed().as_secs_f64()
+    );
 
     let _new_conn = new_harness.create_connection().await?;
 
@@ -1899,7 +1958,8 @@ async fn test_old_vs_current_config() -> Result<()> {
         }
     }
 
-    let new_cache_with_idx = TpchBenchmarkHarness::get_parquet_cache_size(new_harness.temp_dir.path());
+    let new_cache_with_idx =
+        TpchBenchmarkHarness::get_parquet_cache_size(new_harness.temp_dir.path());
     println!(
         "  Cache size (with indexes): {:.2} MB",
         new_cache_with_idx as f64 / 1024.0 / 1024.0
@@ -2010,7 +2070,10 @@ async fn test_old_vs_current_config() -> Result<()> {
 async fn test_rowgroup_size_comparison() -> Result<()> {
     let scale_factor = get_scale_factor(0.1);
 
-    println!("=== Row Group Size: 1M vs 100K (no bloom, no indexes) SF={} ===", scale_factor);
+    println!(
+        "=== Row Group Size: 1M vs 100K (no bloom, no indexes) SF={} ===",
+        scale_factor
+    );
 
     // ── 1M row groups, no bloom ──────────────
     println!("\n--- Setting up 1M row groups (no bloom) ---");
@@ -2020,7 +2083,8 @@ async fn test_rowgroup_size_comparison() -> Result<()> {
         max_row_group_size: 1_000_000,
         bloom_filter_enabled: false,
     };
-    let old_harness = TpchBenchmarkHarness::new_with_parquet_config(scale_factor, old_config).await?;
+    let old_harness =
+        TpchBenchmarkHarness::new_with_parquet_config(scale_factor, old_config).await?;
     println!("  Engine setup: {:.3}s", old_start.elapsed().as_secs_f64());
 
     let _old_conn = old_harness.create_connection().await?;
@@ -2030,7 +2094,10 @@ async fn test_rowgroup_size_comparison() -> Result<()> {
         let _ = old_harness.run_query(query).await;
     }
     let old_cache_size = TpchBenchmarkHarness::get_parquet_cache_size(old_harness.temp_dir.path());
-    println!("  Cache size: {:.2} MB", old_cache_size as f64 / 1024.0 / 1024.0);
+    println!(
+        "  Cache size: {:.2} MB",
+        old_cache_size as f64 / 1024.0 / 1024.0
+    );
 
     println!("  Running queries (cached)...");
     let mut old_results = Vec::new();
@@ -2052,7 +2119,10 @@ async fn test_rowgroup_size_comparison() -> Result<()> {
         let _ = new_harness.run_query(query).await;
     }
     let new_cache_size = TpchBenchmarkHarness::get_parquet_cache_size(new_harness.temp_dir.path());
-    println!("  Cache size: {:.2} MB", new_cache_size as f64 / 1024.0 / 1024.0);
+    println!(
+        "  Cache size: {:.2} MB",
+        new_cache_size as f64 / 1024.0 / 1024.0
+    );
 
     println!("  Running queries (cached)...");
     let mut new_results = Vec::new();
@@ -2063,7 +2133,10 @@ async fn test_rowgroup_size_comparison() -> Result<()> {
     // ── COMPARISON ───────────────────────────────────────
     println!();
     println!("========================================================================");
-    println!("  1M row groups vs 100K row groups (no bloom, no indexes)  SF={}", scale_factor);
+    println!(
+        "  1M row groups vs 100K row groups (no bloom, no indexes)  SF={}",
+        scale_factor
+    );
     println!("========================================================================");
     println!(
         "{:<8} {:>12} {:>12} {:>14} {:>8} {:>8}",
@@ -2095,8 +2168,12 @@ async fn test_rowgroup_size_comparison() -> Result<()> {
 
         println!(
             "{:<8} {:>10.2}ms {:>10.2}ms {:>14} {:>8} {:>8}",
-            query.name, old_ms, new_ms, improvement,
-            old_results[i].row_count, new_results[i].row_count,
+            query.name,
+            old_ms,
+            new_ms,
+            improvement,
+            old_results[i].row_count,
+            new_results[i].row_count,
         );
     }
 
@@ -2123,7 +2200,8 @@ async fn test_rowgroup_size_comparison() -> Result<()> {
         if old_results[i].success && new_results[i].success {
             assert_eq!(
                 old_results[i].row_count, new_results[i].row_count,
-                "Row count mismatch for {}", old_results[i].name
+                "Row count mismatch for {}",
+                old_results[i].name
             );
         }
     }

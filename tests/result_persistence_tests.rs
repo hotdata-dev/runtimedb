@@ -336,7 +336,14 @@ impl CatalogManager for FailingCatalog {
         parquet_path: Option<&str>,
     ) -> Result<i32> {
         self.inner
-            .create_index(connection_id, schema_name, table_name, index_name, sort_columns, parquet_path)
+            .create_index(
+                connection_id,
+                schema_name,
+                table_name,
+                index_name,
+                sort_columns,
+                parquet_path,
+            )
             .await
     }
 

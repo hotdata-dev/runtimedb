@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use super::batch_writer::BatchWriter;
 use super::collecting_writer::CollectingBatchWriter;
+use super::index_presets::IndexPresetRegistry;
 use super::native::{ParquetConfig, StreamingParquetWriter};
 use super::sorted_parquet::{write_parquet, write_sorted_parquet};
-use super::index_presets::IndexPresetRegistry;
 use super::{DataFetchError, DataFetcher, TableMetadata};
 use crate::catalog::CatalogManager;
 use crate::secrets::SecretManager;
@@ -223,8 +223,13 @@ impl FetchOrchestrator {
         }
 
         // Write main parquet file
-        write_parquet(&batches, &schema, &handle.local_path, self.parquet_config.as_ref())
-            .map_err(|e| anyhow::anyhow!("Failed to write main parquet: {}", e))?;
+        write_parquet(
+            &batches,
+            &schema,
+            &handle.local_path,
+            self.parquet_config.as_ref(),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to write main parquet: {}", e))?;
 
         // Write preset indexes
         let version_dir = handle
@@ -243,11 +248,15 @@ impl FetchOrchestrator {
                 "Writing preset index"
             );
 
-            write_sorted_parquet(&batches, &schema, &preset.sort_columns, &preset_path, self.parquet_config.as_ref())
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!("Failed to write preset index {}: {}", preset.name, e)
-                })?;
+            write_sorted_parquet(
+                &batches,
+                &schema,
+                &preset.sort_columns,
+                &preset_path,
+                self.parquet_config.as_ref(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to write preset index {}: {}", preset.name, e))?;
         }
 
         Ok(row_count)
@@ -889,8 +898,7 @@ mod tests {
         assert!(main_file.exists(), "Main parquet file should exist");
 
         // Verify preset index file exists
-        let preset_file =
-            std::path::Path::new(version_dir).join("presets/by_id/data.parquet");
+        let preset_file = std::path::Path::new(version_dir).join("presets/by_id/data.parquet");
         assert!(
             preset_file.exists(),
             "Preset index parquet file should exist at {:?}",
