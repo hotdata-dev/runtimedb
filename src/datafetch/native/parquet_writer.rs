@@ -12,15 +12,42 @@ use std::sync::Arc;
 use crate::datafetch::batch_writer::{BatchWriteResult, BatchWriter};
 use crate::datafetch::DataFetchError;
 
-/// Build shared writer properties for parquet files.
+/// Configuration for parquet file writing.
+#[derive(Debug, Clone)]
+pub struct ParquetConfig {
+    pub max_row_group_size: usize,
+    pub bloom_filter_enabled: bool,
+}
+
+impl Default for ParquetConfig {
+    fn default() -> Self {
+        Self {
+            max_row_group_size: 100_000,
+            bloom_filter_enabled: false,
+        }
+    }
+}
+
+/// Build shared writer properties for parquet files (default config).
 fn writer_properties() -> WriterProperties {
-    WriterProperties::builder()
+    writer_properties_from_config(&ParquetConfig::default())
+}
+
+/// Build writer properties from a config.
+fn writer_properties_from_config(config: &ParquetConfig) -> WriterProperties {
+    let mut builder = WriterProperties::builder()
         .set_writer_version(WriterVersion::PARQUET_2_0)
         .set_compression(Compression::LZ4)
-        .set_bloom_filter_enabled(true)
-        .set_bloom_filter_fpp(0.01)
-        .set_bloom_filter_position(BloomFilterPosition::End)
-        .build()
+        .set_max_row_group_size(config.max_row_group_size);
+
+    if config.bloom_filter_enabled {
+        builder = builder
+            .set_bloom_filter_enabled(true)
+            .set_bloom_filter_fpp(0.01)
+            .set_bloom_filter_position(BloomFilterPosition::End);
+    }
+
+    builder.build()
 }
 
 /// Streaming Parquet writer that writes batches incrementally to disk.
@@ -28,6 +55,7 @@ fn writer_properties() -> WriterProperties {
 /// Lifecycle: new(path) -> init(schema) -> write_batch()* -> close()
 pub struct StreamingParquetWriter {
     path: PathBuf,
+    config: Option<ParquetConfig>,
     writer: Option<ArrowWriter<File>>,
     row_count: usize,
 }
@@ -38,6 +66,17 @@ impl StreamingParquetWriter {
     pub fn new(path: PathBuf) -> Self {
         Self {
             path,
+            config: None,
+            writer: None,
+            row_count: 0,
+        }
+    }
+
+    /// Create a new writer with a custom parquet config.
+    pub fn with_config(path: PathBuf, config: ParquetConfig) -> Self {
+        Self {
+            path,
+            config: Some(config),
             writer: None,
             row_count: 0,
         }
@@ -61,7 +100,10 @@ impl BatchWriter for StreamingParquetWriter {
         let file = File::create(&self.path)
             .map_err(|e| DataFetchError::Storage(format!("Failed to create file: {}", e)))?;
 
-        let props = writer_properties();
+        let props = match &self.config {
+            Some(config) => writer_properties_from_config(config),
+            None => writer_properties(),
+        };
 
         let writer = ArrowWriter::try_new(file, Arc::new(schema.clone()), Some(props))
             .map_err(|e| DataFetchError::Storage(e.to_string()))?;
@@ -280,65 +322,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_bloom_filter_enabled() {
-        use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
-        use std::fs::File;
-
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("bloom_filter.parquet");
-
-        let schema = Schema::new(vec![
-            Field::new("id", DataType::Int32, false),
-            Field::new("name", DataType::Utf8, true),
-        ]);
-
-        let mut writer: Box<dyn BatchWriter> = Box::new(StreamingParquetWriter::new(path.clone()));
-        writer.init(&schema).unwrap();
-
-        // Write some data with distinct values to trigger bloom filter creation
-        let batch = RecordBatch::try_new(
-            Arc::new(schema),
-            vec![
-                Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10])),
-                Arc::new(datafusion::arrow::array::StringArray::from(vec![
-                    Some("Alice"),
-                    Some("Bob"),
-                    Some("Charlie"),
-                    Some("David"),
-                    Some("Eve"),
-                    Some("Frank"),
-                    Some("Grace"),
-                    Some("Henry"),
-                    Some("Ivy"),
-                    Some("Jack"),
-                ])),
-            ],
-        )
-        .unwrap();
-
-        writer.write_batch(&batch).unwrap();
-        writer.close().unwrap();
-
-        // Read back and verify bloom filters exist
-        let file = File::open(&path).unwrap();
-        let reader = SerializedFileReader::new(file).unwrap();
-        let metadata = reader.metadata();
-
-        // Check that bloom filter offsets are set for columns
-        let mut bloom_filter_found = false;
-        for row_group in metadata.row_groups() {
-            for column in row_group.columns() {
-                if column.bloom_filter_offset().is_some() {
-                    bloom_filter_found = true;
-                    break;
-                }
-            }
-        }
-
-        assert!(
-            bloom_filter_found,
-            "Expected bloom filter to be present in parquet metadata"
-        );
-    }
 }

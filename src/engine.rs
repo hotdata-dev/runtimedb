@@ -1,6 +1,6 @@
 use crate::catalog::{
     is_dataset_table_name_conflict, CachingCatalogManager, CatalogManager, ConnectionInfo,
-    ResultStatus, ResultUpdate, SqliteCatalogManager, TableInfo,
+    IndexInfo, ResultStatus, ResultUpdate, SqliteCatalogManager, TableInfo,
 };
 use crate::datafetch::native::StreamingParquetWriter;
 use crate::datafetch::{BatchWriter, FetchOrchestrator, NativeFetcher};
@@ -23,7 +23,8 @@ use datafusion::execution::SessionStateBuilder;
 use datafusion::prelude::*;
 use datafusion_tracing::{instrument_with_info_spans, InstrumentationOptions};
 use instrumented_object_store::instrument_object_store;
-use liquid_cache_client::LiquidCacheClientBuilder;
+// Temporarily disabled - waiting for DataFusion 52 support
+// use liquid_cache_client::LiquidCacheClientBuilder;
 use object_store::ObjectStore;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -69,6 +70,162 @@ const INTERNAL_CONNECTION_ID: &str = "_runtimedb_internal";
 
 /// Schema name for storing query results.
 const RESULTS_SCHEMA_NAME: &str = "runtimedb_results";
+
+/// A column for CREATE INDEX (always sorted ASC).
+#[derive(Debug, Clone)]
+struct SortColumn {
+    name: String,
+}
+
+/// Parsed CREATE INDEX statement.
+#[derive(Debug)]
+struct CreateIndexStatement {
+    /// Index name
+    index_name: String,
+    /// Full table reference: catalog.schema.table
+    catalog: String,
+    schema: String,
+    table: String,
+    /// Column(s) to sort by with direction
+    columns: Vec<SortColumn>,
+}
+
+/// Parse a CREATE INDEX statement.
+/// Supports: CREATE INDEX index_name ON catalog.schema.table (column1, column2, ...)
+fn parse_create_index(sql: &str) -> Option<CreateIndexStatement> {
+    let sql_upper = sql.to_uppercase();
+    let sql_trimmed = sql.trim();
+
+    // Check if it starts with CREATE INDEX
+    if !sql_upper.starts_with("CREATE INDEX") {
+        return None;
+    }
+
+    // Use regex-free parsing for simplicity
+    // Format: CREATE INDEX <name> ON <table> (<columns>)
+    let after_create_index = sql_trimmed[12..].trim(); // Skip "CREATE INDEX"
+
+    // Find "ON" keyword
+    let on_pos = after_create_index.to_uppercase().find(" ON ")?;
+    let index_name = after_create_index[..on_pos].trim().to_string();
+
+    let after_on = after_create_index[on_pos + 4..].trim(); // Skip " ON "
+
+    // Find opening parenthesis for columns
+    let paren_pos = after_on.find('(')?;
+    let table_ref = after_on[..paren_pos].trim();
+
+    // Parse table reference (catalog.schema.table)
+    let parts: Vec<&str> = table_ref.split('.').collect();
+    let (catalog, schema, table) = match parts.len() {
+        3 => (
+            parts[0].trim().to_string(),
+            parts[1].trim().to_string(),
+            parts[2].trim().to_string(),
+        ),
+        2 => (
+            // Assume first part is catalog (connection name), second is table
+            // In our case: connection.schema.table, but if only 2 parts, assume it's schema.table
+            // and we'll need to infer the catalog later
+            String::new(),
+            parts[0].trim().to_string(),
+            parts[1].trim().to_string(),
+        ),
+        1 => (String::new(), String::new(), parts[0].trim().to_string()),
+        _ => return None,
+    };
+
+    // Parse columns from parentheses
+    // Supports: (col1), (col1, col2), (col1 DESC), (col1 ASC, col2 DESC)
+    // ASC/DESC keywords are stripped — indexes are always sorted ASC.
+    let after_paren = &after_on[paren_pos + 1..];
+    let close_paren = after_paren.find(')')?;
+    let columns_str = &after_paren[..close_paren];
+
+    let columns: Vec<SortColumn> = columns_str
+        .split(',')
+        .filter_map(|c| {
+            let c = c.trim();
+            if c.is_empty() {
+                return None;
+            }
+            let c_upper = c.to_uppercase();
+            let name = if c_upper.ends_with(" DESC") {
+                c[..c.len() - 5].trim().to_string()
+            } else if c_upper.ends_with(" ASC") {
+                c[..c.len() - 4].trim().to_string()
+            } else {
+                c.to_string()
+            };
+            Some(SortColumn { name })
+        })
+        .collect();
+
+    if columns.is_empty() {
+        return None;
+    }
+
+    Some(CreateIndexStatement {
+        index_name,
+        catalog,
+        schema,
+        table,
+        columns,
+    })
+}
+
+/// Parsed DROP INDEX statement.
+#[derive(Debug)]
+struct DropIndexStatement {
+    index_name: String,
+    catalog: String,
+    schema: String,
+    table: String,
+}
+
+/// Parse a DROP INDEX statement.
+/// Supports: DROP INDEX index_name ON catalog.schema.table
+fn parse_drop_index(sql: &str) -> Option<DropIndexStatement> {
+    let sql_upper = sql.to_uppercase();
+    let sql_trimmed = sql.trim();
+
+    if !sql_upper.starts_with("DROP INDEX") {
+        return None;
+    }
+
+    let after_drop_index = sql_trimmed[10..].trim(); // Skip "DROP INDEX"
+
+    // Find "ON" keyword
+    let on_pos = after_drop_index.to_uppercase().find(" ON ")?;
+    let index_name = after_drop_index[..on_pos].trim().to_string();
+
+    let after_on = after_drop_index[on_pos + 4..].trim();
+
+    // Parse table reference
+    let table_ref = after_on.trim_end_matches(';').trim();
+    let parts: Vec<&str> = table_ref.split('.').collect();
+    let (catalog, schema, table) = match parts.len() {
+        3 => (
+            parts[0].trim().to_string(),
+            parts[1].trim().to_string(),
+            parts[2].trim().to_string(),
+        ),
+        2 => (
+            String::new(),
+            parts[0].trim().to_string(),
+            parts[1].trim().to_string(),
+        ),
+        1 => (String::new(), String::new(), parts[0].trim().to_string()),
+        _ => return None,
+    };
+
+    Some(DropIndexStatement {
+        index_name,
+        catalog,
+        schema,
+        table,
+    })
+}
 
 /// Result of a query execution with optional persistence.
 pub struct QueryResponse {
@@ -123,6 +280,8 @@ pub struct RuntimeEngine {
     persistence_tasks: Mutex<JoinSet<()>>,
     /// Handle for the stale result cleanup worker task.
     stale_result_cleanup_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Optional parquet configuration for controlling row group size and bloom filters.
+    parquet_config: Option<crate::datafetch::ParquetConfig>,
 }
 
 impl RuntimeEngine {
@@ -431,6 +590,23 @@ impl RuntimeEngine {
             tracing::Span::current().record("runtimedb.sql", sql);
         }
 
+        // Intercept CREATE INDEX statements
+        if let Some(create_index) = parse_create_index(sql) {
+            return self
+                .execute_create_index_query(create_index, start)
+                .await;
+        }
+
+        // Intercept DROP INDEX statements
+        if let Some(drop_index) = parse_drop_index(sql) {
+            return self.execute_drop_index_query(drop_index, start).await;
+        }
+
+        // Intercept SHOW INDEXES statements
+        if sql.trim().to_uppercase().starts_with("SHOW INDEXES") {
+            return self.execute_show_indexes_query(sql, start).await;
+        }
+
         let session_state = self.df_ctx.state();
 
         // Step 1: Parse SQL into a statement
@@ -507,6 +683,234 @@ impl RuntimeEngine {
             schema,
             execution_time: start.elapsed(),
             results,
+        })
+    }
+
+    /// Execute a CREATE INDEX statement and return results.
+    async fn execute_create_index_query(
+        &self,
+        stmt: CreateIndexStatement,
+        start: Instant,
+    ) -> Result<QueryResponse> {
+        use datafusion::arrow::array::StringArray;
+        use datafusion::arrow::datatypes::{DataType, Field};
+
+        // For CREATE INDEX, we need to resolve the connection_id from the catalog name
+        // The catalog name in SQL corresponds to the connection name
+        let connection_id = if stmt.catalog.is_empty() {
+            // No catalog specified - this is an error for index creation
+            return Err(anyhow::anyhow!(
+                "CREATE INDEX requires fully qualified table name: catalog.schema.table"
+            ));
+        } else {
+            // Look up connection by name (catalog = connection name)
+            let conn = self
+                .catalog
+                .get_connection_by_name(&stmt.catalog)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Connection '{}' not found", stmt.catalog)
+                })?;
+            conn.id
+        };
+
+        // Create the index
+        let col_names: Vec<String> = stmt.columns.iter().map(|c| c.name.clone()).collect();
+        let index_info = self
+            .create_index(
+                &connection_id,
+                &stmt.schema,
+                &stmt.table,
+                &stmt.index_name,
+                &col_names,
+            )
+            .await?;
+
+        // Return a result set with the created index info
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("status", DataType::Utf8, false),
+            Field::new("index_name", DataType::Utf8, false),
+            Field::new("table", DataType::Utf8, false),
+            Field::new("columns", DataType::Utf8, false),
+        ]));
+
+        let status = StringArray::from(vec!["INDEX CREATED"]);
+        let name = StringArray::from(vec![index_info.index_name.as_str()]);
+        let table = StringArray::from(vec![format!(
+            "{}.{}.{}",
+            stmt.catalog, stmt.schema, stmt.table
+        )]);
+        let columns_str: Vec<String> = stmt.columns.iter().map(|c| c.name.clone()).collect();
+        let columns = StringArray::from(vec![columns_str.join(", ")]);
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(status),
+                Arc::new(name),
+                Arc::new(table),
+                Arc::new(columns),
+            ],
+        )?;
+
+        Ok(QueryResponse {
+            schema,
+            execution_time: start.elapsed(),
+            results: vec![batch],
+        })
+    }
+
+    /// Execute a DROP INDEX statement and return results.
+    async fn execute_drop_index_query(
+        &self,
+        stmt: DropIndexStatement,
+        start: Instant,
+    ) -> Result<QueryResponse> {
+        use datafusion::arrow::array::StringArray;
+        use datafusion::arrow::datatypes::{DataType, Field};
+
+        // Resolve connection_id from catalog name
+        let connection_id = if stmt.catalog.is_empty() {
+            return Err(anyhow::anyhow!(
+                "DROP INDEX requires fully qualified table name: catalog.schema.table"
+            ));
+        } else {
+            let conn = self
+                .catalog
+                .get_connection_by_name(&stmt.catalog)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Connection '{}' not found", stmt.catalog)
+                })?;
+            conn.id
+        };
+
+        // Drop the index
+        let dropped = self
+            .drop_index(&connection_id, &stmt.schema, &stmt.table, &stmt.index_name)
+            .await?;
+
+        // Return result
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("status", DataType::Utf8, false),
+            Field::new("index_name", DataType::Utf8, false),
+        ]));
+
+        let (status, name) = if dropped.is_some() {
+            ("INDEX DROPPED", stmt.index_name.as_str())
+        } else {
+            ("INDEX NOT FOUND", stmt.index_name.as_str())
+        };
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec![status])),
+                Arc::new(StringArray::from(vec![name])),
+            ],
+        )?;
+
+        Ok(QueryResponse {
+            schema,
+            execution_time: start.elapsed(),
+            results: vec![batch],
+        })
+    }
+
+    /// Execute a SHOW INDEXES statement and return results.
+    /// Format: SHOW INDEXES ON catalog.schema.table
+    async fn execute_show_indexes_query(
+        &self,
+        sql: &str,
+        start: Instant,
+    ) -> Result<QueryResponse> {
+        use datafusion::arrow::array::{StringArray, TimestampMicrosecondArray};
+        use datafusion::arrow::datatypes::{DataType, Field, TimeUnit};
+
+        // Parse SHOW INDEXES ON catalog.schema.table
+        let sql_upper = sql.to_uppercase();
+        let on_pos = sql_upper.find(" ON ").ok_or_else(|| {
+            anyhow::anyhow!("SHOW INDEXES requires ON clause: SHOW INDEXES ON catalog.schema.table")
+        })?;
+
+        let table_ref = sql[on_pos + 4..].trim().trim_end_matches(';').trim();
+        let parts: Vec<&str> = table_ref.split('.').collect();
+
+        let (catalog, schema_name, table_name) = match parts.len() {
+            3 => (parts[0].trim(), parts[1].trim(), parts[2].trim()),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "SHOW INDEXES requires fully qualified table name: catalog.schema.table"
+                ))
+            }
+        };
+
+        // Resolve connection_id
+        let conn = self
+            .catalog
+            .get_connection_by_name(catalog)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", catalog))?;
+
+        // Get indexes
+        let indexes = self
+            .list_indexes(&conn.id, schema_name, table_name)
+            .await?;
+
+        // Build result schema
+        let result_schema = Arc::new(Schema::new(vec![
+            Field::new("index_name", DataType::Utf8, false),
+            Field::new("columns", DataType::Utf8, false),
+            Field::new("parquet_path", DataType::Utf8, true),
+            Field::new(
+                "created_at",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+        ]));
+
+        if indexes.is_empty() {
+            let batch = RecordBatch::new_empty(result_schema.clone());
+            return Ok(QueryResponse {
+                schema: result_schema,
+                execution_time: start.elapsed(),
+                results: vec![batch],
+            });
+        }
+
+        let names: Vec<&str> = indexes.iter().map(|i| i.index_name.as_str()).collect();
+        let columns: Vec<String> = indexes
+            .iter()
+            .map(|i| i.sort_columns_vec().join(", "))
+            .collect();
+        let paths: Vec<Option<&str>> = indexes
+            .iter()
+            .map(|i| i.parquet_path.as_deref())
+            .collect();
+        let created_ats: Vec<i64> = indexes
+            .iter()
+            .map(|i| i.created_at.timestamp_micros())
+            .collect();
+
+        let batch = RecordBatch::try_new(
+            result_schema.clone(),
+            vec![
+                Arc::new(StringArray::from(names)),
+                Arc::new(StringArray::from(
+                    columns.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(paths)),
+                Arc::new(
+                    TimestampMicrosecondArray::from(created_ats)
+                        .with_timezone("UTC"),
+                ),
+            ],
+        )?;
+
+        Ok(QueryResponse {
+            schema: result_schema,
+            execution_time: start.elapsed(),
+            results: vec![batch],
         })
     }
 
@@ -1170,6 +1574,37 @@ impl RuntimeEngine {
             }
         }
 
+        // Invalidate indexes built from old data
+        match self
+            .invalidate_table_indexes(connection_id, schema_name, table_name)
+            .await
+        {
+            Ok(count) if count > 0 => {
+                warnings.push(RefreshWarning {
+                    schema_name: Some(schema_name.to_string()),
+                    table_name: Some(table_name.to_string()),
+                    message: format!(
+                        "{} index(es) were dropped because the underlying data changed. Recreate them with CREATE INDEX.",
+                        count
+                    ),
+                });
+            }
+            Err(e) => {
+                tracing::warn!(
+                    schema = schema_name,
+                    table = table_name,
+                    error = %e,
+                    "Failed to invalidate indexes after resync"
+                );
+                warnings.push(RefreshWarning {
+                    schema_name: Some(schema_name.to_string()),
+                    table_name: Some(table_name.to_string()),
+                    message: format!("Failed to invalidate indexes after resync: {}", e),
+                });
+            }
+            _ => {}
+        }
+
         tracing::Span::current()
             .record("runtimedb.rows_synced", rows_synced)
             .record("runtimedb.warnings_count", warnings.len());
@@ -1302,6 +1737,333 @@ impl RuntimeEngine {
             .record("runtimedb.rows_synced", result.total_rows);
 
         Ok(result)
+    }
+
+    // =========================================================================
+    // Index Management
+    // =========================================================================
+
+    /// Execute a CREATE INDEX statement.
+    ///
+    /// Creates a sorted copy of the table's cached data, sorted by the specified columns.
+    /// The index is stored in the catalog and can be used for efficient range queries.
+    #[tracing::instrument(
+        name = "create_index",
+        skip(self),
+        fields(
+            runtimedb.index_name = %index_name,
+            runtimedb.connection_id = %connection_id,
+            runtimedb.schema = %schema_name,
+            runtimedb.table = %table_name,
+            runtimedb.rows_written = tracing::field::Empty,
+        )
+    )]
+    pub async fn create_index(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+        index_name: &str,
+        sort_columns: &[String],
+    ) -> Result<IndexInfo> {
+        use crate::datafetch::native::StreamingParquetWriter;
+        use crate::datafetch::BatchWriter;
+
+        info!(
+            "Creating index {} on {}.{}.{} with columns {:?}",
+            index_name, connection_id, schema_name, table_name, sort_columns
+        );
+
+        // 1. Verify the table exists and has cached data
+        let table_info = self
+            .catalog
+            .get_table(connection_id, schema_name, table_name)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Table {}.{} not found in connection {}",
+                    schema_name,
+                    table_name,
+                    connection_id
+                )
+            })?;
+
+        let parquet_path = table_info.parquet_path.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Table {}.{} has no cached data. Run SYNC TABLE first.",
+                schema_name,
+                table_name
+            )
+        })?;
+
+        // 2. Check if index already exists
+        if self
+            .catalog
+            .get_index(connection_id, schema_name, table_name, index_name)
+            .await?
+            .is_some()
+        {
+            return Err(anyhow::anyhow!(
+                "Index {} already exists on {}.{}",
+                index_name,
+                schema_name,
+                table_name
+            ));
+        }
+
+        // 3. Read the source parquet file
+        // Indexes write to subdirectories of the table's cache path. For remote storage
+        // (S3), we'd need to upload the index files — not yet supported.
+        if !parquet_path.starts_with("file://") {
+            return Err(anyhow::anyhow!(
+                "CREATE INDEX is not yet supported for remote-storage tables. \
+                 Table {}.{} is stored at {}",
+                schema_name,
+                table_name,
+                parquet_path
+            ));
+        }
+
+        let (local_path, _is_temp) = self.storage.get_local_path(parquet_path).await?;
+
+        // Find parquet files in the directory
+        let parquet_files = if local_path.is_dir() {
+            let mut files = Vec::new();
+            for entry in std::fs::read_dir(&local_path)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().map(|e| e == "parquet").unwrap_or(false) {
+                    files.push(path);
+                }
+            }
+            files.sort();
+            files
+        } else {
+            vec![local_path.clone()]
+        };
+
+        if parquet_files.is_empty() {
+            return Err(anyhow::anyhow!("No parquet files found at {}", parquet_path));
+        }
+
+        // Read all batches from the source files
+        let ctx = datafusion::prelude::SessionContext::new();
+        let mut all_batches = Vec::new();
+        let mut schema = None;
+
+        for file_path in &parquet_files {
+            ctx.register_parquet(
+                "source",
+                file_path.to_str().unwrap(),
+                Default::default(),
+            )
+            .await?;
+
+            let df = ctx.table("source").await?;
+            if schema.is_none() {
+                schema = Some(df.schema().inner().as_ref().clone());
+            }
+            let batches = df.collect().await?;
+            all_batches.extend(batches);
+
+            ctx.deregister_table("source")?;
+        }
+
+        let schema = schema.ok_or_else(|| anyhow::anyhow!("Failed to get schema"))?;
+
+        // 4. Validate sort columns exist in schema
+        let schema_fields: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
+        for col in sort_columns {
+            if !schema_fields.iter().any(|f| f == col) {
+                return Err(anyhow::anyhow!(
+                    "Column '{}' not found in table {}.{}. Available columns: {}",
+                    col,
+                    schema_name,
+                    table_name,
+                    schema_fields.join(", ")
+                ));
+            }
+        }
+
+        // 5. Sort and write to index directory
+        // Use a unique suffix to prevent race conditions with async file deletion
+        // Write inside the version directory so the URL (derived from parquet_path) matches
+        let unique_suffix = nanoid::nanoid!(8);
+        let index_dir = local_path
+            .join("indexes")
+            .join(format!("{}_{}", index_name, unique_suffix));
+        std::fs::create_dir_all(&index_dir)?;
+
+        let index_parquet_path = index_dir.join("data.parquet");
+
+        // Sort and write using DataFusion
+        let schema_ref = Arc::new(schema.clone());
+        let mem_table = datafusion::datasource::MemTable::try_new(
+            schema_ref.clone(),
+            vec![all_batches],
+        )?;
+
+        ctx.register_table("data", Arc::new(mem_table))?;
+
+        // Create sort expressions — always ASC, nulls first
+        let sort_exprs: Vec<datafusion::logical_expr::SortExpr> = sort_columns
+            .iter()
+            .map(|c| datafusion::prelude::col(c).sort(true, true))
+            .collect();
+
+        let df = ctx.table("data").await?.sort(sort_exprs)?;
+        let sorted_batches = df.collect().await?;
+
+        // Write sorted data
+        let mut writer: Box<dyn BatchWriter> = match &self.parquet_config {
+            Some(config) => Box::new(StreamingParquetWriter::with_config(
+                index_parquet_path.clone(),
+                config.clone(),
+            )),
+            None => Box::new(StreamingParquetWriter::new(index_parquet_path.clone())),
+        };
+        writer.init(&schema)?;
+
+        let mut row_count = 0;
+        for batch in &sorted_batches {
+            row_count += batch.num_rows();
+            writer.write_batch(batch)?;
+        }
+        writer.close()?;
+
+        tracing::Span::current().record("runtimedb.rows_written", row_count);
+
+        // 6. Create catalog entry with parquet path (only after successful write)
+        // Derive the canonical URL from the table's parquet_path, not from the local filesystem
+        let index_url = format!(
+            "{}/indexes/{}_{}",
+            parquet_path.trim_end_matches('/'),
+            index_name,
+            unique_suffix
+        );
+        self.catalog
+            .create_index(
+                connection_id,
+                schema_name,
+                table_name,
+                index_name,
+                sort_columns,
+                Some(&index_url),
+            )
+            .await?;
+
+        // 7. Return the created index info
+        let index_info = self
+            .catalog
+            .get_index(connection_id, schema_name, table_name, index_name)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Failed to retrieve created index"))?;
+
+        info!(
+            "Created index {} with {} rows at {}",
+            index_name, row_count, index_url
+        );
+
+        Ok(index_info)
+    }
+
+    /// Execute a DROP INDEX statement.
+    #[tracing::instrument(
+        name = "drop_index",
+        skip(self),
+        fields(
+            runtimedb.index_name = %index_name,
+            runtimedb.connection_id = %connection_id,
+            runtimedb.schema = %schema_name,
+            runtimedb.table = %table_name,
+        )
+    )]
+    pub async fn drop_index(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+        index_name: &str,
+    ) -> Result<Option<IndexInfo>> {
+        info!(
+            "Dropping index {} on {}.{}.{}",
+            index_name, connection_id, schema_name, table_name
+        );
+
+        // Delete from catalog (returns the old info if it existed)
+        let deleted_index = self
+            .catalog
+            .delete_index(connection_id, schema_name, table_name, index_name)
+            .await?;
+
+        // If there was an index, schedule deletion of its files
+        if let Some(ref index_info) = deleted_index {
+            if let Some(ref parquet_path) = index_info.parquet_path {
+                if let Err(e) = self.schedule_file_deletion(parquet_path).await {
+                    warn!(
+                        "Failed to schedule deletion of index files at {}: {}",
+                        parquet_path, e
+                    );
+                }
+            }
+        }
+
+        Ok(deleted_index)
+    }
+
+    /// List all indexes for a table.
+    pub async fn list_indexes(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<Vec<IndexInfo>> {
+        self.catalog
+            .list_indexes(connection_id, schema_name, table_name)
+            .await
+    }
+
+    /// Invalidate all indexes for a table by removing catalog entries and scheduling file deletion.
+    ///
+    /// Called after table resync to ensure stale indexes (built from old data) are cleaned up.
+    /// Returns the number of indexes invalidated.
+    async fn invalidate_table_indexes(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<usize> {
+        let indexes = self
+            .catalog
+            .list_indexes(connection_id, schema_name, table_name)
+            .await?;
+
+        let count = indexes.len();
+        for index in &indexes {
+            // Delete catalog entry
+            self.catalog
+                .delete_index(connection_id, schema_name, table_name, &index.index_name)
+                .await?;
+
+            // Schedule file deletion if the index had a parquet path
+            if let Some(ref parquet_path) = index.parquet_path {
+                if let Err(e) = self.schedule_file_deletion(parquet_path).await {
+                    warn!(
+                        "Failed to schedule deletion of index files at {}: {}",
+                        parquet_path, e
+                    );
+                }
+            }
+        }
+
+        if count > 0 {
+            info!(
+                "Invalidated {} index(es) on {}.{} due to table resync",
+                count, schema_name, table_name
+            );
+        }
+
+        Ok(count)
     }
 
     /// Store an uploaded file and create an upload record.
@@ -2286,6 +3048,8 @@ pub struct RuntimeEngineBuilder {
     cache_config: Option<crate::config::CacheConfig>,
     stale_result_cleanup_interval: Duration,
     stale_result_timeout: Duration,
+    index_preset_registry: Option<crate::datafetch::IndexPresetRegistry>,
+    parquet_config: Option<crate::datafetch::ParquetConfig>,
 }
 
 impl Default for RuntimeEngineBuilder {
@@ -2315,7 +3079,28 @@ impl RuntimeEngineBuilder {
                 DEFAULT_STALE_RESULT_CLEANUP_INTERVAL_SECS,
             ),
             stale_result_timeout: Duration::from_secs(DEFAULT_STALE_RESULT_TIMEOUT_SECS),
+            index_preset_registry: None,
+            parquet_config: None,
         }
+    }
+
+    /// Enable TPC-H optimized index presets.
+    /// Creates sorted copies of large tables for efficient row-group pruning on range queries.
+    pub fn with_tpch_index_presets(mut self) -> Self {
+        self.index_preset_registry = Some(crate::datafetch::IndexPresetRegistry::tpch_optimized());
+        self
+    }
+
+    /// Set a custom index preset registry.
+    pub fn index_preset_registry(mut self, registry: crate::datafetch::IndexPresetRegistry) -> Self {
+        self.index_preset_registry = Some(registry);
+        self
+    }
+
+    /// Set a custom parquet configuration for controlling row group size and bloom filters.
+    pub fn parquet_config(mut self, config: crate::datafetch::ParquetConfig) -> Self {
+        self.parquet_config = Some(config);
+        self
     }
 
     /// Set the base directory for all RuntimeDB data.
@@ -2541,12 +3326,28 @@ impl RuntimeEngineBuilder {
 
         // Step 7: Create fetch orchestrator (needs secret_manager)
         let fetcher = Arc::new(NativeFetcher::new());
-        let orchestrator = Arc::new(FetchOrchestrator::new(
-            fetcher,
-            storage.clone(),
-            catalog.clone(),
-            secret_manager.clone(),
-        ));
+        let mut orchestrator = if let Some(registry) = self.index_preset_registry {
+            FetchOrchestrator::with_index_presets(
+                fetcher,
+                storage.clone(),
+                catalog.clone(),
+                secret_manager.clone(),
+                Arc::new(registry),
+            )
+        } else {
+            FetchOrchestrator::new(
+                fetcher,
+                storage.clone(),
+                catalog.clone(),
+                secret_manager.clone(),
+            )
+        };
+
+        if let Some(config) = &self.parquet_config {
+            orchestrator = orchestrator.with_parquet_config(config.clone());
+        }
+
+        let orchestrator = Arc::new(orchestrator);
 
         // Create shutdown token for graceful shutdown
         let shutdown_token = CancellationToken::new();
@@ -2593,6 +3394,7 @@ impl RuntimeEngineBuilder {
             persistence_semaphore: Arc::new(Semaphore::new(self.max_concurrent_persistence)),
             persistence_tasks: Mutex::new(JoinSet::new()),
             stale_result_cleanup_handle: Mutex::new(stale_result_cleanup_handle),
+            parquet_config: self.parquet_config,
         };
 
         // Note: All catalogs (connections, datasets, runtimedb) are now resolved on-demand
@@ -2743,25 +3545,12 @@ fn build_instrumented_context(
     object_stores: Vec<(ObjectStoreUrl, Arc<dyn ObjectStore>)>,
     liquid_cache_config: Option<LiquidCacheConfig>,
 ) -> Result<SessionContext> {
-    // When liquid-cache is enabled, use LiquidCacheClientBuilder
-    // Object stores are registered with the builder for the server, not locally
-    if let Some((server_address, store_configs)) = liquid_cache_config {
-        info!(server = %server_address, "Building liquid-cache session context");
-
-        let mut liquid_cache_builder = LiquidCacheClientBuilder::new(&server_address);
-
-        // Register object stores with liquid-cache builder (server needs these configs)
-        for (url, options) in store_configs {
-            info!(url = %url.as_str(), "Registering object store with liquid-cache");
-            liquid_cache_builder = liquid_cache_builder.with_object_store(url, Some(options));
-        }
-
-        let session_config = SessionConfig::new()
-            .set_bool("datafusion.execution.parquet.bloom_filter_on_read", true);
-        return Ok(liquid_cache_builder.build(session_config)?);
+    // Liquid-cache temporarily disabled - waiting for DataFusion 52 support
+    if liquid_cache_config.is_some() {
+        warn!("Liquid-cache is temporarily disabled pending DataFusion 52 upgrade");
     }
 
-    // Non-liquid-cache path: build with full local instrumentation
+    // Build with full local instrumentation
     let runtime_env = Arc::new(RuntimeEnv::default());
 
     // Register instrumented object stores (using actual pre-built stores)
@@ -2778,9 +3567,8 @@ fn build_instrumented_context(
         runtime_env.register_object_store(url.as_ref(), instrumented_store);
     }
 
-    // Configure session — enable bloom filter reads for point lookups
-    let session_config =
-        SessionConfig::new().set_bool("datafusion.execution.parquet.bloom_filter_on_read", true);
+    // Configure session (bloom filter reads disabled - files don't have bloom filters)
+    let session_config = SessionConfig::new();
 
     // Build SessionState with tracing instrumentation
     let state_builder = SessionStateBuilder::new()
@@ -3203,5 +3991,131 @@ mod tests {
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(name_col.value(0), "Alice");
+    }
+
+    // =========================================================================
+    // CREATE INDEX / DROP INDEX Parsing Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_create_index_single_column() {
+        let sql = "CREATE INDEX idx_date ON tpch.main.orders (o_orderdate)";
+        let result = parse_create_index(sql).unwrap();
+
+        assert_eq!(result.index_name, "idx_date");
+        assert_eq!(result.catalog, "tpch");
+        assert_eq!(result.schema, "main");
+        assert_eq!(result.table, "orders");
+        assert_eq!(result.columns.len(), 1);
+        assert_eq!(result.columns[0].name, "o_orderdate");
+    }
+
+    #[test]
+    fn test_parse_create_index_multiple_columns() {
+        let sql = "CREATE INDEX idx_composite ON mydb.public.lineitem (l_shipdate, l_quantity)";
+        let result = parse_create_index(sql).unwrap();
+
+        assert_eq!(result.index_name, "idx_composite");
+        assert_eq!(result.catalog, "mydb");
+        assert_eq!(result.schema, "public");
+        assert_eq!(result.table, "lineitem");
+        assert_eq!(result.columns.len(), 2);
+        assert_eq!(result.columns[0].name, "l_shipdate");
+        assert_eq!(result.columns[1].name, "l_quantity");
+    }
+
+    #[test]
+    fn test_parse_create_index_with_desc() {
+        let sql = "CREATE INDEX idx ON cat.sch.tbl (col1 DESC, col2 ASC, col3)";
+        let result = parse_create_index(sql).unwrap();
+
+        assert_eq!(result.columns.len(), 3);
+        assert_eq!(result.columns[0].name, "col1");
+        assert_eq!(result.columns[1].name, "col2");
+        assert_eq!(result.columns[2].name, "col3");
+    }
+
+    #[test]
+    fn test_parse_create_index_with_spaces() {
+        let sql = "CREATE INDEX   my_idx   ON   catalog.schema.table   ( col1 , col2 )";
+        let result = parse_create_index(sql).unwrap();
+
+        assert_eq!(result.index_name, "my_idx");
+        assert_eq!(result.columns.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_create_index_lowercase() {
+        let sql = "create index idx on cat.sch.tbl (col desc)";
+        let result = parse_create_index(sql).unwrap();
+
+        assert_eq!(result.index_name, "idx");
+        assert_eq!(result.catalog, "cat");
+        assert_eq!(result.schema, "sch");
+        assert_eq!(result.table, "tbl");
+        assert_eq!(result.columns.len(), 1);
+        assert_eq!(result.columns[0].name, "col");
+    }
+
+    #[test]
+    fn test_parse_create_index_two_part_table_ref() {
+        let sql = "CREATE INDEX idx ON schema.table (col)";
+        let result = parse_create_index(sql).unwrap();
+
+        assert_eq!(result.catalog, "");
+        assert_eq!(result.schema, "schema");
+        assert_eq!(result.table, "table");
+    }
+
+    #[test]
+    fn test_parse_create_index_invalid() {
+        // Missing ON keyword
+        assert!(parse_create_index("CREATE INDEX idx table (col)").is_none());
+
+        // Missing columns
+        assert!(parse_create_index("CREATE INDEX idx ON table").is_none());
+
+        // Empty columns
+        assert!(parse_create_index("CREATE INDEX idx ON table ()").is_none());
+
+        // Not a CREATE INDEX statement
+        assert!(parse_create_index("SELECT * FROM table").is_none());
+    }
+
+    #[test]
+    fn test_parse_drop_index_full() {
+        let sql = "DROP INDEX idx_date ON tpch.main.orders";
+        let result = parse_drop_index(sql).unwrap();
+
+        assert_eq!(result.index_name, "idx_date");
+        assert_eq!(result.catalog, "tpch");
+        assert_eq!(result.schema, "main");
+        assert_eq!(result.table, "orders");
+    }
+
+    #[test]
+    fn test_parse_drop_index_with_semicolon() {
+        let sql = "DROP INDEX my_idx ON cat.sch.tbl;";
+        let result = parse_drop_index(sql).unwrap();
+
+        assert_eq!(result.index_name, "my_idx");
+        assert_eq!(result.table, "tbl");
+    }
+
+    #[test]
+    fn test_parse_drop_index_lowercase() {
+        let sql = "drop index idx on cat.sch.tbl";
+        let result = parse_drop_index(sql).unwrap();
+
+        assert_eq!(result.index_name, "idx");
+    }
+
+    #[test]
+    fn test_parse_drop_index_invalid() {
+        // Missing ON keyword
+        assert!(parse_drop_index("DROP INDEX idx table").is_none());
+
+        // Not a DROP INDEX statement
+        assert!(parse_drop_index("DROP TABLE foo").is_none());
     }
 }

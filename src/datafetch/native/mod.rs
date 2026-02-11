@@ -6,8 +6,7 @@ pub mod mysql;
 mod parquet_writer;
 pub mod postgres;
 pub mod snowflake;
-
-pub use parquet_writer::StreamingParquetWriter;
+pub use parquet_writer::{ParquetConfig, StreamingParquetWriter};
 
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::DataType;

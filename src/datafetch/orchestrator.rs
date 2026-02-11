@@ -2,7 +2,10 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use super::batch_writer::BatchWriter;
-use super::native::StreamingParquetWriter;
+use super::collecting_writer::CollectingBatchWriter;
+use super::native::{ParquetConfig, StreamingParquetWriter};
+use super::sorted_parquet::{write_parquet, write_sorted_parquet};
+use super::index_presets::IndexPresetRegistry;
 use super::{DataFetchError, DataFetcher, TableMetadata};
 use crate::catalog::CatalogManager;
 use crate::secrets::SecretManager;
@@ -16,6 +19,8 @@ pub struct FetchOrchestrator {
     storage: Arc<dyn StorageManager>,
     catalog: Arc<dyn CatalogManager>,
     secret_manager: Arc<SecretManager>,
+    index_preset_registry: Option<Arc<IndexPresetRegistry>>,
+    parquet_config: Option<ParquetConfig>,
 }
 
 impl FetchOrchestrator {
@@ -30,7 +35,43 @@ impl FetchOrchestrator {
             storage,
             catalog,
             secret_manager,
+            index_preset_registry: None,
+            parquet_config: None,
         }
+    }
+
+    /// Create an orchestrator with index preset support.
+    pub fn with_index_presets(
+        fetcher: Arc<dyn DataFetcher>,
+        storage: Arc<dyn StorageManager>,
+        catalog: Arc<dyn CatalogManager>,
+        secret_manager: Arc<SecretManager>,
+        index_preset_registry: Arc<IndexPresetRegistry>,
+    ) -> Self {
+        Self {
+            fetcher,
+            storage,
+            catalog,
+            secret_manager,
+            index_preset_registry: Some(index_preset_registry),
+            parquet_config: None,
+        }
+    }
+
+    /// Set a custom parquet configuration for this orchestrator.
+    pub fn with_parquet_config(mut self, config: ParquetConfig) -> Self {
+        self.parquet_config = Some(config);
+        self
+    }
+
+    /// Get the parquet config if set.
+    pub fn parquet_config(&self) -> Option<&ParquetConfig> {
+        self.parquet_config.as_ref()
+    }
+
+    /// Get the index preset registry if configured.
+    pub fn index_preset_registry(&self) -> Option<&Arc<IndexPresetRegistry>> {
+        self.index_preset_registry.as_ref()
     }
 
     /// Fetch table data from source, write to cache storage, and update catalog metadata.
@@ -60,28 +101,21 @@ impl FetchOrchestrator {
             .storage
             .prepare_cache_write(connection_id, schema_name, table_name);
 
-        // Create writer
-        let mut writer: Box<dyn BatchWriter> =
-            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+        // Check if index presets are configured for this table
+        let presets = self
+            .index_preset_registry
+            .as_ref()
+            .and_then(|r| r.get(schema_name, table_name));
 
-        // Fetch the table data into writer
-        self.fetcher
-            .fetch_table(
-                source,
-                &self.secret_manager,
-                None, // catalog
-                schema_name,
-                table_name,
-                writer.as_mut(),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to fetch table: {}", e))?;
-
-        // Close writer and get row count
-        let result = writer
-            .close()
-            .map_err(|e| anyhow::anyhow!("Failed to close writer: {}", e))?;
-        let row_count = result.rows;
+        let row_count = if let Some(presets) = presets {
+            // Use collecting writer to gather batches for preset index creation
+            self.cache_table_with_index_presets(source, schema_name, table_name, &handle, presets)
+                .await?
+        } else {
+            // Simple path: stream directly to parquet
+            self.cache_table_simple(source, schema_name, table_name, &handle)
+                .await?
+        };
 
         // Finalize cache write (uploads to S3 if needed, returns URL)
         let parquet_url = self
@@ -111,12 +145,112 @@ impl FetchOrchestrator {
 
         let span = tracing::Span::current();
         span.record("runtimedb.rows_written", row_count);
-        if let Some(bytes) = result.bytes_written {
-            span.record("runtimedb.bytes_written", bytes);
-        }
         span.record("runtimedb.cache_url", &parquet_url);
 
         Ok((parquet_url, row_count))
+    }
+
+    /// Simple cache path: stream directly to parquet file.
+    async fn cache_table_simple(
+        &self,
+        source: &Source,
+        schema_name: &str,
+        table_name: &str,
+        handle: &crate::storage::CacheWriteHandle,
+    ) -> Result<usize> {
+        let mut writer: Box<dyn BatchWriter> = match &self.parquet_config {
+            Some(config) => Box::new(StreamingParquetWriter::with_config(
+                handle.local_path.clone(),
+                config.clone(),
+            )),
+            None => Box::new(StreamingParquetWriter::new(handle.local_path.clone())),
+        };
+
+        self.fetcher
+            .fetch_table(
+                source,
+                &self.secret_manager,
+                None,
+                schema_name,
+                table_name,
+                writer.as_mut(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch table: {}", e))?;
+
+        let result = writer
+            .close()
+            .map_err(|e| anyhow::anyhow!("Failed to close writer: {}", e))?;
+
+        Ok(result.rows)
+    }
+
+    /// Cache with index presets: collect batches, write main file, then write sorted copies.
+    async fn cache_table_with_index_presets(
+        &self,
+        source: &Source,
+        schema_name: &str,
+        table_name: &str,
+        handle: &crate::storage::CacheWriteHandle,
+        presets: &[super::index_presets::IndexPreset],
+    ) -> Result<usize> {
+        // Collect all batches in memory
+        let mut collector = CollectingBatchWriter::new();
+
+        self.fetcher
+            .fetch_table(
+                source,
+                &self.secret_manager,
+                None,
+                schema_name,
+                table_name,
+                &mut collector,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch table: {}", e))?;
+
+        let schema = collector
+            .schema()
+            .ok_or_else(|| anyhow::anyhow!("No schema from fetcher"))?
+            .as_ref()
+            .clone();
+        let batches = collector.into_batches();
+        let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+        // Ensure parent directory exists
+        if let Some(parent) = handle.local_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // Write main parquet file
+        write_parquet(&batches, &schema, &handle.local_path, self.parquet_config.as_ref())
+            .map_err(|e| anyhow::anyhow!("Failed to write main parquet: {}", e))?;
+
+        // Write preset indexes
+        let version_dir = handle
+            .local_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Invalid handle path: no parent directory"))?;
+
+        for preset in presets {
+            let preset_dir = version_dir.join("presets").join(&preset.name);
+            std::fs::create_dir_all(&preset_dir)?;
+            let preset_path = preset_dir.join("data.parquet");
+
+            tracing::debug!(
+                preset = %preset.name,
+                sort_columns = ?preset.sort_columns,
+                "Writing preset index"
+            );
+
+            write_sorted_parquet(&batches, &schema, &preset.sort_columns, &preset_path, self.parquet_config.as_ref())
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to write preset index {}: {}", preset.name, e)
+                })?;
+        }
+
+        Ok(row_count)
     }
 
     /// Discover tables from a remote source.
@@ -174,35 +308,28 @@ impl FetchOrchestrator {
             .storage
             .prepare_cache_write(connection_id, schema_name, table_name);
 
-        // 3. Fetch and write to new path
-        let mut writer: Box<dyn BatchWriter> =
-            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
-        self.fetcher
-            .fetch_table(
-                source,
-                &self.secret_manager,
-                None,
-                schema_name,
-                table_name,
-                writer.as_mut(),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to fetch table: {}", e))?;
+        // 3. Check if index presets are configured for this table
+        let presets = self
+            .index_preset_registry
+            .as_ref()
+            .and_then(|r| r.get(schema_name, table_name));
 
-        // 4. Close writer and get row count
-        let result = writer
-            .close()
-            .map_err(|e| anyhow::anyhow!("Failed to close writer: {}", e))?;
-        let row_count = result.rows;
+        let row_count = if let Some(presets) = presets {
+            self.cache_table_with_index_presets(source, schema_name, table_name, &handle, presets)
+                .await?
+        } else {
+            self.cache_table_simple(source, schema_name, table_name, &handle)
+                .await?
+        };
 
-        // 5. Finalize (upload to S3 if needed)
+        // 4. Finalize (upload to S3 if needed)
         let new_url = self
             .storage
             .finalize_cache_write(&handle)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to finalize cache write: {}", e))?;
 
-        // 6. Atomic catalog update with cleanup on failure
+        // 5. Atomic catalog update with cleanup on failure
         // If this fails after finalize_cache_write succeeds, we have orphaned files.
         // Clean them up to prevent storage leaks.
         let catalog_result = self
@@ -223,9 +350,6 @@ impl FetchOrchestrator {
 
         let span = tracing::Span::current();
         span.record("runtimedb.rows_synced", row_count);
-        if let Some(bytes) = result.bytes_written {
-            span.record("runtimedb.bytes_written", bytes);
-        }
         span.record("runtimedb.cache_url", &new_url);
 
         Ok((new_url, old_path, row_count))
@@ -707,6 +831,70 @@ mod tests {
             deleted_url.contains("/conn_test123/test/orders/"),
             "Deleted URL should be for the test table: {}",
             deleted_url
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cache_table_with_index_presets() {
+        use crate::datafetch::index_presets::{IndexPreset, IndexPresetRegistry};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_path = temp_dir.path().join("cache");
+        std::fs::create_dir_all(&cache_path).unwrap();
+
+        let fetcher = Arc::new(MockFetcher);
+        let storage = Arc::new(MockStorage::new(cache_path.clone()));
+        let catalog = Arc::new(MockCatalog::new());
+        let secret_manager = Arc::new(create_test_secret_manager(temp_dir.path()).await);
+
+        // Add a table to the mock catalog
+        catalog.add_table_entry("conn_test123", "test", "orders");
+
+        // Create index preset registry
+        let mut registry = IndexPresetRegistry::new();
+        registry.register(
+            "test",
+            "orders",
+            vec![IndexPreset::new("by_id", vec!["id"])],
+        );
+
+        let orchestrator = FetchOrchestrator::with_index_presets(
+            fetcher,
+            storage.clone(),
+            catalog,
+            secret_manager,
+            Arc::new(registry),
+        );
+
+        let source = Source::Duckdb {
+            path: ":memory:".to_string(),
+        };
+
+        let result = orchestrator
+            .cache_table(&source, "conn_test123", "test", "orders")
+            .await;
+
+        assert!(result.is_ok(), "cache_table should succeed: {:?}", result);
+        let (url, row_count) = result.unwrap();
+
+        assert_eq!(row_count, 3, "Should have cached 3 rows from MockFetcher");
+        assert!(
+            url.contains("/conn_test123/test/orders/"),
+            "URL should be for the test table"
+        );
+
+        // Verify main parquet file exists
+        let version_dir = url.strip_prefix("file://").unwrap();
+        let main_file = std::path::Path::new(version_dir).join("data.parquet");
+        assert!(main_file.exists(), "Main parquet file should exist");
+
+        // Verify preset index file exists
+        let preset_file =
+            std::path::Path::new(version_dir).join("presets/by_id/data.parquet");
+        assert!(
+            preset_file.exists(),
+            "Preset index parquet file should exist at {:?}",
+            preset_file
         );
     }
 }

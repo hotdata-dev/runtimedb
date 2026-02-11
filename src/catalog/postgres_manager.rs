@@ -1,7 +1,7 @@
 use crate::catalog::backend::CatalogBackend;
 use crate::catalog::manager::{
-    CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
-    QueryResultRow, ResultStatus, ResultUpdate, TableInfo, UploadInfo,
+    CatalogManager, ConnectionInfo, DatasetInfo, IndexInfo, OptimisticLock, PendingDeletion,
+    QueryResult, QueryResultRow, ResultStatus, ResultUpdate, TableInfo, UploadInfo,
 };
 use crate::catalog::migrations::{
     run_migrations, wrap_migration_sql, CatalogMigrations, Migration, POSTGRES_MIGRATIONS,
@@ -894,6 +894,101 @@ impl CatalogManager for PostgresCatalogManager {
         }
 
         Ok(dataset)
+    }
+
+    // Index management methods
+
+    async fn create_index(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+        index_name: &str,
+        sort_columns: &[String],
+        parquet_path: Option<&str>,
+    ) -> Result<i32> {
+        let sort_columns_json = serde_json::to_string(sort_columns)?;
+
+        let row: (i32,) = sqlx::query_as(
+            "INSERT INTO indexes (connection_id, schema_name, table_name, index_name, sort_columns, parquet_path)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING id",
+        )
+        .bind(connection_id)
+        .bind(schema_name)
+        .bind(table_name)
+        .bind(index_name)
+        .bind(&sort_columns_json)
+        .bind(parquet_path)
+        .fetch_one(self.backend.pool())
+        .await?;
+
+        Ok(row.0)
+    }
+
+    async fn get_index(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+        index_name: &str,
+    ) -> Result<Option<IndexInfo>> {
+        let row: Option<IndexInfo> = sqlx::query_as(
+            "SELECT id, connection_id, schema_name, table_name, index_name, sort_columns, parquet_path, created_at
+             FROM indexes
+             WHERE connection_id = $1 AND schema_name = $2 AND table_name = $3 AND index_name = $4",
+        )
+        .bind(connection_id)
+        .bind(schema_name)
+        .bind(table_name)
+        .bind(index_name)
+        .fetch_optional(self.backend.pool())
+        .await?;
+
+        Ok(row)
+    }
+
+    async fn list_indexes(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<Vec<IndexInfo>> {
+        let rows: Vec<IndexInfo> = sqlx::query_as(
+            "SELECT id, connection_id, schema_name, table_name, index_name, sort_columns, parquet_path, created_at
+             FROM indexes
+             WHERE connection_id = $1 AND schema_name = $2 AND table_name = $3
+             ORDER BY index_name",
+        )
+        .bind(connection_id)
+        .bind(schema_name)
+        .bind(table_name)
+        .fetch_all(self.backend.pool())
+        .await?;
+
+        Ok(rows)
+    }
+
+    async fn delete_index(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+        index_name: &str,
+    ) -> Result<Option<IndexInfo>> {
+        let row: Option<IndexInfo> = sqlx::query_as(
+            "DELETE FROM indexes
+             WHERE connection_id = $1 AND schema_name = $2 AND table_name = $3 AND index_name = $4
+             RETURNING id, connection_id, schema_name, table_name, index_name, sort_columns, parquet_path, created_at",
+        )
+        .bind(connection_id)
+        .bind(schema_name)
+        .bind(table_name)
+        .bind(index_name)
+        .fetch_optional(self.backend.pool())
+        .await?;
+
+        Ok(row)
     }
 }
 

@@ -4,8 +4,8 @@
 //! in tests to avoid needing a real database.
 
 use super::{
-    CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
-    ResultStatus, ResultUpdate, TableInfo, UploadInfo,
+    CatalogManager, ConnectionInfo, DatasetInfo, IndexInfo, OptimisticLock, PendingDeletion,
+    QueryResult, ResultStatus, ResultUpdate, TableInfo, UploadInfo,
 };
 use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
@@ -355,6 +355,49 @@ impl CatalogManager for MockCatalog {
     }
 
     async fn delete_dataset(&self, _id: &str) -> Result<Option<DatasetInfo>> {
+        Ok(None)
+    }
+
+    // Index methods - not implemented for mock
+
+    async fn create_index(
+        &self,
+        _connection_id: &str,
+        _schema_name: &str,
+        _table_name: &str,
+        _index_name: &str,
+        _sort_columns: &[String],
+        _parquet_path: Option<&str>,
+    ) -> Result<i32> {
+        Ok(1)
+    }
+
+    async fn get_index(
+        &self,
+        _connection_id: &str,
+        _schema_name: &str,
+        _table_name: &str,
+        _index_name: &str,
+    ) -> Result<Option<IndexInfo>> {
+        Ok(None)
+    }
+
+    async fn list_indexes(
+        &self,
+        _connection_id: &str,
+        _schema_name: &str,
+        _table_name: &str,
+    ) -> Result<Vec<IndexInfo>> {
+        Ok(vec![])
+    }
+
+    async fn delete_index(
+        &self,
+        _connection_id: &str,
+        _schema_name: &str,
+        _table_name: &str,
+        _index_name: &str,
+    ) -> Result<Option<IndexInfo>> {
         Ok(None)
     }
 }

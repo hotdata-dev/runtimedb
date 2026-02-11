@@ -5,8 +5,8 @@
 //! to the inner catalog directly.
 
 use super::{
-    CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
-    ResultStatus, ResultUpdate, TableInfo, UploadInfo,
+    CatalogManager, ConnectionInfo, DatasetInfo, IndexInfo, OptimisticLock, PendingDeletion,
+    QueryResult, ResultStatus, ResultUpdate, TableInfo, UploadInfo,
 };
 use crate::config::CacheConfig;
 use crate::secrets::{SecretMetadata, SecretStatus};
@@ -986,6 +986,57 @@ impl CatalogManager for CachingCatalogManager {
         let key = self.key_tbl_names(schema_name);
         let schema = schema_name.to_string();
         self.cached_read(&key, || self.inner().list_dataset_table_names(&schema))
+            .await
+    }
+
+    // Index methods - pass through to inner catalog (no caching for now)
+
+    async fn create_index(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+        index_name: &str,
+        sort_columns: &[String],
+        parquet_path: Option<&str>,
+    ) -> Result<i32> {
+        self.inner()
+            .create_index(connection_id, schema_name, table_name, index_name, sort_columns, parquet_path)
+            .await
+    }
+
+    async fn get_index(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+        index_name: &str,
+    ) -> Result<Option<IndexInfo>> {
+        self.inner()
+            .get_index(connection_id, schema_name, table_name, index_name)
+            .await
+    }
+
+    async fn list_indexes(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<Vec<IndexInfo>> {
+        self.inner()
+            .list_indexes(connection_id, schema_name, table_name)
+            .await
+    }
+
+    async fn delete_index(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+        index_name: &str,
+    ) -> Result<Option<IndexInfo>> {
+        self.inner()
+            .delete_index(connection_id, schema_name, table_name, index_name)
             .await
     }
 }

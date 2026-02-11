@@ -14,6 +14,7 @@ use datafusion::datasource::source::DataSourceExec;
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
+use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
 use datafusion::physical_plan::ExecutionPlan;
 use std::any::Any;
 use std::sync::Arc;
@@ -24,12 +25,17 @@ use std::sync::Arc;
 ///
 /// `file_url` must be the full URL to the parquet file (e.g.,
 /// `s3://bucket/.../data.parquet` or `file:///tmp/.../data.parquet`).
+///
+/// If `sort_columns` is provided, the execution plan will declare that its output
+/// is sorted by those columns, allowing DataFusion to skip redundant sorts.
+/// Each tuple is (column_name, is_descending).
 pub async fn build_parquet_exec(
     file_url: &str,
     file_schema: SchemaRef,
     state: &dyn Session,
     projection: Option<&Vec<usize>>,
     limit: Option<usize>,
+    sort_columns: Option<&Vec<(String, bool)>>,
 ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
     // Parse URL to extract ObjectStoreUrl and object-store-relative path.
     // ListingTableUrl handles both file:// and s3:// schemes.
@@ -47,15 +53,41 @@ pub async fn build_parquet_exec(
         )
     })?;
 
+    // In DataFusion 52+, ParquetSource takes the schema, and FileScanConfigBuilder takes 2 args
     let parquet_source: Arc<dyn datafusion::datasource::physical_plan::FileSource> =
-        Arc::new(ParquetSource::default());
+        Arc::new(ParquetSource::new(file_schema.clone()));
 
-    let config = FileScanConfigBuilder::new(object_store_url, file_schema, parquet_source)
+    let mut config_builder = FileScanConfigBuilder::new(object_store_url, parquet_source)
         .with_file(object_meta.into())
-        .with_projection_indices(projection.cloned())
-        .with_limit(limit)
-        .build();
+        .with_projection_indices(projection.cloned())?
+        .with_limit(limit);
 
+    // If sort columns are provided, declare output ordering so DataFusion can skip sorts
+    if let Some(cols) = sort_columns {
+        let sort_exprs: Vec<PhysicalSortExpr> = cols
+            .iter()
+            .filter_map(|(col_name, is_descending)| {
+                // Find the column in the schema and create a sort expression
+                datafusion::physical_expr::expressions::col(col_name, &file_schema)
+                    .ok()
+                    .map(|expr| PhysicalSortExpr {
+                        expr,
+                        options: datafusion::arrow::compute::SortOptions {
+                            descending: *is_descending,
+                            nulls_first: true,
+                        },
+                    })
+            })
+            .collect();
+
+        if !sort_exprs.is_empty() {
+            if let Some(ordering) = LexOrdering::new(sort_exprs) {
+                config_builder = config_builder.with_output_ordering(vec![ordering]);
+            }
+        }
+    }
+
+    let config = config_builder.build();
     Ok(DataSourceExec::from_data_source(config))
 }
 
@@ -103,6 +135,7 @@ impl TableProvider for SingleFileParquetProvider {
             state,
             projection,
             limit,
+            None, // No sort ordering for SingleFileParquetProvider
         )
         .await
     }
@@ -160,7 +193,7 @@ mod tests {
         let ctx = SessionContext::new();
         let state = ctx.state();
 
-        let plan = build_parquet_exec(&file_url, schema, &state, None, None)
+        let plan = build_parquet_exec(&file_url, schema, &state, None, None, None)
             .await
             .unwrap();
 
@@ -182,7 +215,7 @@ mod tests {
 
         // Project only "value" column (index 1)
         let projection = vec![1];
-        let plan = build_parquet_exec(&file_url, schema, &state, Some(&projection), None)
+        let plan = build_parquet_exec(&file_url, schema, &state, Some(&projection), None, None)
             .await
             .unwrap();
 
@@ -202,7 +235,7 @@ mod tests {
         let ctx = SessionContext::new();
         let state = ctx.state();
 
-        let plan = build_parquet_exec(&file_url, schema, &state, None, Some(1))
+        let plan = build_parquet_exec(&file_url, schema, &state, None, Some(1), None)
             .await
             .unwrap();
 
@@ -224,6 +257,7 @@ mod tests {
             "file:///nonexistent/path.parquet",
             schema,
             &state,
+            None,
             None,
             None,
         )

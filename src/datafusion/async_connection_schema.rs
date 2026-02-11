@@ -79,15 +79,30 @@ impl AsyncSchemaProvider for AsyncConnectionSchema {
         })?;
 
         // Create LazyTableProvider for on-demand data fetching
-        let provider = Arc::new(LazyTableProvider::new(
-            schema,
-            self.source.clone(),
-            self.catalog.clone(),
-            self.orchestrator.clone(),
-            self.connection_id.clone(),
-            self.schema_name.clone(),
-            name.to_string(),
-        )) as Arc<dyn TableProvider>;
+        // Use projections if the orchestrator has them configured
+        let provider: Arc<dyn TableProvider> =
+            if let Some(registry) = self.orchestrator.index_preset_registry() {
+                Arc::new(LazyTableProvider::with_index_presets(
+                    schema,
+                    self.source.clone(),
+                    self.catalog.clone(),
+                    self.orchestrator.clone(),
+                    self.connection_id.clone(),
+                    self.schema_name.clone(),
+                    name.to_string(),
+                    Arc::clone(registry),
+                ))
+            } else {
+                Arc::new(LazyTableProvider::new(
+                    schema,
+                    self.source.clone(),
+                    self.catalog.clone(),
+                    self.orchestrator.clone(),
+                    self.connection_id.clone(),
+                    self.schema_name.clone(),
+                    name.to_string(),
+                ))
+            };
 
         Ok(Some(provider))
     }

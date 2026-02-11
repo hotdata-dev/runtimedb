@@ -9,8 +9,8 @@ use chrono::{DateTime, Utc};
 use datafusion::prelude::SessionContext;
 use rand::RngCore;
 use runtimedb::catalog::{
-    CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
-    ResultStatus, ResultUpdate, SqliteCatalogManager, TableInfo, UploadInfo,
+    CatalogManager, ConnectionInfo, DatasetInfo, IndexInfo, OptimisticLock, PendingDeletion,
+    QueryResult, ResultStatus, ResultUpdate, SqliteCatalogManager, TableInfo, UploadInfo,
 };
 use runtimedb::http::app_server::{AppServer, PATH_QUERY, PATH_RESULT, PATH_RESULTS};
 use runtimedb::secrets::{SecretMetadata, SecretStatus};
@@ -322,6 +322,57 @@ impl CatalogManager for FailingCatalog {
 
     async fn delete_dataset(&self, id: &str) -> Result<Option<DatasetInfo>> {
         self.inner.delete_dataset(id).await
+    }
+
+    // Index management methods
+
+    async fn create_index(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+        index_name: &str,
+        sort_columns: &[String],
+        parquet_path: Option<&str>,
+    ) -> Result<i32> {
+        self.inner
+            .create_index(connection_id, schema_name, table_name, index_name, sort_columns, parquet_path)
+            .await
+    }
+
+    async fn get_index(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+        index_name: &str,
+    ) -> Result<Option<IndexInfo>> {
+        self.inner
+            .get_index(connection_id, schema_name, table_name, index_name)
+            .await
+    }
+
+    async fn list_indexes(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<Vec<IndexInfo>> {
+        self.inner
+            .list_indexes(connection_id, schema_name, table_name)
+            .await
+    }
+
+    async fn delete_index(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+        index_name: &str,
+    ) -> Result<Option<IndexInfo>> {
+        self.inner
+            .delete_index(connection_id, schema_name, table_name, index_name)
+            .await
     }
 }
 

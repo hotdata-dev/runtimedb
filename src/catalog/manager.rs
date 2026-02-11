@@ -172,6 +172,45 @@ pub struct DatasetInfo {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A sorted index (projection) on a table.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct IndexInfo {
+    pub id: i32,
+    pub connection_id: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub index_name: String,
+    pub sort_columns: String, // JSON array of column names
+    pub parquet_path: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl IndexInfo {
+    /// Parse sort_columns JSON into a Vec<String>.
+    pub fn sort_columns_vec(&self) -> Vec<String> {
+        serde_json::from_str(&self.sort_columns).unwrap_or_default()
+    }
+
+    /// Parse sort_columns JSON into (column_name, is_descending) pairs.
+    /// Always returns ASC (false). Strips legacy " ASC"/" DESC" suffixes for backward compat.
+    pub fn sort_columns_with_direction(&self) -> Vec<(String, bool)> {
+        let cols: Vec<String> = serde_json::from_str(&self.sort_columns).unwrap_or_default();
+        cols.into_iter()
+            .map(|c| {
+                let c_upper = c.to_uppercase();
+                let name = if c_upper.ends_with(" DESC") {
+                    c[..c.len() - 5].trim().to_string()
+                } else if c_upper.ends_with(" ASC") {
+                    c[..c.len() - 4].trim().to_string()
+                } else {
+                    c
+                };
+                (name, false)
+            })
+            .collect()
+    }
+}
+
 /// Async interface for catalog operations.
 #[async_trait]
 pub trait CatalogManager: Debug + Send + Sync {
@@ -385,4 +424,43 @@ pub trait CatalogManager: Debug + Send + Sync {
 
     /// Delete a dataset by ID. Returns the deleted dataset if it existed.
     async fn delete_dataset(&self, id: &str) -> Result<Option<DatasetInfo>>;
+
+    // Index management methods
+
+    /// Create a new index with its parquet path. Returns the index ID.
+    async fn create_index(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+        index_name: &str,
+        sort_columns: &[String],
+        parquet_path: Option<&str>,
+    ) -> Result<i32>;
+
+    /// Get an index by name.
+    async fn get_index(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+        index_name: &str,
+    ) -> Result<Option<IndexInfo>>;
+
+    /// List all indexes for a table.
+    async fn list_indexes(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<Vec<IndexInfo>>;
+
+    /// Delete an index. Returns the deleted index if it existed.
+    async fn delete_index(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+        index_name: &str,
+    ) -> Result<Option<IndexInfo>>;
 }

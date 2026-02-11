@@ -1,7 +1,7 @@
 use crate::catalog::backend::CatalogBackend;
 use crate::catalog::manager::{
-    CatalogManager, ConnectionInfo, DatasetInfo, OptimisticLock, PendingDeletion, QueryResult,
-    QueryResultRow, ResultStatus, ResultUpdate, TableInfo, UploadInfo,
+    CatalogManager, ConnectionInfo, DatasetInfo, IndexInfo, OptimisticLock, PendingDeletion,
+    QueryResult, QueryResultRow, ResultStatus, ResultUpdate, TableInfo, UploadInfo,
 };
 use crate::catalog::migrations::{
     run_migrations, wrap_migration_sql, CatalogMigrations, Migration, SQLITE_MIGRATIONS,
@@ -10,7 +10,7 @@ use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::{Sqlite, SqlitePool};
+use sqlx::{Row, Sqlite, SqlitePool};
 use std::fmt::{self, Debug, Formatter};
 use std::str::FromStr;
 use tracing::warn;
@@ -936,6 +936,129 @@ impl CatalogManager for SqliteCatalogManager {
         }
 
         Ok(dataset)
+    }
+
+    // Index management methods
+
+    async fn create_index(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+        index_name: &str,
+        sort_columns: &[String],
+        parquet_path: Option<&str>,
+    ) -> Result<i32> {
+        let sort_columns_json = serde_json::to_string(sort_columns)?;
+
+        let result = sqlx::query(
+            "INSERT INTO indexes (connection_id, schema_name, table_name, index_name, sort_columns, parquet_path)
+             VALUES (?, ?, ?, ?, ?, ?)
+             RETURNING id",
+        )
+        .bind(connection_id)
+        .bind(schema_name)
+        .bind(table_name)
+        .bind(index_name)
+        .bind(&sort_columns_json)
+        .bind(parquet_path)
+        .fetch_one(self.backend.pool())
+        .await?;
+
+        Ok(result.get::<i32, _>("id"))
+    }
+
+    async fn get_index(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+        index_name: &str,
+    ) -> Result<Option<IndexInfo>> {
+        let row: Option<IndexInfoRow> = sqlx::query_as(
+            "SELECT id, connection_id, schema_name, table_name, index_name, sort_columns, parquet_path, created_at
+             FROM indexes
+             WHERE connection_id = ? AND schema_name = ? AND table_name = ? AND index_name = ?",
+        )
+        .bind(connection_id)
+        .bind(schema_name)
+        .bind(table_name)
+        .bind(index_name)
+        .fetch_optional(self.backend.pool())
+        .await?;
+
+        Ok(row.map(|r| r.into_index_info()))
+    }
+
+    async fn list_indexes(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<Vec<IndexInfo>> {
+        let rows: Vec<IndexInfoRow> = sqlx::query_as(
+            "SELECT id, connection_id, schema_name, table_name, index_name, sort_columns, parquet_path, created_at
+             FROM indexes
+             WHERE connection_id = ? AND schema_name = ? AND table_name = ?
+             ORDER BY index_name",
+        )
+        .bind(connection_id)
+        .bind(schema_name)
+        .bind(table_name)
+        .fetch_all(self.backend.pool())
+        .await?;
+
+        Ok(rows.into_iter().map(|r| r.into_index_info()).collect())
+    }
+
+    async fn delete_index(
+        &self,
+        connection_id: &str,
+        schema_name: &str,
+        table_name: &str,
+        index_name: &str,
+    ) -> Result<Option<IndexInfo>> {
+        let row: Option<IndexInfoRow> = sqlx::query_as(
+            "DELETE FROM indexes
+             WHERE connection_id = ? AND schema_name = ? AND table_name = ? AND index_name = ?
+             RETURNING id, connection_id, schema_name, table_name, index_name, sort_columns, parquet_path, created_at",
+        )
+        .bind(connection_id)
+        .bind(schema_name)
+        .bind(table_name)
+        .bind(index_name)
+        .fetch_optional(self.backend.pool())
+        .await?;
+
+        Ok(row.map(|r| r.into_index_info()))
+    }
+}
+
+/// Row type for index queries (SQLite stores timestamps as strings)
+#[derive(sqlx::FromRow)]
+struct IndexInfoRow {
+    id: i32,
+    connection_id: String,
+    schema_name: String,
+    table_name: String,
+    index_name: String,
+    sort_columns: String,
+    parquet_path: Option<String>,
+    created_at: String,
+}
+
+impl IndexInfoRow {
+    fn into_index_info(self) -> IndexInfo {
+        IndexInfo {
+            id: self.id,
+            connection_id: self.connection_id,
+            schema_name: self.schema_name,
+            table_name: self.table_name,
+            index_name: self.index_name,
+            sort_columns: self.sort_columns,
+            parquet_path: self.parquet_path,
+            created_at: self.created_at.parse().unwrap_or_else(|_| Utc::now()),
+        }
     }
 }
 
