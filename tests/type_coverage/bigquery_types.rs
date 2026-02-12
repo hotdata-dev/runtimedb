@@ -19,19 +19,17 @@
 use arrow_schema::DataType;
 use gcp_bigquery_client::model::query_request::QueryRequest;
 use gcp_bigquery_client::Client;
-use std::sync::Arc;
 use tempfile::TempDir;
 
-use runtimedb::catalog::{CatalogManager, SqliteCatalogManager};
 use runtimedb::datafetch::{DataFetcher, NativeFetcher};
-use runtimedb::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
 use runtimedb::source::{Credential, Source};
 
 use crate::capturing_writer::CapturingBatchWriter;
 use crate::fixtures::{Constraints, FixtureCategory};
 use crate::harness::{
-    get_val_column_type, validate_batch_values, ComparisonMode, ExpectedOutput, FailureReason,
-    SemanticType, TestReport, TestShape, TestValue, TypeTestCase, TypeTestResult,
+    create_test_secret_manager, get_val_column_type, validate_batch_values, ComparisonMode,
+    ExpectedOutput, FailureReason, SecretManager, SemanticType, TestReport, TestShape, TestValue,
+    TypeTestCase, TypeTestResult,
 };
 
 /// Secret name used for BigQuery credentials in tests.
@@ -44,22 +42,6 @@ fn bigquery_env() -> Option<(String, String, String)> {
     let project_id = std::env::var("BQ_PROJECT_ID").ok()?;
     let dataset = std::env::var("BQ_DATASET").ok()?;
     Some((key_path, project_id, dataset))
-}
-
-/// Create a test SecretManager for use in tests.
-async fn create_test_secret_manager(dir: &TempDir) -> SecretManager {
-    let db_path = dir.path().join("test_catalog.db");
-    let catalog = Arc::new(
-        SqliteCatalogManager::new(db_path.to_str().unwrap())
-            .await
-            .unwrap(),
-    );
-    catalog.run_migrations().await.unwrap();
-
-    let key = [0x42u8; 32];
-    let backend = Arc::new(EncryptedCatalogBackend::new(key, catalog.clone()));
-
-    SecretManager::new(backend, catalog, ENCRYPTED_PROVIDER_TYPE)
 }
 
 /// Execute a SQL statement against BigQuery (for DDL/DML setup).
@@ -684,8 +666,7 @@ async fn test_bigquery_type_coverage() {
     let mut report = TestReport::new("bigquery");
     for case in &test_cases {
         println!("  Testing {}...", case.db_type);
-        let result =
-            run_test_case(&client, &project_id, &dataset, &source, &secrets, case).await;
+        let result = run_test_case(&client, &project_id, &dataset, &source, &secrets, case).await;
         match &result.status {
             crate::harness::TestStatus::Passed => println!("    PASSED"),
             crate::harness::TestStatus::Failed(reason) => {
