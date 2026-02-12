@@ -616,7 +616,7 @@ async fn test_name_only_rename_preserves_version() -> Result<()> {
     let created = create_saved_query(&router, "old name", "SELECT 1").await?;
     let id = created["id"].as_str().unwrap();
 
-    // Rename without changing SQL
+    // Rename without providing SQL at all
     let uri = PATH_SAVED_QUERY.replace("{id}", id);
     let response = send_request(
         &router,
@@ -625,7 +625,7 @@ async fn test_name_only_rename_preserves_version() -> Result<()> {
             .uri(&uri)
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_string(
-                &json!({ "name": "new name", "sql": "SELECT 1" }),
+                &json!({ "name": "new name" }),
             )?))?,
     )
     .await?;
@@ -761,5 +761,28 @@ async fn test_list_saved_queries_stable_with_duplicate_names() -> Result<()> {
     all_ids.dedup();
     assert_eq!(all_ids.len(), 5);
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_empty_body_rejected() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let created = create_saved_query(&router, "empty update", "SELECT 1").await?;
+    let id = created["id"].as_str().unwrap();
+
+    // Send update with neither name nor sql
+    let uri = PATH_SAVED_QUERY.replace("{id}", id);
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("PUT")
+            .uri(&uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&json!({}))?))?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     Ok(())
 }
