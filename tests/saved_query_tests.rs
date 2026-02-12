@@ -577,3 +577,189 @@ async fn test_ad_hoc_query_run_has_null_linkage() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_noop_update_preserves_version() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let created = create_saved_query(&router, "noop test", "SELECT 1").await?;
+    let id = created["id"].as_str().unwrap();
+
+    // Update with the exact same SQL and no name change
+    let uri = PATH_SAVED_QUERY.replace("{id}", id);
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("PUT")
+            .uri(&uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(
+                &json!({ "sql": "SELECT 1" }),
+            )?))?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await?;
+
+    // Version should not increment on no-op
+    assert_eq!(json["latest_version"], 1);
+    assert_eq!(json["name"], "noop test");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_name_only_rename_preserves_version() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let created = create_saved_query(&router, "old name", "SELECT 1").await?;
+    let id = created["id"].as_str().unwrap();
+
+    // Rename without changing SQL
+    let uri = PATH_SAVED_QUERY.replace("{id}", id);
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("PUT")
+            .uri(&uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(
+                &json!({ "name": "new name", "sql": "SELECT 1" }),
+            )?))?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await?;
+
+    // Name changed but version should NOT increment
+    assert_eq!(json["name"], "new name");
+    assert_eq!(json["latest_version"], 1);
+
+    // Verify only 1 version exists
+    let versions_uri = PATH_SAVED_QUERY_VERSIONS.replace("{id}", id);
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("GET")
+            .uri(&versions_uri)
+            .body(Body::empty())?,
+    )
+    .await?;
+
+    let json = response_json(response).await?;
+    let versions = json["versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_execute_saved_query_truly_empty_body() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let created = create_saved_query(&router, "empty body test", "SELECT 1 as num").await?;
+    let id = created["id"].as_str().unwrap();
+
+    // Send POST with completely empty body (no Content-Type header either)
+    let uri = PATH_SAVED_QUERY_EXECUTE.replace("{id}", id);
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri(&uri)
+            .body(Body::empty())?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await?;
+    assert_eq!(json["rows"][0][0], 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_execute_saved_query_empty_body_with_content_type() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let created = create_saved_query(&router, "ct empty test", "SELECT 1 as num").await?;
+    let id = created["id"].as_str().unwrap();
+
+    // Send POST with Content-Type: application/json but empty body
+    let uri = PATH_SAVED_QUERY_EXECUTE.replace("{id}", id);
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri(&uri)
+            .header("content-type", "application/json")
+            .body(Body::empty())?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await?;
+    assert_eq!(json["rows"][0][0], 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_saved_queries_stable_with_duplicate_names() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    // Create 5 queries all named "dup"
+    let mut ids = Vec::new();
+    for i in 0..5 {
+        let json = create_saved_query(&router, "dup", &format!("SELECT {}", i)).await?;
+        ids.push(json["id"].as_str().unwrap().to_string());
+    }
+
+    // Fetch page 1 (3 items)
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("GET")
+            .uri(format!("{}?limit=3&offset=0", PATH_SAVED_QUERIES))
+            .body(Body::empty())?,
+    )
+    .await?;
+    let json = response_json(response).await?;
+    assert_eq!(json["count"], 3);
+    assert!(json["has_more"].as_bool().unwrap());
+    let page1: Vec<String> = json["queries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|q| q["id"].as_str().unwrap().to_string())
+        .collect();
+
+    // Fetch page 2 (2 items)
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("GET")
+            .uri(format!("{}?limit=3&offset=3", PATH_SAVED_QUERIES))
+            .body(Body::empty())?,
+    )
+    .await?;
+    let json = response_json(response).await?;
+    assert_eq!(json["count"], 2);
+    assert!(!json["has_more"].as_bool().unwrap());
+    let page2: Vec<String> = json["queries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|q| q["id"].as_str().unwrap().to_string())
+        .collect();
+
+    // All pages should have distinct IDs (no duplicates, no skips)
+    let mut all_ids: Vec<String> = page1.into_iter().chain(page2).collect();
+    all_ids.sort();
+    all_ids.dedup();
+    assert_eq!(all_ids.len(), 5);
+
+    Ok(())
+}

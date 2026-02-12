@@ -1166,6 +1166,105 @@ macro_rules! catalog_manager_tests {
             }
 
             #[tokio::test]
+            async fn saved_query_noop_update_skips_version() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+                let sq = catalog
+                    .create_saved_query("noop_test", &snap.id)
+                    .await
+                    .unwrap();
+                assert_eq!(sq.latest_version, 1);
+
+                // Update with the exact same SQL and no name change
+                let updated = catalog
+                    .update_saved_query(&sq.id, None, &snap.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+
+                // Should still be version 1 — no new version created
+                assert_eq!(updated.latest_version, 1);
+                assert_eq!(updated.name, "noop_test");
+
+                let (versions, _) = catalog
+                    .list_saved_query_versions(&sq.id, 100, 0)
+                    .await
+                    .unwrap();
+                assert_eq!(versions.len(), 1);
+            }
+
+            #[tokio::test]
+            async fn saved_query_name_only_rename_skips_version() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+                let sq = catalog
+                    .create_saved_query("original_name", &snap.id)
+                    .await
+                    .unwrap();
+                assert_eq!(sq.latest_version, 1);
+
+                // Rename without changing SQL
+                let updated = catalog
+                    .update_saved_query(&sq.id, Some("new_name"), &snap.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+
+                // Name should be updated but version should NOT increment
+                assert_eq!(updated.name, "new_name");
+                assert_eq!(updated.latest_version, 1);
+
+                // Only one version should exist
+                let (versions, _) = catalog
+                    .list_saved_query_versions(&sq.id, 100, 0)
+                    .await
+                    .unwrap();
+                assert_eq!(versions.len(), 1);
+                assert_eq!(versions[0].sql_text, "SELECT 1");
+            }
+
+            #[tokio::test]
+            async fn saved_query_list_stable_with_duplicate_names() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                // Create 5 saved queries all named "dup"
+                let mut ids = Vec::new();
+                for i in 0..5 {
+                    let snap = catalog
+                        .get_or_create_snapshot(&format!("SELECT {}", i))
+                        .await
+                        .unwrap();
+                    let sq = catalog
+                        .create_saved_query("dup", &snap.id)
+                        .await
+                        .unwrap();
+                    ids.push(sq.id);
+                }
+
+                // Fetch page 1 (3 items) and page 2 (2 items)
+                let (page1, has_more) = catalog.list_saved_queries(3, 0).await.unwrap();
+                assert_eq!(page1.len(), 3);
+                assert!(has_more);
+
+                let (page2, has_more2) = catalog.list_saved_queries(3, 3).await.unwrap();
+                assert_eq!(page2.len(), 2);
+                assert!(!has_more2);
+
+                // All pages combined should have exactly the 5 distinct IDs, no duplicates
+                let mut all_ids: Vec<String> = page1.iter().map(|q| q.id.clone())
+                    .chain(page2.iter().map(|q| q.id.clone()))
+                    .collect();
+                all_ids.sort();
+                all_ids.dedup();
+                assert_eq!(all_ids.len(), 5);
+            }
+
+            #[tokio::test]
             async fn delete_saved_query_preserves_query_run_history() {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();
