@@ -981,7 +981,7 @@ impl CatalogManager for PostgresCatalogManager {
         let rows: Vec<SavedQueryRowPg> = sqlx::query_as(
             "SELECT id, name, latest_version, created_at, updated_at \
              FROM saved_queries \
-             ORDER BY name ASC \
+             ORDER BY name ASC, id ASC \
              LIMIT $1 OFFSET $2",
         )
         .bind(fetch_limit)
@@ -1036,36 +1036,55 @@ impl CatalogManager for PostgresCatalogManager {
         .fetch_optional(&mut *tx)
         .await?;
 
-        if let Some((current_sid,)) = current_snapshot {
-            if current_sid == snapshot_id && effective_name == existing.name {
-                tx.commit().await?;
-                return Ok(Some(SavedQuery::from(existing)));
-            }
+        let sql_unchanged = current_snapshot
+            .as_ref()
+            .is_some_and(|(sid,)| sid == snapshot_id);
+        let name_unchanged = effective_name == existing.name;
+
+        if sql_unchanged && name_unchanged {
+            // Complete no-op — nothing to change
+            tx.commit().await?;
+            return Ok(Some(SavedQuery::from(existing)));
         }
 
-        let new_version = existing.latest_version + 1;
         let now = Utc::now();
 
-        sqlx::query(
-            "INSERT INTO saved_query_versions (saved_query_id, version, snapshot_id, created_at) \
-             VALUES ($1, $2, $3, $4)",
-        )
-        .bind(id)
-        .bind(new_version)
-        .bind(snapshot_id)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
+        if sql_unchanged {
+            // Name-only rename — no new version needed
+            sqlx::query("UPDATE saved_queries SET name = $1, updated_at = $2 WHERE id = $3")
+                .bind(effective_name)
+                .bind(now)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        } else {
+            // SQL changed — create a new version
+            let new_version = existing
+                .latest_version
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("Version limit reached for saved query '{}'", id))?;
 
-        sqlx::query(
-            "UPDATE saved_queries SET name = $1, latest_version = $2, updated_at = $3 WHERE id = $4",
-        )
-        .bind(effective_name)
-        .bind(new_version)
-        .bind(now)
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
+            sqlx::query(
+                "INSERT INTO saved_query_versions (saved_query_id, version, snapshot_id, created_at) \
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(id)
+            .bind(new_version)
+            .bind(snapshot_id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+
+            sqlx::query(
+                "UPDATE saved_queries SET name = $1, latest_version = $2, updated_at = $3 WHERE id = $4",
+            )
+            .bind(effective_name)
+            .bind(new_version)
+            .bind(now)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        }
 
         let row: SavedQueryRowPg = sqlx::query_as(
             "SELECT id, name, latest_version, created_at, updated_at \
@@ -1132,7 +1151,7 @@ impl CatalogManager for PostgresCatalogManager {
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<SavedQueryVersion>, bool)> {
-        let fetch_limit = limit.saturating_add(1);
+        let fetch_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
         let rows: Vec<SavedQueryVersionRowPg> = sqlx::query_as(
             "SELECT sqv.saved_query_id, sqv.version, sqv.snapshot_id, \
              snap.sql_text, snap.sql_hash, sqv.created_at \
@@ -1143,7 +1162,7 @@ impl CatalogManager for PostgresCatalogManager {
              LIMIT $2 OFFSET $3",
         )
         .bind(saved_query_id)
-        .bind(i64::try_from(fetch_limit).unwrap_or(i64::MAX))
+        .bind(fetch_limit)
         .bind(i64::try_from(offset).unwrap_or(i64::MAX))
         .fetch_all(self.backend.pool())
         .await?;

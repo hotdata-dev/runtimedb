@@ -1,10 +1,10 @@
 use crate::http::controllers::query_controller::serialize_batches;
 use crate::http::error::ApiError;
 use crate::http::models::{
-    CreateSavedQueryRequest, CreateSavedQueryResponse, ExecuteSavedQueryRequest,
-    ListSavedQueriesParams, ListSavedQueriesResponse, ListSavedQueryVersionsParams,
-    ListSavedQueryVersionsResponse, QueryResponse, SavedQueryDetail, SavedQuerySummary,
-    SavedQueryVersionInfo, UpdateSavedQueryRequest,
+    CreateSavedQueryRequest, ExecuteSavedQueryRequest, ListSavedQueriesParams,
+    ListSavedQueriesResponse, ListSavedQueryVersionsParams, ListSavedQueryVersionsResponse,
+    QueryResponse, SavedQueryDetail, SavedQuerySummary, SavedQueryVersionInfo,
+    UpdateSavedQueryRequest,
 };
 use crate::RuntimeEngine;
 use axum::{
@@ -27,7 +27,7 @@ const MAX_RAW_INPUT_LENGTH: usize = 2_000_000;
 pub async fn create_saved_query(
     State(engine): State<Arc<RuntimeEngine>>,
     Json(request): Json<CreateSavedQueryRequest>,
-) -> Result<(StatusCode, Json<CreateSavedQueryResponse>), ApiError> {
+) -> Result<(StatusCode, Json<SavedQueryDetail>), ApiError> {
     if request.name.len() > MAX_RAW_INPUT_LENGTH || request.sql.len() > MAX_RAW_INPUT_LENGTH {
         return Err(ApiError::bad_request(
             "Request field exceeds maximum length",
@@ -74,7 +74,7 @@ pub async fn create_saved_query(
 
     Ok((
         StatusCode::CREATED,
-        Json(CreateSavedQueryResponse {
+        Json(SavedQueryDetail {
             id: saved_query.id,
             name: saved_query.name,
             latest_version: saved_query.latest_version,
@@ -288,9 +288,15 @@ pub async fn list_saved_query_versions(
 pub async fn execute_saved_query(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(id): Path<String>,
-    body: Option<Json<ExecuteSavedQueryRequest>>,
+    body: axum::body::Bytes,
 ) -> Result<Json<QueryResponse>, ApiError> {
-    let version = body.and_then(|Json(r)| r.version);
+    let version = if body.is_empty() {
+        None
+    } else {
+        let req: ExecuteSavedQueryRequest = serde_json::from_slice(&body)
+            .map_err(|e| ApiError::bad_request(format!("Invalid JSON: {}", e)))?;
+        req.version
+    };
 
     // engine.execute_saved_query returns NotFoundError (→ 404) if the saved
     // query or requested version does not exist, so no pre-check is needed.

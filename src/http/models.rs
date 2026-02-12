@@ -603,18 +603,6 @@ pub struct SavedQueryDetail {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Response body for POST /v1/queries
-#[derive(Debug, Serialize)]
-pub struct CreateSavedQueryResponse {
-    pub id: String,
-    pub name: String,
-    pub latest_version: i32,
-    pub sql: String,
-    pub sql_hash: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
 /// Response body for GET /v1/queries
 #[derive(Debug, Serialize)]
 pub struct ListSavedQueriesResponse {

@@ -1038,14 +1038,14 @@ impl CatalogManager for SqliteCatalogManager {
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<SavedQuery>, bool)> {
-        let fetch_limit = limit.saturating_add(1);
+        let fetch_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
         let rows: Vec<SavedQueryRow> = sqlx::query_as(
             "SELECT id, name, latest_version, created_at, updated_at \
              FROM saved_queries \
-             ORDER BY name ASC \
+             ORDER BY name ASC, id ASC \
              LIMIT ? OFFSET ?",
         )
-        .bind(i64::try_from(fetch_limit).unwrap_or(i64::MAX))
+        .bind(fetch_limit)
         .bind(i64::try_from(offset).unwrap_or(i64::MAX))
         .fetch_all(self.backend.pool())
         .await?;
@@ -1105,35 +1105,55 @@ impl CatalogManager for SqliteCatalogManager {
             .fetch_optional(&mut *conn)
             .await?;
 
-            if let Some((current_sid,)) = current_snapshot {
-                if current_sid == snapshot_id && effective_name == existing.name {
-                    return Ok(Some(existing.into_saved_query()));
-                }
+            let sql_unchanged = current_snapshot
+                .as_ref()
+                .is_some_and(|(sid,)| sid == snapshot_id);
+            let name_unchanged = effective_name == existing.name;
+
+            if sql_unchanged && name_unchanged {
+                // Complete no-op — nothing to change
+                return Ok(Some(existing.into_saved_query()));
             }
 
-            let new_version = existing.latest_version + 1;
             let now = Utc::now().to_rfc3339();
 
-            sqlx::query(
-                "INSERT INTO saved_query_versions (saved_query_id, version, snapshot_id, created_at) \
-                 VALUES (?, ?, ?, ?)",
-            )
-            .bind(id)
-            .bind(new_version)
-            .bind(snapshot_id)
-            .bind(&now)
-            .execute(&mut *conn)
-            .await?;
+            if sql_unchanged {
+                // Name-only rename — no new version needed
+                sqlx::query(
+                    "UPDATE saved_queries SET name = ?, updated_at = ? WHERE id = ?",
+                )
+                .bind(effective_name)
+                .bind(&now)
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
+            } else {
+                // SQL changed — create a new version
+                let new_version = existing.latest_version.checked_add(1).ok_or_else(|| {
+                    anyhow::anyhow!("Version limit reached for saved query '{}'", id)
+                })?;
 
-            sqlx::query(
-                "UPDATE saved_queries SET name = ?, latest_version = ?, updated_at = ? WHERE id = ?",
-            )
-            .bind(effective_name)
-            .bind(new_version)
-            .bind(&now)
-            .bind(id)
-            .execute(&mut *conn)
-            .await?;
+                sqlx::query(
+                    "INSERT INTO saved_query_versions (saved_query_id, version, snapshot_id, created_at) \
+                     VALUES (?, ?, ?, ?)",
+                )
+                .bind(id)
+                .bind(new_version)
+                .bind(snapshot_id)
+                .bind(&now)
+                .execute(&mut *conn)
+                .await?;
+
+                sqlx::query(
+                    "UPDATE saved_queries SET name = ?, latest_version = ?, updated_at = ? WHERE id = ?",
+                )
+                .bind(effective_name)
+                .bind(new_version)
+                .bind(&now)
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
+            }
 
             let row: SavedQueryRow = sqlx::query_as(
                 "SELECT id, name, latest_version, created_at, updated_at \
@@ -1235,7 +1255,7 @@ impl CatalogManager for SqliteCatalogManager {
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<SavedQueryVersion>, bool)> {
-        let fetch_limit = limit.saturating_add(1);
+        let fetch_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
         let rows: Vec<SavedQueryVersionRow> = sqlx::query_as(
             "SELECT sqv.saved_query_id, sqv.version, sqv.snapshot_id, \
              snap.sql_text, snap.sql_hash, sqv.created_at \
@@ -1246,7 +1266,7 @@ impl CatalogManager for SqliteCatalogManager {
              LIMIT ? OFFSET ?",
         )
         .bind(saved_query_id)
-        .bind(i64::try_from(fetch_limit).unwrap_or(i64::MAX))
+        .bind(fetch_limit)
         .bind(i64::try_from(offset).unwrap_or(i64::MAX))
         .fetch_all(self.backend.pool())
         .await?;
