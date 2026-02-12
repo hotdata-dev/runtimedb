@@ -159,7 +159,10 @@ pub async fn update_saved_query(
     Path(id): Path<String>,
     Json(request): Json<UpdateSavedQueryRequest>,
 ) -> Result<Json<SavedQueryDetail>, ApiError> {
-    let raw_too_large = request.sql.len() > MAX_RAW_INPUT_LENGTH
+    let raw_too_large = request
+        .sql
+        .as_ref()
+        .is_some_and(|s| s.len() > MAX_RAW_INPUT_LENGTH)
         || request
             .name
             .as_ref()
@@ -170,15 +173,17 @@ pub async fn update_saved_query(
         ));
     }
 
-    let sql = request.sql.trim().to_string();
-    if sql.is_empty() {
-        return Err(ApiError::bad_request("SQL cannot be empty"));
-    }
-    if sql.len() > MAX_SQL_LENGTH {
-        return Err(ApiError::bad_request(format!(
-            "SQL exceeds maximum length of {} characters",
-            MAX_SQL_LENGTH
-        )));
+    let trimmed_sql = request.sql.as_deref().map(str::trim);
+    if let Some(sql) = trimmed_sql {
+        if sql.is_empty() {
+            return Err(ApiError::bad_request("SQL cannot be empty"));
+        }
+        if sql.len() > MAX_SQL_LENGTH {
+            return Err(ApiError::bad_request(format!(
+                "SQL exceeds maximum length of {} characters",
+                MAX_SQL_LENGTH
+            )));
+        }
     }
 
     let trimmed_name = request.name.as_deref().map(str::trim);
@@ -194,8 +199,14 @@ pub async fn update_saved_query(
         }
     }
 
+    if trimmed_name.is_none() && trimmed_sql.is_none() {
+        return Err(ApiError::bad_request(
+            "At least one of 'name' or 'sql' must be provided",
+        ));
+    }
+
     let saved_query = engine
-        .update_saved_query(&id, trimmed_name, &sql)
+        .update_saved_query(&id, trimmed_name, trimmed_sql)
         .await
         .map_err(|e| -> ApiError { e.into() })?
         .ok_or_else(|| ApiError::not_found(format!("Saved query '{}' not found", id)))?;
@@ -285,6 +296,7 @@ pub async fn list_saved_query_versions(
 }
 
 /// Handler for POST /v1/queries/{id}/execute
+#[tracing::instrument(name = "http_execute_saved_query", skip(engine, body))]
 pub async fn execute_saved_query(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(id): Path<String>,

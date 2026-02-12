@@ -565,7 +565,9 @@ pub struct UpdateSavedQueryRequest {
     /// Optional new name. When omitted the existing name is preserved.
     #[serde(default)]
     pub name: Option<String>,
-    pub sql: String,
+    /// Optional new SQL. When omitted the existing SQL is preserved.
+    #[serde(default)]
+    pub sql: Option<String>,
 }
 
 /// Request body for POST /v1/queries/{id}/execute

@@ -612,14 +612,17 @@ impl RuntimeEngine {
     /// remain in `running` status indefinitely. A periodic cleanup job to mark stale
     /// `running` records as `failed` should be added in a future iteration.
     pub async fn execute_query_with_persistence(&self, sql: &str) -> Result<TrackedQueryResult> {
-        self.execute_query_with_persistence_inner(sql, None, None)
+        self.execute_query_with_persistence_inner(sql, None, None, None)
             .await
     }
 
     /// Inner method that supports optional saved query linkage.
+    ///
+    /// When `known_snapshot_id` is provided, skips the `get_or_create_snapshot`
+    /// call (useful when the caller has already resolved the snapshot).
     #[tracing::instrument(
         name = "execute_query_with_persistence",
-        skip(self, sql),
+        skip(self, sql, known_snapshot_id),
         fields(
             runtimedb.query_run_id = tracing::field::Empty,
             runtimedb.result_id = tracing::field::Empty,
@@ -631,10 +634,14 @@ impl RuntimeEngine {
         sql: &str,
         saved_query_id: Option<&str>,
         saved_query_version: Option<i32>,
+        known_snapshot_id: Option<&str>,
     ) -> Result<TrackedQueryResult> {
         let start = Instant::now();
         let query_run_id = crate::id::generate_query_run_id();
-        let snapshot = self.catalog.get_or_create_snapshot(sql).await?;
+        let snapshot_id = match known_snapshot_id {
+            Some(id) => id.to_string(),
+            None => self.catalog.get_or_create_snapshot(sql).await?.id,
+        };
         let trace_id = current_trace_id();
 
         tracing::Span::current().record("runtimedb.query_run_id", &query_run_id);
@@ -643,7 +650,7 @@ impl RuntimeEngine {
         self.catalog
             .create_query_run(CreateQueryRun {
                 id: &query_run_id,
-                snapshot_id: &snapshot.id,
+                snapshot_id: &snapshot_id,
                 trace_id: trace_id.as_deref(),
                 saved_query_id,
                 saved_query_version,
@@ -1034,11 +1041,33 @@ impl RuntimeEngine {
         &self,
         id: &str,
         name: Option<&str>,
-        sql: &str,
+        sql: Option<&str>,
     ) -> Result<Option<SavedQuery>> {
-        let snapshot = self.catalog.get_or_create_snapshot(sql).await?;
+        let snapshot_id = match sql {
+            Some(sql) => self.catalog.get_or_create_snapshot(sql).await?.id,
+            None => {
+                // No SQL provided — resolve the current version's snapshot_id
+                let sq = self.catalog.get_saved_query(id).await?;
+                let sq = match sq {
+                    Some(sq) => sq,
+                    None => return Ok(None),
+                };
+                let version = self
+                    .catalog
+                    .get_saved_query_version(id, sq.latest_version)
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Latest version {} missing for saved query '{}'",
+                            sq.latest_version,
+                            id
+                        )
+                    })?;
+                version.snapshot_id
+            }
+        };
         self.catalog
-            .update_saved_query(id, name, &snapshot.id)
+            .update_saved_query(id, name, &snapshot_id)
             .await
     }
 
@@ -1095,11 +1124,13 @@ impl RuntimeEngine {
                 ))
             })?;
 
-        // Execute with saved query linkage
+        // Execute with saved query linkage, passing the already-resolved snapshot_id
+        // to avoid a redundant get_or_create_snapshot round-trip.
         self.execute_query_with_persistence_inner(
             &version_record.sql_text,
             Some(saved_query_id),
             Some(target_version),
+            Some(&version_record.snapshot_id),
         )
         .await
     }

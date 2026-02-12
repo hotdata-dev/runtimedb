@@ -932,6 +932,12 @@ impl CatalogManager for SqliteCatalogManager {
         let id = crate::id::generate_snapshot_id();
         let now = Utc::now().to_rfc3339();
 
+        // Use a single connection so the INSERT OR IGNORE and SELECT are
+        // guaranteed to see the same row, even if a concurrent DELETE were
+        // to run between them (snapshots are never deleted, but this is
+        // defensive).
+        let mut conn = self.backend.pool().acquire().await?;
+
         // INSERT OR IGNORE for idempotent upsert (race-safe via UNIQUE constraint)
         sqlx::query(
             "INSERT OR IGNORE INTO sql_snapshots (id, sql_hash, sql_text, created_at) \
@@ -941,7 +947,7 @@ impl CatalogManager for SqliteCatalogManager {
         .bind(&hash)
         .bind(sql_text)
         .bind(&now)
-        .execute(self.backend.pool())
+        .execute(&mut *conn)
         .await?;
 
         // Fetch the existing or newly inserted row
@@ -951,7 +957,7 @@ impl CatalogManager for SqliteCatalogManager {
         )
         .bind(&hash)
         .bind(sql_text)
-        .fetch_one(self.backend.pool())
+        .fetch_one(&mut *conn)
         .await?;
 
         Ok(row.into_sql_snapshot())
