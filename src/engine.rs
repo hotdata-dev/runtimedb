@@ -461,6 +461,30 @@ impl RuntimeEngine {
         self.catalog.clone()
     }
 
+    /// Check health of a connection by attempting to connect to the remote source.
+    /// Returns Ok(()) if healthy, or an error describing the failure.
+    pub async fn check_connection_health(
+        &self,
+        connection_id: &str,
+    ) -> Result<(), crate::datafetch::DataFetchError> {
+        let conn = self
+            .catalog
+            .get_connection(connection_id)
+            .await
+            .map_err(|e| crate::datafetch::DataFetchError::Connection(e.to_string()))?
+            .ok_or_else(|| {
+                crate::datafetch::DataFetchError::Connection(format!(
+                    "Connection '{}' not found",
+                    connection_id
+                ))
+            })?;
+
+        let source: Source = serde_json::from_str(&conn.config_json)
+            .map_err(|e| crate::datafetch::DataFetchError::Connection(e.to_string()))?;
+
+        self.orchestrator.check_health(&source).await
+    }
+
     /// List all configured connections.
     pub async fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
         self.catalog.list_connections().await

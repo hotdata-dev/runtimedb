@@ -204,6 +204,16 @@ pub struct ListConnectionsResponse {
     pub connections: Vec<ConnectionInfo>,
 }
 
+/// Response body for GET /connections/{connection_id}/health
+#[derive(Debug, Serialize)]
+pub struct ConnectionHealthResponse {
+    pub connection_id: String,
+    pub healthy: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub latency_ms: u64,
+}
+
 /// Response body for GET /connections/{connection_id}
 #[derive(Debug, Serialize)]
 pub struct GetConnectionResponse {

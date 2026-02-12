@@ -119,6 +119,14 @@ impl FetchOrchestrator {
         Ok((parquet_url, row_count))
     }
 
+    /// Check connectivity to a remote source.
+    /// Delegates to the underlying fetcher.
+    pub async fn check_health(&self, source: &Source) -> Result<(), DataFetchError> {
+        self.fetcher
+            .check_health(source, &self.secret_manager)
+            .await
+    }
+
     /// Discover tables from a remote source.
     /// Delegates to the underlying fetcher.
     pub async fn discover_tables(
@@ -297,6 +305,14 @@ mod tests {
                     ordinal_position: 0,
                 }],
             }])
+        }
+
+        async fn check_health(
+            &self,
+            _source: &Source,
+            _secrets: &SecretManager,
+        ) -> Result<(), DataFetchError> {
+            Ok(())
         }
 
         async fn fetch_table(

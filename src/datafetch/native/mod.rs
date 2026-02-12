@@ -142,10 +142,16 @@ mod tests {
     }
 }
 
+use std::time::Duration;
+
 use crate::datafetch::batch_writer::BatchWriter;
 use crate::datafetch::{DataFetchError, DataFetcher, TableMetadata};
 use crate::secrets::SecretManager;
 use crate::source::Source;
+
+/// Timeout for health check operations.
+/// Keeps health checks fast-failing for unreachable hosts.
+const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Native Rust driver-based data fetcher
 #[derive(Debug, Default)]
@@ -228,5 +234,36 @@ impl DataFetcher for NativeFetcher {
                 ducklake::fetch_table(source, secrets, catalog, schema, table, writer).await
             }
         }
+    }
+
+    #[tracing::instrument(
+        name = "check_health",
+        skip(self, source, secrets),
+        fields(runtimedb.backend = %source.source_type())
+    )]
+    async fn check_health(
+        &self,
+        source: &Source,
+        secrets: &SecretManager,
+    ) -> Result<(), DataFetchError> {
+        tokio::time::timeout(HEALTH_CHECK_TIMEOUT, async {
+            match source {
+                Source::Duckdb { .. } | Source::Motherduck { .. } => {
+                    duckdb::check_health(source, secrets).await
+                }
+                Source::Postgres { .. } => postgres::check_health(source, secrets).await,
+                Source::Iceberg { .. } => iceberg::check_health(source, secrets).await,
+                Source::Mysql { .. } => mysql::check_health(source, secrets).await,
+                Source::Snowflake { .. } => snowflake::check_health(source, secrets).await,
+                Source::Bigquery { .. } => bigquery::check_health(source, secrets).await,
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            Err(DataFetchError::Connection(format!(
+                "health check timed out after {}s",
+                HEALTH_CHECK_TIMEOUT.as_secs()
+            )))
+        })
     }
 }

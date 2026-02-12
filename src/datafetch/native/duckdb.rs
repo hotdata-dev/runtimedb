@@ -15,6 +15,23 @@ use crate::source::Source;
 // Arrow 56 IPC for duckdb compatibility (duckdb uses arrow 56)
 use arrow_ipc_56 as arrow56_ipc;
 
+/// Check connectivity to a DuckDB/MotherDuck source
+pub async fn check_health(
+    source: &Source,
+    secrets: &SecretManager,
+) -> Result<(), DataFetchError> {
+    let connection_string = resolve_connection_string(source, secrets).await?;
+    tokio::task::spawn_blocking(move || {
+        let conn = Connection::open(&connection_string)
+            .map_err(|e| DataFetchError::Connection(e.to_string()))?;
+        conn.execute("SELECT 1", [])
+            .map_err(|e| DataFetchError::Query(e.to_string()))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| DataFetchError::Connection(e.to_string()))?
+}
+
 /// Discover tables and columns from DuckDB/MotherDuck
 pub async fn discover_tables(
     source: &Source,

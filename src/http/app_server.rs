@@ -1,10 +1,11 @@
 use crate::http::controllers::{
-    create_connection_handler, create_dataset, create_secret_handler, delete_connection_handler,
-    delete_dataset, delete_secret_handler, get_connection_handler, get_dataset, get_result_handler,
-    get_secret_handler, health_handler, information_schema_handler, list_connections_handler,
-    list_datasets, list_query_runs_handler, list_results_handler, list_secrets_handler,
-    list_uploads, purge_connection_cache_handler, purge_table_cache_handler, query_handler,
-    refresh_handler, update_dataset, update_secret_handler, upload_file, MAX_UPLOAD_SIZE,
+    check_connection_health_handler, create_connection_handler, create_dataset,
+    create_secret_handler, delete_connection_handler, delete_dataset, delete_secret_handler,
+    get_connection_handler, get_dataset, get_result_handler, get_secret_handler, health_handler,
+    information_schema_handler, list_connections_handler, list_datasets, list_query_runs_handler,
+    list_results_handler, list_secrets_handler, list_uploads, purge_connection_cache_handler,
+    purge_table_cache_handler, query_handler, refresh_handler, update_dataset,
+    update_secret_handler, upload_file, MAX_UPLOAD_SIZE,
 };
 use crate::RuntimeEngine;
 use axum::extract::DefaultBodyLimit;
@@ -80,6 +81,7 @@ pub const PATH_HEALTH: &str = "/health";
 pub const PATH_REFRESH: &str = "/refresh";
 pub const PATH_CONNECTIONS: &str = "/connections";
 pub const PATH_CONNECTION: &str = "/connections/{connection_id}";
+pub const PATH_CONNECTION_HEALTH: &str = "/connections/{connection_id}/health";
 pub const PATH_CONNECTION_CACHE: &str = "/connections/{connection_id}/cache";
 pub const PATH_TABLE_CACHE: &str = "/connections/{connection_id}/tables/{schema}/{table}/cache";
 pub const PATH_SECRETS: &str = "/secrets";
@@ -107,6 +109,10 @@ impl AppServer {
                 .route(
                     PATH_CONNECTION,
                     get(get_connection_handler).delete(delete_connection_handler),
+                )
+                .route(
+                    PATH_CONNECTION_HEALTH,
+                    get(check_connection_health_handler),
                 )
                 .route(
                     PATH_CONNECTION_CACHE,

@@ -10,8 +10,9 @@ pub mod secrets_controller;
 pub mod uploads_controller;
 
 pub use connections_controller::{
-    create_connection_handler, delete_connection_handler, get_connection_handler,
-    list_connections_handler, purge_connection_cache_handler, purge_table_cache_handler,
+    check_connection_health_handler, create_connection_handler, delete_connection_handler,
+    get_connection_handler, list_connections_handler, purge_connection_cache_handler,
+    purge_table_cache_handler,
 };
 pub use datasets_controller::{
     create_dataset, delete_dataset, get_dataset, list_datasets, update_dataset,

@@ -84,6 +84,20 @@ async fn connect_with_ssl_retry(
     }
 }
 
+/// Check connectivity to a MySQL source
+pub async fn check_health(
+    source: &Source,
+    secrets: &SecretManager,
+) -> Result<(), DataFetchError> {
+    let options = resolve_connect_options(source, secrets).await?;
+    let mut conn = connect_with_ssl_retry(options).await?;
+    sqlx::query("SELECT 1")
+        .execute(&mut conn)
+        .await
+        .map_err(|e| DataFetchError::Query(e.to_string()))?;
+    Ok(())
+}
+
 /// Discover tables and columns from MySQL
 pub async fn discover_tables(
     source: &Source,

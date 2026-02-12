@@ -93,6 +93,26 @@ async fn connect_with_ssl_retry(connection_string: &str) -> Result<PgConnection,
     }
 }
 
+/// Check connectivity to a PostgreSQL source
+pub async fn check_health(
+    source: &Source,
+    secrets: &SecretManager,
+) -> Result<(), DataFetchError> {
+    let mut connection_string = resolve_connection_string(source, secrets).await?;
+    // Set a short connect timeout so we don't hang on unreachable hosts
+    if connection_string.contains('?') {
+        connection_string.push_str("&connect_timeout=5");
+    } else {
+        connection_string.push_str("?connect_timeout=5");
+    }
+    let mut conn = connect_with_ssl_retry(&connection_string).await?;
+    sqlx::query("SELECT 1")
+        .execute(&mut conn)
+        .await
+        .map_err(|e| DataFetchError::Query(e.to_string()))?;
+    Ok(())
+}
+
 /// Discover tables and columns from PostgreSQL
 pub async fn discover_tables(
     source: &Source,

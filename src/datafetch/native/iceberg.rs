@@ -103,6 +103,19 @@ async fn build_catalog(
     }
 }
 
+/// Check connectivity to an Iceberg catalog
+pub async fn check_health(
+    source: &Source,
+    secrets: &SecretManager,
+) -> Result<(), DataFetchError> {
+    let catalog = build_catalog(source, secrets).await?;
+    catalog
+        .list_namespaces(None)
+        .await
+        .map_err(|e| DataFetchError::Query(format!("Health check failed: {}", e)))?;
+    Ok(())
+}
+
 /// Discover tables and columns from an Iceberg catalog.
 /// Recursively discovers nested namespaces.
 pub async fn discover_tables(
