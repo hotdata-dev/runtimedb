@@ -9,6 +9,7 @@ mod fixtures;
 mod harness;
 
 // Backend-specific tests
+mod bigquery_types;
 mod duckdb_types;
 mod mysql_types;
 mod postgres_types;
