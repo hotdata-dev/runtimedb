@@ -168,7 +168,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push Docker image
         run: |
-          docker build -t ghcr.io/${{ github.repository }}:${{ needs.image_meta.outputs.image_tag }}-${{ matrix.arch }} .
+          docker build --provenance=false -t ghcr.io/${{ github.repository }}:${{ needs.image_meta.outputs.image_tag }}-${{ matrix.arch }} .
           docker push ghcr.io/${{ github.repository }}:${{ needs.image_meta.outputs.image_tag }}-${{ matrix.arch }}
 
   manifest:
