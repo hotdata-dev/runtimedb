@@ -2,6 +2,7 @@
 // The type mapping functions are the authoritative implementations that tests validate against.
 pub mod bigquery;
 pub mod duckdb;
+pub mod ducklake;
 pub mod iceberg;
 pub mod mysql;
 mod parquet_writer;
@@ -180,6 +181,7 @@ impl DataFetcher for NativeFetcher {
             Source::Mysql { .. } => mysql::discover_tables(source, secrets).await,
             Source::Snowflake { .. } => snowflake::discover_tables(source, secrets).await,
             Source::Bigquery { .. } => bigquery::discover_tables(source, secrets).await,
+            Source::Ducklake { .. } => ducklake::discover_tables(source, secrets).await,
         }?;
         tracing::Span::current().record("runtimedb.tables_found", tables.len());
         Ok(tables)
@@ -221,6 +223,9 @@ impl DataFetcher for NativeFetcher {
             }
             Source::Bigquery { .. } => {
                 bigquery::fetch_table(source, secrets, catalog, schema, table, writer).await
+            }
+            Source::Ducklake { .. } => {
+                ducklake::fetch_table(source, secrets, catalog, schema, table, writer).await
             }
         }
     }

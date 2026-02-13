@@ -2646,6 +2646,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b99e13947667b36ad713549237362afb054b2d8f8cc447751e23ec61202db07"
 
 [[package]]
+name = "datafusion-ducklake"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d611b5aef6cdbe0287352376813ec422367437474e3d3033414d98913dd72d0e"
+dependencies = [
+ "arrow 57.2.0",
+ "async-trait",
+ "datafusion",
+ "duckdb",
+ "futures",
+ "object_store 0.12.4",
+ "parquet 57.2.0",
+ "sqlx",
+ "thiserror 2.0.17",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "datafusion-execution"
 version = "51.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6311,6 +6331,7 @@ dependencies = [
  "clap",
  "config",
  "datafusion",
+ "datafusion-ducklake",
  "datafusion-tracing",
  "duckdb",
  "futures",

@@ -139,6 +139,16 @@ pub enum Source {
         #[serde(default)]
         credential: Credential,
     },
+    Ducklake {
+        /// Catalog database URL (e.g., "postgresql://user@host:5432/dbname")
+        catalog_url: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        s3_endpoint: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        s3_region: Option<String>,
+        #[serde(default)]
+        credential: Credential,
+    },
 }
 
 impl Source {
@@ -152,6 +162,7 @@ impl Source {
             Source::Iceberg { .. } => "iceberg",
             Source::Mysql { .. } => "mysql",
             Source::Bigquery { .. } => "bigquery",
+            Source::Ducklake { .. } => "ducklake",
         }
     }
 
@@ -177,6 +188,7 @@ impl Source {
             },
             Source::Mysql { credential, .. } => credential,
             Source::Bigquery { credential, .. } => credential,
+            Source::Ducklake { credential, .. } => credential,
         }
     }
 
@@ -265,6 +277,17 @@ impl Source {
                 project_id,
                 dataset,
                 region,
+                credential,
+            },
+            Source::Ducklake {
+                catalog_url,
+                s3_endpoint,
+                s3_region,
+                ..
+            } => Source::Ducklake {
+                catalog_url,
+                s3_endpoint,
+                s3_region,
                 credential,
             },
         }
@@ -817,6 +840,91 @@ mod tests {
             project_id: "proj".to_string(),
             dataset: None,
             region: "us".to_string(),
+            credential: Credential::None,
+        };
+        assert!(matches!(without_cred.credential(), Credential::None));
+    }
+
+    #[test]
+    fn test_ducklake_serialization() {
+        let source = Source::Ducklake {
+            catalog_url: "postgresql://user@localhost:5432/ducklake".to_string(),
+            s3_endpoint: Some("http://localhost:9000".to_string()),
+            s3_region: Some("us-east-1".to_string()),
+            credential: Credential::SecretRef {
+                id: "secr_dl".to_string(),
+            },
+        };
+
+        let json = serde_json::to_string(&source).unwrap();
+        assert!(json.contains(r#""type":"ducklake""#));
+        assert!(json.contains(r#""catalog_url":"postgresql://user@localhost:5432/ducklake""#));
+        assert!(json.contains(r#""s3_endpoint":"http://localhost:9000""#));
+        assert!(json.contains(r#""s3_region":"us-east-1""#));
+
+        let parsed: Source = serde_json::from_str(&json).unwrap();
+        assert_eq!(source, parsed);
+    }
+
+    #[test]
+    fn test_ducklake_without_s3_fields() {
+        let source = Source::Ducklake {
+            catalog_url: "postgresql://user@localhost:5432/ducklake".to_string(),
+            s3_endpoint: None,
+            s3_region: None,
+            credential: Credential::None,
+        };
+
+        let json = serde_json::to_string(&source).unwrap();
+        assert!(!json.contains(r#""s3_endpoint""#));
+        assert!(!json.contains(r#""s3_region""#));
+
+        let parsed: Source = serde_json::from_str(&json).unwrap();
+        assert_eq!(source, parsed);
+    }
+
+    #[test]
+    fn test_ducklake_source_type() {
+        let dl = Source::Ducklake {
+            catalog_url: "postgresql://localhost/db".to_string(),
+            s3_endpoint: None,
+            s3_region: None,
+            credential: Credential::None,
+        };
+        assert_eq!(dl.source_type(), "ducklake");
+    }
+
+    #[test]
+    fn test_ducklake_catalog_returns_none() {
+        let dl = Source::Ducklake {
+            catalog_url: "postgresql://localhost/db".to_string(),
+            s3_endpoint: None,
+            s3_region: None,
+            credential: Credential::None,
+        };
+        assert_eq!(dl.catalog(), None);
+    }
+
+    #[test]
+    fn test_ducklake_credential_accessor() {
+        let with_secret = Source::Ducklake {
+            catalog_url: "postgresql://localhost/db".to_string(),
+            s3_endpoint: None,
+            s3_region: None,
+            credential: Credential::SecretRef {
+                id: "secr_dl".to_string(),
+            },
+        };
+        assert!(matches!(
+            with_secret.credential(),
+            Credential::SecretRef { id } if id == "secr_dl"
+        ));
+        assert_eq!(with_secret.secret_id(), Some("secr_dl"));
+
+        let without_cred = Source::Ducklake {
+            catalog_url: "postgresql://localhost/db".to_string(),
+            s3_endpoint: None,
+            s3_region: None,
             credential: Credential::None,
         };
         assert!(matches!(without_cred.credential(), Credential::None));
