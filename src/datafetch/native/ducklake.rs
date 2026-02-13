@@ -23,12 +23,15 @@ struct DucklakeCredentials {
 }
 
 /// Build the full catalog URL by injecting the password into the connection string.
-fn build_catalog_url_with_password(catalog_url: &str, password: &str) -> Result<String, DataFetchError> {
+fn build_catalog_url_with_password(
+    catalog_url: &str,
+    password: &str,
+) -> Result<String, DataFetchError> {
     let mut parsed = Url::parse(catalog_url)
         .map_err(|e| DataFetchError::Connection(format!("Invalid catalog_url: {}", e)))?;
-    parsed
-        .set_password(Some(password))
-        .map_err(|_| DataFetchError::Connection("Cannot set password on catalog_url".to_string()))?;
+    parsed.set_password(Some(password)).map_err(|_| {
+        DataFetchError::Connection("Cannot set password on catalog_url".to_string())
+    })?;
     Ok(parsed.to_string())
 }
 
@@ -63,10 +66,13 @@ async fn build_catalog(
 
     let provider = PostgresMetadataProvider::new(&full_url)
         .await
-        .map_err(|e| DataFetchError::Connection(format!("Failed to connect to catalog DB: {}", e)))?;
+        .map_err(|e| {
+            DataFetchError::Connection(format!("Failed to connect to catalog DB: {}", e))
+        })?;
 
-    let catalog = DuckLakeCatalog::new(provider)
-        .map_err(|e| DataFetchError::Connection(format!("Failed to create DuckLake catalog: {}", e)))?;
+    let catalog = DuckLakeCatalog::new(provider).map_err(|e| {
+        DataFetchError::Connection(format!("Failed to create DuckLake catalog: {}", e))
+    })?;
 
     Ok((Arc::new(catalog), creds))
 }
@@ -166,10 +172,7 @@ pub async fn fetch_table(
         let parsed_data_url = Url::parse(&data_path)
             .map_err(|e| DataFetchError::Connection(format!("Invalid data path URL: {}", e)))?;
         let bucket = parsed_data_url.host_str().ok_or_else(|| {
-            DataFetchError::Connection(format!(
-                "No bucket name in data path: {}",
-                data_path
-            ))
+            DataFetchError::Connection(format!("No bucket name in data path: {}", data_path))
         })?;
 
         let mut s3_builder = AmazonS3Builder::new()
@@ -217,12 +220,12 @@ pub async fn fetch_table(
 
     if batches.is_empty() {
         // Get schema from the table provider directly for empty tables
-        let catalog_provider = ctx.catalog("ducklake").ok_or_else(|| {
-            DataFetchError::Query("DuckLake catalog not found".to_string())
-        })?;
-        let schema_provider = catalog_provider.schema(schema).ok_or_else(|| {
-            DataFetchError::Query(format!("Schema '{}' not found", schema))
-        })?;
+        let catalog_provider = ctx
+            .catalog("ducklake")
+            .ok_or_else(|| DataFetchError::Query("DuckLake catalog not found".to_string()))?;
+        let schema_provider = catalog_provider
+            .schema(schema)
+            .ok_or_else(|| DataFetchError::Query(format!("Schema '{}' not found", schema)))?;
         let table_provider = schema_provider
             .table(table)
             .await
