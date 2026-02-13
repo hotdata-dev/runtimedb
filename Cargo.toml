@@ -59,6 +59,7 @@ arrow-array-54 = { package = "arrow-array", version = "54" }
 arrow-ipc-54 = { package = "arrow-ipc", version = "54" }
 # Arrow 56 for duckdb compatibility (duckdb uses arrow 56, datafusion uses arrow 57)
 arrow-ipc-56 = { package = "arrow-ipc", version = "56" }
+datafusion-ducklake = { git = "https://github.com/hotdata-dev/datafusion-ducklake", rev = "ed19af9da58b93edb5d213b0ada856c86a51032e", features = ["metadata-postgres"] }
 liquid-cache-client = { git = "https://github.com/XiangpengHao/liquid-cache", rev = "5e63d811132230a0e15fb6d4311be2eb5551cb4d" }
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 sha2 = "0.10"
