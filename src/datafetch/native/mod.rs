@@ -256,6 +256,7 @@ impl DataFetcher for NativeFetcher {
                 Source::Mysql { .. } => mysql::check_health(source, secrets).await,
                 Source::Snowflake { .. } => snowflake::check_health(source, secrets).await,
                 Source::Bigquery { .. } => bigquery::check_health(source, secrets).await,
+                Source::Ducklake { .. } => ducklake::check_health(source, secrets).await,
             }
         })
         .await

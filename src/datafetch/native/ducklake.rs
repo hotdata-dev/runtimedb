@@ -133,15 +133,11 @@ pub async fn discover_tables(
     Ok(tables)
 }
 
-/// Fetch table data from DuckLake and write to the batch writer.
-pub async fn fetch_table(
+/// Build a SessionContext with the DuckLake catalog and S3 object store registered.
+async fn build_session_context(
     source: &Source,
     secrets: &SecretManager,
-    _catalog: Option<&str>,
-    schema: &str,
-    table: &str,
-    writer: &mut dyn BatchWriter,
-) -> Result<(), DataFetchError> {
+) -> Result<SessionContext, DataFetchError> {
     let (s3_endpoint, s3_region) = match source {
         Source::Ducklake {
             s3_endpoint,
@@ -157,7 +153,6 @@ pub async fn fetch_table(
 
     let (catalog, creds) = build_catalog(source, secrets).await?;
 
-    // Build a SessionContext and register the catalog
     let ctx = SessionContext::new();
     ctx.register_catalog("ducklake", catalog.clone());
 
@@ -200,6 +195,35 @@ pub async fn fetch_table(
             .map_err(|e| DataFetchError::Connection(e.to_string()))?;
         ctx.register_object_store(&s3_url, Arc::new(s3_store));
     }
+
+    Ok(ctx)
+}
+
+/// Check connectivity to the DuckLake catalog database and object store.
+pub async fn check_health(
+    source: &Source,
+    secrets: &SecretManager,
+) -> Result<(), DataFetchError> {
+    let ctx = build_session_context(source, secrets).await?;
+    ctx.sql("SELECT 1")
+        .await
+        .map_err(|e| DataFetchError::Query(format!("DuckLake health check failed: {}", e)))?
+        .collect()
+        .await
+        .map_err(|e| DataFetchError::Query(format!("DuckLake health check failed: {}", e)))?;
+    Ok(())
+}
+
+/// Fetch table data from DuckLake and write to the batch writer.
+pub async fn fetch_table(
+    source: &Source,
+    secrets: &SecretManager,
+    _catalog: Option<&str>,
+    schema: &str,
+    table: &str,
+    writer: &mut dyn BatchWriter,
+) -> Result<(), DataFetchError> {
+    let ctx = build_session_context(source, secrets).await?;
 
     // Execute SELECT * FROM ducklake.{schema}.{table}
     let sql = format!(
