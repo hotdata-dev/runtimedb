@@ -16,10 +16,7 @@ use crate::source::Source;
 use arrow_ipc_56 as arrow56_ipc;
 
 /// Check connectivity to a DuckDB/MotherDuck source
-pub async fn check_health(
-    source: &Source,
-    secrets: &SecretManager,
-) -> Result<(), DataFetchError> {
+pub async fn check_health(source: &Source, secrets: &SecretManager) -> Result<(), DataFetchError> {
     let connection_string = resolve_connection_string(source, secrets).await?;
     tokio::task::spawn_blocking(move || {
         let conn = Connection::open(&connection_string)

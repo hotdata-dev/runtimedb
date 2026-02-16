@@ -104,10 +104,7 @@ async fn build_catalog(
 }
 
 /// Check connectivity to an Iceberg catalog
-pub async fn check_health(
-    source: &Source,
-    secrets: &SecretManager,
-) -> Result<(), DataFetchError> {
+pub async fn check_health(source: &Source, secrets: &SecretManager) -> Result<(), DataFetchError> {
     let catalog = build_catalog(source, secrets).await?;
     catalog
         .list_namespaces(None)

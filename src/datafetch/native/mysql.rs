@@ -85,10 +85,7 @@ async fn connect_with_ssl_retry(
 }
 
 /// Check connectivity to a MySQL source
-pub async fn check_health(
-    source: &Source,
-    secrets: &SecretManager,
-) -> Result<(), DataFetchError> {
+pub async fn check_health(source: &Source, secrets: &SecretManager) -> Result<(), DataFetchError> {
     let options = resolve_connect_options(source, secrets).await?;
     let mut conn = connect_with_ssl_retry(options).await?;
     conn.ping()

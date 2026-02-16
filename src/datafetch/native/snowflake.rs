@@ -99,10 +99,7 @@ async fn build_client(
 }
 
 /// Check connectivity to a Snowflake source
-pub async fn check_health(
-    source: &Source,
-    secrets: &SecretManager,
-) -> Result<(), DataFetchError> {
+pub async fn check_health(source: &Source, secrets: &SecretManager) -> Result<(), DataFetchError> {
     let client = build_client(source, secrets).await?;
     client
         .exec("SELECT 1")

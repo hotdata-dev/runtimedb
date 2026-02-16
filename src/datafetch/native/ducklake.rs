@@ -200,10 +200,7 @@ async fn build_session_context(
 }
 
 /// Check connectivity to the DuckLake catalog database and object store.
-pub async fn check_health(
-    source: &Source,
-    secrets: &SecretManager,
-) -> Result<(), DataFetchError> {
+pub async fn check_health(source: &Source, secrets: &SecretManager) -> Result<(), DataFetchError> {
     let ctx = build_session_context(source, secrets).await?;
     ctx.sql("SELECT 1")
         .await

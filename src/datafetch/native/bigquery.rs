@@ -46,10 +46,7 @@ async fn build_client(source: &Source, secrets: &SecretManager) -> Result<Client
 }
 
 /// Check connectivity to a BigQuery source
-pub async fn check_health(
-    source: &Source,
-    secrets: &SecretManager,
-) -> Result<(), DataFetchError> {
+pub async fn check_health(source: &Source, secrets: &SecretManager) -> Result<(), DataFetchError> {
     let client = build_client(source, secrets).await?;
 
     let project_id = match source {

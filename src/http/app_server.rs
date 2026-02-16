@@ -110,10 +110,7 @@ impl AppServer {
                     PATH_CONNECTION,
                     get(get_connection_handler).delete(delete_connection_handler),
                 )
-                .route(
-                    PATH_CONNECTION_HEALTH,
-                    get(check_connection_health_handler),
-                )
+                .route(PATH_CONNECTION_HEALTH, get(check_connection_health_handler))
                 .route(
                     PATH_CONNECTION_CACHE,
                     delete(purge_connection_cache_handler),
