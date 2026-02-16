@@ -27,4 +27,12 @@ pub trait DataFetcher: Send + Sync + std::fmt::Debug {
         table: &str,
         writer: &mut dyn BatchWriter,
     ) -> Result<(), DataFetchError>;
+
+    /// Check connectivity to the remote source.
+    /// Returns Ok(()) if the connection is healthy, or an error describing the failure.
+    async fn check_health(
+        &self,
+        source: &Source,
+        secrets: &SecretManager,
+    ) -> Result<(), DataFetchError>;
 }

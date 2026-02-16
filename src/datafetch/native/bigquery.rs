@@ -45,6 +45,28 @@ async fn build_client(source: &Source, secrets: &SecretManager) -> Result<Client
         .map_err(|e| DataFetchError::Connection(format!("Failed to create BigQuery client: {}", e)))
 }
 
+/// Check connectivity to a BigQuery source
+pub async fn check_health(source: &Source, secrets: &SecretManager) -> Result<(), DataFetchError> {
+    let client = build_client(source, secrets).await?;
+
+    let project_id = match source {
+        Source::Bigquery { project_id, .. } => project_id.as_str(),
+        _ => {
+            return Err(DataFetchError::Connection(
+                "Expected BigQuery source".to_string(),
+            ))
+        }
+    };
+
+    let query_request = QueryRequest::new("SELECT 1");
+    client
+        .job()
+        .query(project_id, query_request)
+        .await
+        .map_err(|e| DataFetchError::Query(format!("Health check failed: {}", e)))?;
+    Ok(())
+}
+
 /// Discover tables and columns from BigQuery
 pub async fn discover_tables(
     source: &Source,

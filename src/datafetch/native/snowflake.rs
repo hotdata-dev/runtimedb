@@ -98,6 +98,16 @@ async fn build_client(
     Ok(client)
 }
 
+/// Check connectivity to a Snowflake source
+pub async fn check_health(source: &Source, secrets: &SecretManager) -> Result<(), DataFetchError> {
+    let client = build_client(source, secrets).await?;
+    client
+        .exec("SELECT 1")
+        .await
+        .map_err(|e| DataFetchError::Query(format!("Health check failed: {}", e)))?;
+    Ok(())
+}
+
 /// Discover tables and columns from Snowflake
 pub async fn discover_tables(
     source: &Source,

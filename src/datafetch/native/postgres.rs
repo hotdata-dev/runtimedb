@@ -93,6 +93,16 @@ async fn connect_with_ssl_retry(connection_string: &str) -> Result<PgConnection,
     }
 }
 
+/// Check connectivity to a PostgreSQL source
+pub async fn check_health(source: &Source, secrets: &SecretManager) -> Result<(), DataFetchError> {
+    let connection_string = resolve_connection_string(source, secrets).await?;
+    let mut conn = connect_with_ssl_retry(&connection_string).await?;
+    conn.ping()
+        .await
+        .map_err(|e| DataFetchError::Connection(e.to_string()))?;
+    Ok(())
+}
+
 /// Discover tables and columns from PostgreSQL
 pub async fn discover_tables(
     source: &Source,

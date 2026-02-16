@@ -9,7 +9,7 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use futures::StreamExt;
 use sqlx::mysql::{MySqlConnectOptions, MySqlConnection, MySqlRow, MySqlSslMode};
-use sqlx::{ConnectOptions, Row};
+use sqlx::{ConnectOptions, Connection, Row};
 use std::sync::Arc;
 use tracing::warn;
 
@@ -82,6 +82,16 @@ async fn connect_with_ssl_retry(
             }
         }
     }
+}
+
+/// Check connectivity to a MySQL source
+pub async fn check_health(source: &Source, secrets: &SecretManager) -> Result<(), DataFetchError> {
+    let options = resolve_connect_options(source, secrets).await?;
+    let mut conn = connect_with_ssl_retry(options).await?;
+    conn.ping()
+        .await
+        .map_err(|e| DataFetchError::Connection(e.to_string()))?;
+    Ok(())
 }
 
 /// Discover tables and columns from MySQL

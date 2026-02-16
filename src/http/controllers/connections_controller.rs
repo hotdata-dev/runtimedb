@@ -1,7 +1,7 @@
 use crate::http::error::ApiError;
 use crate::http::models::{
-    ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse, DiscoveryStatus,
-    GetConnectionResponse, ListConnectionsResponse,
+    ConnectionHealthResponse, ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse,
+    DiscoveryStatus, GetConnectionResponse, ListConnectionsResponse,
 };
 use crate::source::{Credential, Source};
 use crate::RuntimeEngine;
@@ -12,6 +12,7 @@ use axum::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::error;
 
 /// Handler for POST /connections
@@ -467,4 +468,42 @@ pub async fn purge_table_cache_handler(
         })?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Handler for GET /connections/{connection_id}/health
+#[tracing::instrument(
+    name = "handler_check_connection_health",
+    skip(engine),
+    fields(runtimedb.connection_id = %connection_id)
+)]
+pub async fn check_connection_health_handler(
+    State(engine): State<Arc<RuntimeEngine>>,
+    Path(connection_id): Path<String>,
+) -> Result<Json<ConnectionHealthResponse>, ApiError> {
+    // Verify connection exists (return 404 if not)
+    engine
+        .catalog()
+        .get_connection(&connection_id)
+        .await
+        .map_err(|e| ApiError::internal_error(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", connection_id)))?;
+
+    let start = Instant::now();
+    let result = engine.check_connection_health(&connection_id).await;
+    let latency_ms = start.elapsed().as_millis() as u64;
+
+    match result {
+        Ok(()) => Ok(Json(ConnectionHealthResponse {
+            connection_id,
+            healthy: true,
+            error: None,
+            latency_ms,
+        })),
+        Err(e) => Ok(Json(ConnectionHealthResponse {
+            connection_id,
+            healthy: false,
+            error: Some(e.to_string()),
+            latency_ms,
+        })),
+    }
 }
