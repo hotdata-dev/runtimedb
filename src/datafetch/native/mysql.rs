@@ -9,7 +9,7 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use futures::StreamExt;
 use sqlx::mysql::{MySqlConnectOptions, MySqlConnection, MySqlRow, MySqlSslMode};
-use sqlx::{ConnectOptions, Row};
+use sqlx::{ConnectOptions, Connection, Row};
 use std::sync::Arc;
 use tracing::warn;
 
@@ -91,10 +91,9 @@ pub async fn check_health(
 ) -> Result<(), DataFetchError> {
     let options = resolve_connect_options(source, secrets).await?;
     let mut conn = connect_with_ssl_retry(options).await?;
-    sqlx::query("SELECT 1")
-        .execute(&mut conn)
+    conn.ping()
         .await
-        .map_err(|e| DataFetchError::Query(e.to_string()))?;
+        .map_err(|e| DataFetchError::Connection(e.to_string()))?;
     Ok(())
 }
 

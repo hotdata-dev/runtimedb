@@ -100,10 +100,9 @@ pub async fn check_health(
 ) -> Result<(), DataFetchError> {
     let connection_string = resolve_connection_string(source, secrets).await?;
     let mut conn = connect_with_ssl_retry(&connection_string).await?;
-    sqlx::query("SELECT 1")
-        .execute(&mut conn)
+    conn.ping()
         .await
-        .map_err(|e| DataFetchError::Query(e.to_string()))?;
+        .map_err(|e| DataFetchError::Connection(e.to_string()))?;
     Ok(())
 }
 
