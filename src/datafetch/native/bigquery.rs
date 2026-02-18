@@ -194,6 +194,7 @@ pub async fn discover_tables(
                 table_name,
                 table_type,
                 columns: vec![column],
+                geometry_columns: std::collections::HashMap::new(),
             });
         }
     }
