@@ -1,3 +1,4 @@
+use crate::catalog::{SavedQuery, SavedQueryVersion};
 use crate::http::controllers::query_controller::serialize_batches;
 use crate::http::error::ApiError;
 use crate::http::models::{
@@ -23,7 +24,20 @@ const MAX_SQL_LENGTH: usize = 1_000_000;
 /// valid after trimming since the post-trim limits are well below this.
 const MAX_RAW_INPUT_LENGTH: usize = 2_000_000;
 
+fn build_saved_query_detail(sq: SavedQuery, version: SavedQueryVersion) -> SavedQueryDetail {
+    SavedQueryDetail {
+        id: sq.id,
+        name: sq.name,
+        latest_version: sq.latest_version,
+        sql: version.sql_text,
+        sql_hash: version.sql_hash,
+        created_at: sq.created_at,
+        updated_at: sq.updated_at,
+    }
+}
+
 /// Handler for POST /v1/queries
+#[tracing::instrument(name = "http_create_saved_query", skip(engine, request))]
 pub async fn create_saved_query(
     State(engine): State<Arc<RuntimeEngine>>,
     Json(request): Json<CreateSavedQueryRequest>,
@@ -74,19 +88,12 @@ pub async fn create_saved_query(
 
     Ok((
         StatusCode::CREATED,
-        Json(SavedQueryDetail {
-            id: saved_query.id,
-            name: saved_query.name,
-            latest_version: saved_query.latest_version,
-            sql: version.sql_text,
-            sql_hash: version.sql_hash,
-            created_at: saved_query.created_at,
-            updated_at: saved_query.updated_at,
-        }),
+        Json(build_saved_query_detail(saved_query, version)),
     ))
 }
 
 /// Handler for GET /v1/queries
+#[tracing::instrument(name = "http_list_saved_queries", skip(engine))]
 pub async fn list_saved_queries(
     State(engine): State<Arc<RuntimeEngine>>,
     QueryParams(params): QueryParams<ListSavedQueriesParams>,
@@ -121,6 +128,7 @@ pub async fn list_saved_queries(
 }
 
 /// Handler for GET /v1/queries/{id}
+#[tracing::instrument(name = "http_get_saved_query", skip(engine))]
 pub async fn get_saved_query(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(id): Path<String>,
@@ -142,18 +150,11 @@ pub async fn get_saved_query(
             ))
         })?;
 
-    Ok(Json(SavedQueryDetail {
-        id: saved_query.id,
-        name: saved_query.name,
-        latest_version: saved_query.latest_version,
-        sql: version.sql_text,
-        sql_hash: version.sql_hash,
-        created_at: saved_query.created_at,
-        updated_at: saved_query.updated_at,
-    }))
+    Ok(Json(build_saved_query_detail(saved_query, version)))
 }
 
 /// Handler for PUT /v1/queries/{id} — creates a new version, optionally renames
+#[tracing::instrument(name = "http_update_saved_query", skip(engine, request))]
 pub async fn update_saved_query(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(id): Path<String>,
@@ -222,18 +223,11 @@ pub async fn update_saved_query(
             ))
         })?;
 
-    Ok(Json(SavedQueryDetail {
-        id: saved_query.id,
-        name: saved_query.name,
-        latest_version: saved_query.latest_version,
-        sql: version.sql_text,
-        sql_hash: version.sql_hash,
-        created_at: saved_query.created_at,
-        updated_at: saved_query.updated_at,
-    }))
+    Ok(Json(build_saved_query_detail(saved_query, version)))
 }
 
 /// Handler for DELETE /v1/queries/{id}
+#[tracing::instrument(name = "http_delete_saved_query", skip(engine))]
 pub async fn delete_saved_query(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(id): Path<String>,
@@ -254,6 +248,7 @@ pub async fn delete_saved_query(
 }
 
 /// Handler for GET /v1/queries/{id}/versions
+#[tracing::instrument(name = "http_list_saved_query_versions", skip(engine))]
 pub async fn list_saved_query_versions(
     State(engine): State<Arc<RuntimeEngine>>,
     Path(id): Path<String>,
