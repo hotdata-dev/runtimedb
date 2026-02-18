@@ -786,3 +786,91 @@ async fn test_update_empty_body_rejected() -> Result<()> {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_execute_saved_query_nonexistent_version() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let created = create_saved_query(&router, "version test", "SELECT 1 as num").await?;
+    let id = created["id"].as_str().unwrap();
+
+    // Try to execute version 99 which doesn't exist
+    let uri = PATH_SAVED_QUERY_EXECUTE.replace("{id}", id);
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri(&uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(
+                &json!({ "version": 99 }),
+            )?))?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_saved_query_versions_pagination() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let created = create_saved_query(&router, "paginated", "SELECT 1").await?;
+    let id = created["id"].as_str().unwrap();
+
+    // Create versions 2..5
+    let update_uri = PATH_SAVED_QUERY.replace("{id}", id);
+    for i in 2..=5 {
+        send_request(
+            &router,
+            Request::builder()
+                .method("PUT")
+                .uri(&update_uri)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(
+                    &json!({ "sql": format!("SELECT {}", i) }),
+                )?))?,
+        )
+        .await?;
+    }
+
+    // Page 1: limit=3, offset=0 → versions 5, 4, 3
+    let versions_uri = PATH_SAVED_QUERY_VERSIONS.replace("{id}", id);
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("GET")
+            .uri(format!("{}?limit=3&offset=0", versions_uri))
+            .body(Body::empty())?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await?;
+    assert_eq!(json["count"], 3);
+    assert!(json["has_more"].as_bool().unwrap());
+    let versions = json["versions"].as_array().unwrap();
+    assert_eq!(versions[0]["version"], 5);
+    assert_eq!(versions[2]["version"], 3);
+
+    // Page 2: limit=3, offset=3 → versions 2, 1
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("GET")
+            .uri(format!("{}?limit=3&offset=3", versions_uri))
+            .body(Body::empty())?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await?;
+    assert_eq!(json["count"], 2);
+    assert!(!json["has_more"].as_bool().unwrap());
+    let versions = json["versions"].as_array().unwrap();
+    assert_eq!(versions[0]["version"], 2);
+    assert_eq!(versions[1]["version"], 1);
+
+    Ok(())
+}

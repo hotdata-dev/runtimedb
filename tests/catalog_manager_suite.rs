@@ -1299,6 +1299,51 @@ macro_rules! catalog_manager_tests {
                 assert_eq!(run.snapshot_id, snap.id);
             }
 
+            #[tokio::test]
+            async fn saved_query_version_list_pagination() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let snap1 = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+                let sq = catalog
+                    .create_saved_query("paginated", &snap1.id)
+                    .await
+                    .unwrap();
+
+                // Create versions 2..5
+                for i in 2..=5 {
+                    let snap = catalog
+                        .get_or_create_snapshot(&format!("SELECT {}", i))
+                        .await
+                        .unwrap();
+                    catalog
+                        .update_saved_query(&sq.id, None, &snap.id)
+                        .await
+                        .unwrap();
+                }
+
+                // Page 1: newest 3 versions (5, 4, 3)
+                let (page1, has_more) = catalog
+                    .list_saved_query_versions(&sq.id, 3, 0)
+                    .await
+                    .unwrap();
+                assert_eq!(page1.len(), 3);
+                assert!(has_more);
+                assert_eq!(page1[0].version, 5);
+                assert_eq!(page1[1].version, 4);
+                assert_eq!(page1[2].version, 3);
+
+                // Page 2: remaining 2 versions (2, 1)
+                let (page2, has_more2) = catalog
+                    .list_saved_query_versions(&sq.id, 3, 3)
+                    .await
+                    .unwrap();
+                assert_eq!(page2.len(), 2);
+                assert!(!has_more2);
+                assert_eq!(page2[0].version, 2);
+                assert_eq!(page2[1].version, 1);
+            }
+
         }
     };
 }
@@ -1342,6 +1387,48 @@ async fn sqlite_concurrent_saved_query_updates() {
     // Final state should be version 3.
     let final_sq = catalog.get_saved_query(&sq.id).await.unwrap().unwrap();
     assert_eq!(final_sq.latest_version, 3);
+}
+
+/// Test that updating a saved query at i32::MAX version returns an error
+/// instead of overflowing.
+#[tokio::test]
+async fn sqlite_version_overflow_returns_error() {
+    let dir = TempDir::new().expect("failed to create temp dir");
+    let db_path = dir.path().join("catalog.sqlite");
+    let db_uri = format!("sqlite:{}?mode=rwc", db_path.display());
+
+    let manager = SqliteCatalogManager::new(db_path.to_str().unwrap())
+        .await
+        .unwrap();
+    manager.run_migrations().await.unwrap();
+
+    let snap1 = manager.get_or_create_snapshot("SELECT 1").await.unwrap();
+    let sq = manager
+        .create_saved_query("overflow-test", &snap1.id)
+        .await
+        .unwrap();
+    assert_eq!(sq.latest_version, 1);
+
+    // Directly set latest_version to i32::MAX via raw SQL
+    let pool = SqlitePool::connect(&db_uri).await.unwrap();
+    sqlx::query("UPDATE saved_queries SET latest_version = ? WHERE id = ?")
+        .bind(i32::MAX)
+        .bind(&sq.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    // Attempt to create a new version — should fail, not overflow
+    let snap2 = manager.get_or_create_snapshot("SELECT 2").await.unwrap();
+    let result = manager.update_saved_query(&sq.id, None, &snap2.id).await;
+    assert!(result.is_err(), "Should fail on version overflow");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("Version limit reached"),
+        "Expected 'Version limit reached' error, got: {}",
+        err
+    );
 }
 
 /// Test that migration hash mismatch is detected on startup.
