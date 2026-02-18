@@ -2,7 +2,8 @@ use crate::catalog::backend::CatalogBackend;
 use crate::catalog::manager::{
     CatalogManager, ConnectionInfo, CreateQueryRun, DatasetInfo, OptimisticLock, PendingDeletion,
     QueryResult, QueryResultRow, QueryRun, QueryRunCursor, QueryRunRow, QueryRunUpdate,
-    ResultStatus, ResultUpdate, TableInfo, UploadInfo,
+    ResultStatus, ResultUpdate, SavedQuery, SavedQueryRow, SavedQueryVersion, SavedQueryVersionRow,
+    SqlSnapshot, SqlSnapshotRow, TableInfo, UploadInfo,
 };
 use crate::catalog::migrations::{
     run_migrations, wrap_migration_sql, CatalogMigrations, Migration, SQLITE_MIGRATIONS,
@@ -673,13 +674,14 @@ impl CatalogManager for SqliteCatalogManager {
     async fn create_query_run(&self, params: CreateQueryRun<'_>) -> Result<String> {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
-            "INSERT INTO query_runs (id, sql_text, sql_hash, trace_id, status, created_at)
-             VALUES (?, ?, ?, ?, 'running', ?)",
+            "INSERT INTO query_runs (id, snapshot_id, trace_id, status, saved_query_id, saved_query_version, created_at)
+             VALUES (?, ?, ?, 'running', ?, ?, ?)",
         )
         .bind(params.id)
-        .bind(params.sql_text)
-        .bind(params.sql_hash)
+        .bind(params.snapshot_id)
         .bind(params.trace_id)
+        .bind(params.saved_query_id)
+        .bind(params.saved_query_version)
         .bind(&now)
         .execute(self.backend.pool())
         .await?;
@@ -741,11 +743,14 @@ impl CatalogManager for SqliteCatalogManager {
         let rows: Vec<QueryRunRow> = if let Some(cursor) = cursor {
             let cursor_ts = cursor.created_at.to_rfc3339();
             sqlx::query_as(
-                "SELECT id, sql_text, sql_hash, trace_id, status, result_id, \
-                 error_message, warning_message, row_count, execution_time_ms, created_at, completed_at \
-                 FROM query_runs \
-                 WHERE (created_at < ? OR (created_at = ? AND id < ?)) \
-                 ORDER BY created_at DESC, id DESC \
+                "SELECT qr.id, snap.sql_text, snap.sql_hash, qr.snapshot_id, \
+                 qr.trace_id, qr.status, qr.result_id, \
+                 qr.error_message, qr.warning_message, qr.row_count, qr.execution_time_ms, \
+                 qr.saved_query_id, qr.saved_query_version, qr.created_at, qr.completed_at \
+                 FROM query_runs qr \
+                 JOIN sql_snapshots snap ON snap.id = qr.snapshot_id \
+                 WHERE (qr.created_at < ? OR (qr.created_at = ? AND qr.id < ?)) \
+                 ORDER BY qr.created_at DESC, qr.id DESC \
                  LIMIT ?",
             )
             .bind(&cursor_ts)
@@ -756,10 +761,13 @@ impl CatalogManager for SqliteCatalogManager {
             .await?
         } else {
             sqlx::query_as(
-                "SELECT id, sql_text, sql_hash, trace_id, status, result_id, \
-                 error_message, warning_message, row_count, execution_time_ms, created_at, completed_at \
-                 FROM query_runs \
-                 ORDER BY created_at DESC, id DESC \
+                "SELECT qr.id, snap.sql_text, snap.sql_hash, qr.snapshot_id, \
+                 qr.trace_id, qr.status, qr.result_id, \
+                 qr.error_message, qr.warning_message, qr.row_count, qr.execution_time_ms, \
+                 qr.saved_query_id, qr.saved_query_version, qr.created_at, qr.completed_at \
+                 FROM query_runs qr \
+                 JOIN sql_snapshots snap ON snap.id = qr.snapshot_id \
+                 ORDER BY qr.created_at DESC, qr.id DESC \
                  LIMIT ?",
             )
             .bind(fetch_limit)
@@ -783,9 +791,13 @@ impl CatalogManager for SqliteCatalogManager {
     )]
     async fn get_query_run(&self, id: &str) -> Result<Option<QueryRun>> {
         let row: Option<QueryRunRow> = sqlx::query_as(
-            "SELECT id, sql_text, sql_hash, trace_id, status, result_id, \
-             error_message, warning_message, row_count, execution_time_ms, created_at, completed_at \
-             FROM query_runs WHERE id = ?",
+            "SELECT qr.id, snap.sql_text, snap.sql_hash, qr.snapshot_id, \
+             qr.trace_id, qr.status, qr.result_id, \
+             qr.error_message, qr.warning_message, qr.row_count, qr.execution_time_ms, \
+             qr.saved_query_id, qr.saved_query_version, qr.created_at, qr.completed_at \
+             FROM query_runs qr \
+             JOIN sql_snapshots snap ON snap.id = qr.snapshot_id \
+             WHERE qr.id = ?",
         )
         .bind(id)
         .fetch_optional(self.backend.pool())
@@ -906,6 +918,373 @@ impl CatalogManager for SqliteCatalogManager {
         .await?;
 
         Ok(result.rows_affected() > 0)
+    }
+
+    // SQL snapshot methods
+
+    #[tracing::instrument(
+        name = "catalog_get_or_create_snapshot",
+        skip(self, sql_text),
+        fields(db = "sqlite")
+    )]
+    async fn get_or_create_snapshot(&self, sql_text: &str) -> Result<SqlSnapshot> {
+        let hash = crate::catalog::manager::sql_hash(sql_text);
+        let id = crate::id::generate_snapshot_id();
+        let now = Utc::now().to_rfc3339();
+
+        // Use a single connection so the INSERT OR IGNORE and SELECT are
+        // guaranteed to see the same row, even if a concurrent DELETE were
+        // to run between them (snapshots are never deleted, but this is
+        // defensive).
+        let mut conn = self.backend.pool().acquire().await?;
+
+        // INSERT OR IGNORE for idempotent upsert (race-safe via UNIQUE constraint)
+        sqlx::query(
+            "INSERT OR IGNORE INTO sql_snapshots (id, sql_hash, sql_text, created_at) \
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&hash)
+        .bind(sql_text)
+        .bind(&now)
+        .execute(&mut *conn)
+        .await?;
+
+        // Fetch the existing or newly inserted row
+        let row: SqlSnapshotRow = sqlx::query_as(
+            "SELECT id, sql_hash, sql_text, created_at FROM sql_snapshots \
+             WHERE sql_hash = ? AND sql_text = ?",
+        )
+        .bind(&hash)
+        .bind(sql_text)
+        .fetch_one(&mut *conn)
+        .await?;
+
+        Ok(row.into_sql_snapshot())
+    }
+
+    // Saved query methods
+
+    #[tracing::instrument(name = "catalog_create_saved_query", skip(self), fields(db = "sqlite"))]
+    async fn create_saved_query(&self, name: &str, snapshot_id: &str) -> Result<SavedQuery> {
+        let id = crate::id::generate_saved_query_id();
+        let now = Utc::now().to_rfc3339();
+
+        // Use BEGIN IMMEDIATE to acquire a RESERVED lock up front, preventing
+        // concurrent writers from interleaving reads before locks are held.
+        let mut conn = self.backend.pool().acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+        let result: Result<SavedQuery> = async {
+            sqlx::query(
+                "INSERT INTO saved_queries (id, name, latest_version, created_at, updated_at) \
+                 VALUES (?, ?, 1, ?, ?)",
+            )
+            .bind(&id)
+            .bind(name)
+            .bind(&now)
+            .bind(&now)
+            .execute(&mut *conn)
+            .await?;
+
+            sqlx::query(
+                "INSERT INTO saved_query_versions (saved_query_id, version, snapshot_id, created_at) \
+                 VALUES (?, 1, ?, ?)",
+            )
+            .bind(&id)
+            .bind(snapshot_id)
+            .bind(&now)
+            .execute(&mut *conn)
+            .await?;
+
+            let row: SavedQueryRow = sqlx::query_as(
+                "SELECT id, name, latest_version, created_at, updated_at \
+                 FROM saved_queries WHERE id = ?",
+            )
+            .bind(&id)
+            .fetch_one(&mut *conn)
+            .await?;
+
+            Ok(row.into_saved_query())
+        }
+        .await;
+
+        match &result {
+            Ok(_) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+            }
+            Err(_) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            }
+        }
+
+        result
+    }
+
+    #[tracing::instrument(
+        name = "catalog_get_saved_query",
+        skip(self),
+        fields(db = "sqlite", runtimedb.saved_query_id = %id)
+    )]
+    async fn get_saved_query(&self, id: &str) -> Result<Option<SavedQuery>> {
+        let row: Option<SavedQueryRow> = sqlx::query_as(
+            "SELECT id, name, latest_version, created_at, updated_at \
+             FROM saved_queries WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(self.backend.pool())
+        .await?;
+
+        Ok(row.map(SavedQueryRow::into_saved_query))
+    }
+
+    #[tracing::instrument(name = "catalog_list_saved_queries", skip(self), fields(db = "sqlite"))]
+    async fn list_saved_queries(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<SavedQuery>, bool)> {
+        let fetch_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
+        let rows: Vec<SavedQueryRow> = sqlx::query_as(
+            "SELECT id, name, latest_version, created_at, updated_at \
+             FROM saved_queries \
+             ORDER BY name ASC, id ASC \
+             LIMIT ? OFFSET ?",
+        )
+        .bind(fetch_limit)
+        .bind(i64::try_from(offset).unwrap_or(i64::MAX))
+        .fetch_all(self.backend.pool())
+        .await?;
+
+        let has_more = rows.len() > limit;
+        let queries = rows
+            .into_iter()
+            .take(limit)
+            .map(SavedQueryRow::into_saved_query)
+            .collect();
+        Ok((queries, has_more))
+    }
+
+    #[tracing::instrument(
+        name = "catalog_update_saved_query",
+        skip(self),
+        fields(db = "sqlite", runtimedb.saved_query_id = %id)
+    )]
+    async fn update_saved_query(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        snapshot_id: &str,
+    ) -> Result<Option<SavedQuery>> {
+        // Use BEGIN IMMEDIATE to acquire a RESERVED lock up front, so the
+        // read of latest_version and subsequent insert of the next version are
+        // atomic. A deferred BEGIN would only take a SHARED lock on the read,
+        // allowing two concurrent updates to read the same latest_version and
+        // race on the (saved_query_id, version) primary key.
+        let mut conn = self.backend.pool().acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+        let result: Result<Option<SavedQuery>> = async {
+            let existing: Option<SavedQueryRow> = sqlx::query_as(
+                "SELECT id, name, latest_version, created_at, updated_at \
+                 FROM saved_queries WHERE id = ?",
+            )
+            .bind(id)
+            .fetch_optional(&mut *conn)
+            .await?;
+
+            let existing = match existing {
+                Some(row) => row,
+                None => return Ok(None),
+            };
+
+            let effective_name = name.unwrap_or(&existing.name);
+
+            // Check if the latest version already points to the same snapshot
+            // and the name is unchanged — skip creating a redundant version.
+            let current_snapshot: Option<(String,)> = sqlx::query_as(
+                "SELECT snapshot_id FROM saved_query_versions \
+                 WHERE saved_query_id = ? AND version = ?",
+            )
+            .bind(id)
+            .bind(existing.latest_version)
+            .fetch_optional(&mut *conn)
+            .await?;
+
+            let sql_unchanged = current_snapshot
+                .as_ref()
+                .is_some_and(|(sid,)| sid == snapshot_id);
+            let name_unchanged = effective_name == existing.name;
+
+            if sql_unchanged && name_unchanged {
+                // Complete no-op — nothing to change
+                return Ok(Some(existing.into_saved_query()));
+            }
+
+            let now = Utc::now().to_rfc3339();
+
+            if sql_unchanged {
+                // Name-only rename — no new version needed
+                sqlx::query(
+                    "UPDATE saved_queries SET name = ?, updated_at = ? WHERE id = ?",
+                )
+                .bind(effective_name)
+                .bind(&now)
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
+            } else {
+                // SQL changed — create a new version
+                let new_version = existing.latest_version.checked_add(1).ok_or_else(|| {
+                    anyhow::anyhow!("Version limit reached for saved query '{}'", id)
+                })?;
+
+                sqlx::query(
+                    "INSERT INTO saved_query_versions (saved_query_id, version, snapshot_id, created_at) \
+                     VALUES (?, ?, ?, ?)",
+                )
+                .bind(id)
+                .bind(new_version)
+                .bind(snapshot_id)
+                .bind(&now)
+                .execute(&mut *conn)
+                .await?;
+
+                sqlx::query(
+                    "UPDATE saved_queries SET name = ?, latest_version = ?, updated_at = ? WHERE id = ?",
+                )
+                .bind(effective_name)
+                .bind(new_version)
+                .bind(&now)
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
+            }
+
+            let row: SavedQueryRow = sqlx::query_as(
+                "SELECT id, name, latest_version, created_at, updated_at \
+                 FROM saved_queries WHERE id = ?",
+            )
+            .bind(id)
+            .fetch_one(&mut *conn)
+            .await?;
+
+            Ok(Some(row.into_saved_query()))
+        }
+        .await;
+
+        match &result {
+            Ok(_) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+            }
+            Err(_) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            }
+        }
+
+        result
+    }
+
+    #[tracing::instrument(
+        name = "catalog_delete_saved_query",
+        skip(self),
+        fields(db = "sqlite", runtimedb.saved_query_id = %id)
+    )]
+    async fn delete_saved_query(&self, id: &str) -> Result<bool> {
+        // Use BEGIN IMMEDIATE for consistency with other write transactions.
+        let mut conn = self.backend.pool().acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+        let result: Result<bool> = async {
+            // Explicitly delete child versions first (SQLite PRAGMA foreign_keys is
+            // not guaranteed to be ON, so we cannot rely on ON DELETE CASCADE).
+            // Query runs retain history via their snapshot_id FK to sql_snapshots.
+            sqlx::query("DELETE FROM saved_query_versions WHERE saved_query_id = ?")
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
+
+            let del = sqlx::query("DELETE FROM saved_queries WHERE id = ?")
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
+
+            Ok(del.rows_affected() > 0)
+        }
+        .await;
+
+        match &result {
+            Ok(_) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+            }
+            Err(_) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            }
+        }
+
+        result
+    }
+
+    #[tracing::instrument(
+        name = "catalog_get_saved_query_version",
+        skip(self),
+        fields(db = "sqlite", runtimedb.saved_query_id = %saved_query_id)
+    )]
+    async fn get_saved_query_version(
+        &self,
+        saved_query_id: &str,
+        version: i32,
+    ) -> Result<Option<SavedQueryVersion>> {
+        let row: Option<SavedQueryVersionRow> = sqlx::query_as(
+            "SELECT sqv.saved_query_id, sqv.version, sqv.snapshot_id, \
+             snap.sql_text, snap.sql_hash, sqv.created_at \
+             FROM saved_query_versions sqv \
+             JOIN sql_snapshots snap ON snap.id = sqv.snapshot_id \
+             WHERE sqv.saved_query_id = ? AND sqv.version = ?",
+        )
+        .bind(saved_query_id)
+        .bind(version)
+        .fetch_optional(self.backend.pool())
+        .await?;
+
+        Ok(row.map(SavedQueryVersionRow::into_saved_query_version))
+    }
+
+    #[tracing::instrument(
+        name = "catalog_list_saved_query_versions",
+        skip(self),
+        fields(db = "sqlite", runtimedb.saved_query_id = %saved_query_id)
+    )]
+    async fn list_saved_query_versions(
+        &self,
+        saved_query_id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<SavedQueryVersion>, bool)> {
+        let fetch_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
+        let rows: Vec<SavedQueryVersionRow> = sqlx::query_as(
+            "SELECT sqv.saved_query_id, sqv.version, sqv.snapshot_id, \
+             snap.sql_text, snap.sql_hash, sqv.created_at \
+             FROM saved_query_versions sqv \
+             JOIN sql_snapshots snap ON snap.id = sqv.snapshot_id \
+             WHERE sqv.saved_query_id = ? \
+             ORDER BY sqv.version DESC \
+             LIMIT ? OFFSET ?",
+        )
+        .bind(saved_query_id)
+        .bind(fetch_limit)
+        .bind(i64::try_from(offset).unwrap_or(i64::MAX))
+        .fetch_all(self.backend.pool())
+        .await?;
+
+        let has_more = rows.len() > limit;
+        let versions = rows
+            .into_iter()
+            .take(limit)
+            .map(SavedQueryVersionRow::into_saved_query_version)
+            .collect();
+
+        Ok((versions, has_more))
     }
 
     // Dataset management methods

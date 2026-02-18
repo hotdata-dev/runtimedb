@@ -5,8 +5,8 @@
 
 use super::{
     CatalogManager, ConnectionInfo, CreateQueryRun, DatasetInfo, OptimisticLock, PendingDeletion,
-    QueryResult, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus, ResultUpdate, TableInfo,
-    UploadInfo,
+    QueryResult, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus, ResultUpdate, SavedQuery,
+    SavedQueryVersion, SqlSnapshot, TableInfo, UploadInfo,
 };
 use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
@@ -21,6 +21,7 @@ use std::sync::{Mutex, RwLock};
 pub struct MockCatalog {
     tables: Mutex<HashMap<(String, String, String), TableInfo>>,
     results: RwLock<HashMap<String, QueryResult>>,
+    snapshots: Mutex<HashMap<String, SqlSnapshot>>,
     fail_update: AtomicBool,
     next_id: AtomicUsize,
 }
@@ -30,6 +31,7 @@ impl MockCatalog {
         Self {
             tables: Mutex::new(HashMap::new()),
             results: RwLock::new(HashMap::new()),
+            snapshots: Mutex::new(HashMap::new()),
             fail_update: AtomicBool::new(false),
             next_id: AtomicUsize::new(1),
         }
@@ -337,6 +339,69 @@ impl CatalogManager for MockCatalog {
 
     async fn release_upload(&self, _id: &str) -> Result<bool> {
         Ok(false)
+    }
+
+    async fn get_or_create_snapshot(&self, sql_text: &str) -> Result<SqlSnapshot> {
+        let hash = crate::catalog::manager::sql_hash(sql_text);
+        let mut snapshots = self.snapshots.lock().unwrap();
+        // Deduplicate by sql_hash — return existing snapshot if one exists
+        if let Some(existing) = snapshots.get(&hash) {
+            return Ok(existing.clone());
+        }
+        let snapshot = SqlSnapshot {
+            id: crate::id::generate_snapshot_id(),
+            sql_hash: hash.clone(),
+            sql_text: sql_text.to_string(),
+            created_at: chrono::Utc::now(),
+        };
+        snapshots.insert(hash, snapshot.clone());
+        Ok(snapshot)
+    }
+
+    async fn create_saved_query(&self, _name: &str, _snapshot_id: &str) -> Result<SavedQuery> {
+        Err(anyhow::anyhow!("Not implemented in mock"))
+    }
+
+    async fn get_saved_query(&self, _id: &str) -> Result<Option<SavedQuery>> {
+        Ok(None)
+    }
+
+    async fn list_saved_queries(
+        &self,
+        _limit: usize,
+        _offset: usize,
+    ) -> Result<(Vec<SavedQuery>, bool)> {
+        Ok((vec![], false))
+    }
+
+    async fn update_saved_query(
+        &self,
+        _id: &str,
+        _name: Option<&str>,
+        _snapshot_id: &str,
+    ) -> Result<Option<SavedQuery>> {
+        Ok(None)
+    }
+
+    async fn delete_saved_query(&self, _id: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn get_saved_query_version(
+        &self,
+        _saved_query_id: &str,
+        _version: i32,
+    ) -> Result<Option<SavedQueryVersion>> {
+        Ok(None)
+    }
+
+    async fn list_saved_query_versions(
+        &self,
+        _saved_query_id: &str,
+        _limit: usize,
+        _offset: usize,
+    ) -> Result<(Vec<SavedQueryVersion>, bool)> {
+        Ok((vec![], false))
     }
 
     async fn create_dataset(&self, _dataset: &DatasetInfo) -> Result<()> {

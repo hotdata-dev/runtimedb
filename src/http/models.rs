@@ -95,6 +95,7 @@ pub struct QueryRunInfo {
     pub status: String,
     pub sql_text: String,
     pub sql_hash: String,
+    pub snapshot_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -107,6 +108,10 @@ pub struct QueryRunInfo {
     pub row_count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_time_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_query_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_query_version: Option<i32>,
     pub created_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<DateTime<Utc>>,
@@ -543,6 +548,98 @@ pub struct UpdateDatasetResponse {
     pub label: String,
     pub table_name: String,
     pub updated_at: DateTime<Utc>,
+}
+
+// Saved query models
+
+/// Request body for POST /v1/queries
+#[derive(Debug, Deserialize)]
+pub struct CreateSavedQueryRequest {
+    pub name: String,
+    pub sql: String,
+}
+
+/// Request body for PUT /v1/queries/{id}
+#[derive(Debug, Deserialize)]
+pub struct UpdateSavedQueryRequest {
+    /// Optional new name. When omitted the existing name is preserved.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Optional new SQL. When omitted the existing SQL is preserved.
+    #[serde(default)]
+    pub sql: Option<String>,
+}
+
+/// Request body for POST /v1/queries/{id}/execute
+#[derive(Debug, Deserialize)]
+pub struct ExecuteSavedQueryRequest {
+    pub version: Option<i32>,
+}
+
+/// Query params for GET /v1/queries
+#[derive(Debug, Deserialize)]
+pub struct ListSavedQueriesParams {
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+/// Saved query summary for listing
+#[derive(Debug, Serialize)]
+pub struct SavedQuerySummary {
+    pub id: String,
+    pub name: String,
+    pub latest_version: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Saved query detail (includes latest version's SQL)
+#[derive(Debug, Serialize)]
+pub struct SavedQueryDetail {
+    pub id: String,
+    pub name: String,
+    pub latest_version: i32,
+    pub sql: String,
+    pub sql_hash: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Response body for GET /v1/queries
+#[derive(Debug, Serialize)]
+pub struct ListSavedQueriesResponse {
+    pub queries: Vec<SavedQuerySummary>,
+    pub count: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub has_more: bool,
+}
+
+/// Single saved query version
+#[derive(Debug, Serialize)]
+pub struct SavedQueryVersionInfo {
+    pub version: i32,
+    pub sql: String,
+    pub sql_hash: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Query params for GET /v1/queries/{id}/versions
+#[derive(Debug, Deserialize)]
+pub struct ListSavedQueryVersionsParams {
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+/// Response body for GET /v1/queries/{id}/versions
+#[derive(Debug, Serialize)]
+pub struct ListSavedQueryVersionsResponse {
+    pub saved_query_id: String,
+    pub versions: Vec<SavedQueryVersionInfo>,
+    pub count: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub has_more: bool,
 }
 
 #[cfg(test)]

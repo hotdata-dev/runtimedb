@@ -14,9 +14,10 @@ mod mock_catalog;
 pub use mock_catalog::MockCatalog;
 
 pub use manager::{
-    CatalogManager, ConnectionInfo, CreateQueryRun, DatasetInfo, OptimisticLock, PendingDeletion,
-    QueryResult, QueryResultRow, QueryRun, QueryRunCursor, QueryRunRow, QueryRunRowPg,
-    QueryRunStatus, QueryRunUpdate, ResultStatus, ResultUpdate, TableInfo, UploadInfo,
+    sql_hash, CatalogManager, ConnectionInfo, CreateQueryRun, DatasetInfo, OptimisticLock,
+    PendingDeletion, QueryResult, QueryResultRow, QueryRun, QueryRunCursor, QueryRunRow,
+    QueryRunRowPg, QueryRunStatus, QueryRunUpdate, ResultStatus, ResultUpdate, SavedQuery,
+    SavedQueryVersion, SqlSnapshot, TableInfo, UploadInfo,
 };
 pub use postgres_manager::PostgresCatalogManager;
 pub use sqlite_manager::SqliteCatalogManager;

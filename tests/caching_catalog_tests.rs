@@ -665,12 +665,13 @@ async fn test_query_list_first_page_cache_miss_then_hit() {
 
     // Create a query run so the list is non-empty
     let id = runtimedb::id::generate_query_run_id();
+    let snapshot = caching.get_or_create_snapshot("SELECT 1").await.unwrap();
     caching
         .create_query_run(CreateQueryRun {
             id: &id,
-            sql_text: "SELECT 1",
-            sql_hash: "abc123",
-
+            snapshot_id: &snapshot.id,
+            saved_query_id: None,
+            saved_query_version: None,
             trace_id: None,
         })
         .await
@@ -736,12 +737,13 @@ async fn test_query_list_dirty_marker_on_create() {
 
     // Create a query run — should set dirty marker
     let id = runtimedb::id::generate_query_run_id();
+    let snapshot = caching.get_or_create_snapshot("SELECT 42").await.unwrap();
     caching
         .create_query_run(CreateQueryRun {
             id: &id,
-            sql_text: "SELECT 42",
-            sql_hash: "def456",
-
+            snapshot_id: &snapshot.id,
+            saved_query_id: None,
+            saved_query_version: None,
             trace_id: None,
         })
         .await
@@ -800,12 +802,13 @@ async fn test_query_list_dirty_marker_on_update() {
 
     // Create a query run
     let id = runtimedb::id::generate_query_run_id();
+    let snapshot = caching.get_or_create_snapshot("SELECT 1").await.unwrap();
     caching
         .create_query_run(CreateQueryRun {
             id: &id,
-            sql_text: "SELECT 1",
-            sql_hash: "abc",
-
+            snapshot_id: &snapshot.id,
+            saved_query_id: None,
+            saved_query_version: None,
             trace_id: None,
         })
         .await
@@ -864,12 +867,13 @@ async fn test_query_list_cache_bypass_for_cursors_and_odd_limits() {
 
     // Create a query run
     let id = runtimedb::id::generate_query_run_id();
+    let snapshot = caching.get_or_create_snapshot("SELECT 1").await.unwrap();
     caching
         .create_query_run(CreateQueryRun {
             id: &id,
-            sql_text: "SELECT 1",
-            sql_hash: "aaa",
-
+            snapshot_id: &snapshot.id,
+            saved_query_id: None,
+            saved_query_version: None,
             trace_id: None,
         })
         .await
@@ -930,12 +934,13 @@ async fn test_query_list_stale_while_revalidate() {
 
     // Create first query run and populate cache
     let id1 = runtimedb::id::generate_query_run_id();
+    let snapshot1 = caching.get_or_create_snapshot("SELECT 1").await.unwrap();
     caching
         .create_query_run(CreateQueryRun {
             id: &id1,
-            sql_text: "SELECT 1",
-            sql_hash: "hash1",
-
+            snapshot_id: &snapshot1.id,
+            saved_query_id: None,
+            saved_query_version: None,
             trace_id: None,
         })
         .await
@@ -955,12 +960,13 @@ async fn test_query_list_stale_while_revalidate() {
 
     // Now create a second query run — this sets the dirty marker
     let id2 = runtimedb::id::generate_query_run_id();
+    let snapshot2 = caching.get_or_create_snapshot("SELECT 2").await.unwrap();
     caching
         .create_query_run(CreateQueryRun {
             id: &id2,
-            sql_text: "SELECT 2",
-            sql_hash: "hash2",
-
+            snapshot_id: &snapshot2.id,
+            saved_query_id: None,
+            saved_query_version: None,
             trace_id: None,
         })
         .await
@@ -1015,12 +1021,13 @@ async fn test_revalidation_lock_ownership_safety() {
 
     // Seed a query run so the list is non-empty for cache population
     let id1 = runtimedb::id::generate_query_run_id();
+    let snapshot1 = caching.get_or_create_snapshot("SELECT 1").await.unwrap();
     caching
         .create_query_run(CreateQueryRun {
             id: &id1,
-            sql_text: "SELECT 1",
-            sql_hash: "own_test",
-
+            snapshot_id: &snapshot1.id,
+            saved_query_id: None,
+            saved_query_version: None,
             trace_id: None,
         })
         .await
@@ -1038,12 +1045,13 @@ async fn test_revalidation_lock_ownership_safety() {
 
     // Create a second query run (sets dirty marker)
     let id2 = runtimedb::id::generate_query_run_id();
+    let snapshot2 = caching.get_or_create_snapshot("SELECT 2").await.unwrap();
     caching
         .create_query_run(CreateQueryRun {
             id: &id2,
-            sql_text: "SELECT 2",
-            sql_hash: "own_test2",
-
+            snapshot_id: &snapshot2.id,
+            saved_query_id: None,
+            saved_query_version: None,
             trace_id: None,
         })
         .await

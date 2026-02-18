@@ -6,8 +6,8 @@
 
 use super::{
     CatalogManager, ConnectionInfo, CreateQueryRun, DatasetInfo, OptimisticLock, PendingDeletion,
-    QueryResult, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus, ResultUpdate, TableInfo,
-    UploadInfo,
+    QueryResult, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus, ResultUpdate, SavedQuery,
+    SavedQueryVersion, SqlSnapshot, TableInfo, UploadInfo,
 };
 use crate::config::CacheConfig;
 use crate::secrets::{SecretMetadata, SecretStatus};
@@ -1122,6 +1122,64 @@ impl CatalogManager for CachingCatalogManager {
 
     async fn release_upload(&self, id: &str) -> Result<bool> {
         self.inner().release_upload(id).await
+    }
+
+    // SQL snapshot methods (pass-through, no caching)
+
+    async fn get_or_create_snapshot(&self, sql_text: &str) -> Result<SqlSnapshot> {
+        self.inner().get_or_create_snapshot(sql_text).await
+    }
+
+    // Saved query methods (pass-through, no caching)
+
+    async fn create_saved_query(&self, name: &str, snapshot_id: &str) -> Result<SavedQuery> {
+        self.inner().create_saved_query(name, snapshot_id).await
+    }
+
+    async fn get_saved_query(&self, id: &str) -> Result<Option<SavedQuery>> {
+        self.inner().get_saved_query(id).await
+    }
+
+    async fn list_saved_queries(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<SavedQuery>, bool)> {
+        self.inner().list_saved_queries(limit, offset).await
+    }
+
+    async fn update_saved_query(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        snapshot_id: &str,
+    ) -> Result<Option<SavedQuery>> {
+        self.inner().update_saved_query(id, name, snapshot_id).await
+    }
+
+    async fn delete_saved_query(&self, id: &str) -> Result<bool> {
+        self.inner().delete_saved_query(id).await
+    }
+
+    async fn get_saved_query_version(
+        &self,
+        saved_query_id: &str,
+        version: i32,
+    ) -> Result<Option<SavedQueryVersion>> {
+        self.inner()
+            .get_saved_query_version(saved_query_id, version)
+            .await
+    }
+
+    async fn list_saved_query_versions(
+        &self,
+        saved_query_id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<SavedQueryVersion>, bool)> {
+        self.inner()
+            .list_saved_query_versions(saved_query_id, limit, offset)
+            .await
     }
 
     // Dataset management methods (with cache invalidation for list_dataset_table_names)
