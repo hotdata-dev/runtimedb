@@ -759,6 +759,10 @@ pub trait CatalogManager: Debug + Send + Sync {
     /// Returns the number of results cleaned up.
     async fn cleanup_stale_results(&self, cutoff: DateTime<Utc>) -> Result<usize>;
 
+    /// Delete expired terminal results (ready/failed) older than the cutoff.
+    /// Returns the deleted results so the caller can schedule file deletion for any parquet paths.
+    async fn delete_expired_results(&self, cutoff: DateTime<Utc>) -> Result<Vec<QueryResult>>;
+
     // Upload management methods
 
     /// Create a new upload record.

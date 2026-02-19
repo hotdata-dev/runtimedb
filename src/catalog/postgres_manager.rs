@@ -628,6 +628,24 @@ impl CatalogManager for PostgresCatalogManager {
         Ok(result.rows_affected() as usize)
     }
 
+    #[tracing::instrument(
+        name = "catalog_delete_expired_results",
+        skip(self),
+        fields(db = "postgres")
+    )]
+    async fn delete_expired_results(&self, cutoff: DateTime<Utc>) -> Result<Vec<QueryResult>> {
+        let rows: Vec<QueryResultRow> = sqlx::query_as(
+            "DELETE FROM results
+             WHERE status IN ('ready', 'failed') AND created_at < $1
+             RETURNING id, parquet_path, status, error_message, created_at",
+        )
+        .bind(cutoff)
+        .fetch_all(self.backend.pool())
+        .await?;
+
+        Ok(rows.into_iter().map(QueryResult::from).collect())
+    }
+
     // Query run history methods
 
     #[tracing::instrument(

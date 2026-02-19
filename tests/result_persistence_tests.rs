@@ -259,6 +259,13 @@ impl CatalogManager for FailingCatalog {
         self.inner.cleanup_stale_results(cutoff).await
     }
 
+    async fn delete_expired_results(
+        &self,
+        cutoff: DateTime<Utc>,
+    ) -> Result<Vec<runtimedb::catalog::QueryResult>> {
+        self.inner.delete_expired_results(cutoff).await
+    }
+
     // Upload management methods
 
     async fn create_upload(&self, upload: &UploadInfo) -> Result<()> {
