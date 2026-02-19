@@ -9,42 +9,24 @@
 
 use arrow_schema::DataType;
 use sqlx::PgPool;
-use std::sync::Arc;
 use tempfile::TempDir;
 use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
 use testcontainers_modules::postgres::Postgres;
 
 // Production code imports
-use runtimedb::catalog::{CatalogManager, SqliteCatalogManager};
 use runtimedb::datafetch::{DataFetcher, NativeFetcher};
-use runtimedb::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
 use runtimedb::source::{Credential, Source};
 
 use crate::capturing_writer::CapturingBatchWriter;
 use crate::fixtures::{Constraints, FixtureCategory};
 use crate::harness::{
-    get_val_column_type, validate_batch_values, ComparisonMode, ExpectedOutput, FailureReason,
-    SemanticType, TestReport, TestShape, TestValue, TypeTestCase, TypeTestResult,
+    create_test_secret_manager, get_val_column_type, validate_batch_values, ComparisonMode,
+    ExpectedOutput, FailureReason, SecretManager, SemanticType, TestReport, TestShape, TestValue,
+    TypeTestCase, TypeTestResult,
 };
 
 /// Password used for test PostgreSQL containers.
 const TEST_PASSWORD: &str = "postgres";
-
-/// Create a test SecretManager for use in tests.
-async fn create_test_secret_manager(dir: &TempDir) -> SecretManager {
-    let db_path = dir.path().join("test_catalog.db");
-    let catalog = Arc::new(
-        SqliteCatalogManager::new(db_path.to_str().unwrap())
-            .await
-            .unwrap(),
-    );
-    catalog.run_migrations().await.unwrap();
-
-    let key = [0x42u8; 32];
-    let backend = Arc::new(EncryptedCatalogBackend::new(key, catalog.clone()));
-
-    SecretManager::new(backend, catalog, ENCRYPTED_PROVIDER_TYPE)
-}
 
 // ============================================================================
 // Test Case Builder

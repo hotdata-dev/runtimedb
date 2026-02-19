@@ -4,8 +4,15 @@
 //! different database backends. It defines semantic types (what the data means),
 //! test shapes (how values are structured), and comparison modes for validation.
 
+use std::sync::Arc;
+
 use arrow_schema::DataType;
 use rust_decimal::Decimal;
+use tempfile::TempDir;
+
+use runtimedb::catalog::{CatalogManager, SqliteCatalogManager};
+pub use runtimedb::secrets::SecretManager;
+use runtimedb::secrets::{EncryptedCatalogBackend, ENCRYPTED_PROVIDER_TYPE};
 
 use crate::fixtures::{Comparison, FixtureValue};
 
@@ -1077,10 +1084,17 @@ pub fn compare_arrow_value(
             ExpectedOutput::String(expected_str),
         ) => compare_decimal128(*value, *scale, expected_str, mode),
 
-        // String comparison - use JSON semantics if semantic type is JSON
+        // String comparison - use JSON semantics if semantic type is JSON,
+        // numeric equality for Decimal (normalizes trailing zeros, e.g. "0" == "0.00")
         (ArrowValue::Utf8(actual_str), ExpectedOutput::String(expected_str)) => {
             if matches!(_semantic_type, SemanticType::Json) {
                 compare_strings(expected_str, actual_str, &ComparisonMode::Json)
+            } else if matches!(_semantic_type, SemanticType::Decimal) {
+                compare_strings(
+                    expected_str,
+                    actual_str,
+                    &ComparisonMode::Approx { epsilon: 0.0 },
+                )
             } else {
                 compare_strings(expected_str, actual_str, mode)
             }
@@ -1559,6 +1573,29 @@ pub fn get_val_column_type(batches: &[RecordBatch]) -> Option<DataType> {
     batches.first().and_then(|batch| {
         find_column_index(batch, "val").map(|idx| batch.schema().field(idx).data_type().clone())
     })
+}
+
+// ============================================================================
+// Secret Manager
+// ============================================================================
+
+/// Create a throwaway [`SecretManager`] backed by an in-memory SQLite catalog.
+///
+/// Used by every backend-specific test to store credentials (passwords,
+/// service-account keys, etc.) through the same path the production code uses.
+pub async fn create_test_secret_manager(dir: &TempDir) -> SecretManager {
+    let db_path = dir.path().join("test_catalog.db");
+    let catalog = Arc::new(
+        SqliteCatalogManager::new(db_path.to_str().unwrap())
+            .await
+            .unwrap(),
+    );
+    catalog.run_migrations().await.unwrap();
+
+    let key = [0x42u8; 32];
+    let backend = Arc::new(EncryptedCatalogBackend::new(key, catalog.clone()));
+
+    SecretManager::new(backend, catalog, ENCRYPTED_PROVIDER_TYPE)
 }
 
 // ============================================================================
