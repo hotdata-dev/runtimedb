@@ -101,6 +101,7 @@ fn build_bigquery_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Boolean,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -124,6 +125,7 @@ fn build_bigquery_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Int64,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -151,6 +153,7 @@ fn build_bigquery_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Float64,
             values: float_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -169,6 +172,7 @@ fn build_bigquery_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Utf8,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -187,6 +191,7 @@ fn build_bigquery_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Utf8,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -215,6 +220,7 @@ fn build_bigquery_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Utf8,
             values: string_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -255,6 +261,7 @@ fn build_bigquery_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Binary,
             values: bytes_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -300,6 +307,7 @@ fn build_bigquery_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Date32,
             values: date_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -347,6 +355,7 @@ fn build_bigquery_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, None),
             values: datetime_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -396,6 +405,7 @@ fn build_bigquery_test_cases() -> Vec<TypeTestCase> {
             ),
             values: timestamp_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -441,6 +451,7 @@ fn build_bigquery_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Utf8,
             values: time_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -480,6 +491,7 @@ fn build_bigquery_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Utf8,
             values: json_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
