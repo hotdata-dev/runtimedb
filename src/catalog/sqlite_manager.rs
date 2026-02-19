@@ -671,28 +671,42 @@ impl CatalogManager for SqliteCatalogManager {
     )]
     async fn delete_expired_results(&self, cutoff: DateTime<Utc>) -> Result<Vec<QueryResult>> {
         // SQLite doesn't reliably support RETURNING, so use SELECT then DELETE
-        let rows: Vec<QueryResultRow> = sqlx::query_as(
-            "SELECT id, parquet_path, status, error_message, created_at
-             FROM results
-             WHERE status IN ('ready', 'failed') AND created_at < ?",
-        )
-        .bind(cutoff)
-        .fetch_all(self.backend.pool())
-        .await?;
+        // inside a BEGIN IMMEDIATE transaction to prevent concurrent modifications.
+        let mut conn = self.backend.pool().acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
 
-        if rows.is_empty() {
-            return Ok(vec![]);
+        let result: Result<Vec<QueryResult>> = async {
+            let rows: Vec<QueryResultRow> = sqlx::query_as(
+                "SELECT id, parquet_path, status, error_message, created_at
+                 FROM results
+                 WHERE status IN ('ready', 'failed') AND created_at < ?",
+            )
+            .bind(cutoff)
+            .fetch_all(&mut *conn)
+            .await?;
+
+            if rows.is_empty() {
+                return Ok(vec![]);
+            }
+
+            sqlx::query(
+                "DELETE FROM results
+                 WHERE status IN ('ready', 'failed') AND created_at < ?",
+            )
+            .bind(cutoff)
+            .execute(&mut *conn)
+            .await?;
+
+            Ok(rows.into_iter().map(QueryResult::from).collect())
         }
+        .await;
 
-        sqlx::query(
-            "DELETE FROM results
-             WHERE status IN ('ready', 'failed') AND created_at < ?",
-        )
-        .bind(cutoff)
-        .execute(self.backend.pool())
-        .await?;
+        match &result {
+            Ok(_) => sqlx::query("COMMIT").execute(&mut *conn).await?,
+            Err(_) => sqlx::query("ROLLBACK").execute(&mut *conn).await?,
+        };
 
-        Ok(rows.into_iter().map(QueryResult::from).collect())
+        result
     }
 
     // Query run history methods
