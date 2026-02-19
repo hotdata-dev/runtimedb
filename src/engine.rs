@@ -2758,6 +2758,7 @@ impl RuntimeEngine {
         catalog: Arc<dyn CatalogManager>,
         shutdown_token: CancellationToken,
         retention_days: u64,
+        deletion_grace_period: Duration,
     ) -> Option<tokio::task::JoinHandle<()>> {
         if retention_days == 0 {
             info!("Result retention worker disabled (retention_days is 0)");
@@ -2771,9 +2772,8 @@ impl RuntimeEngine {
         );
 
         Some(tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(
-                RESULT_RETENTION_CLEANUP_INTERVAL_SECS,
-            ));
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(RESULT_RETENTION_CLEANUP_INTERVAL_SECS));
             loop {
                 tokio::select! {
                     _ = shutdown_token.cancelled() => {
@@ -2788,7 +2788,9 @@ impl RuntimeEngine {
                             }
                             Ok(deleted) => {
                                 let count = deleted.len();
-                                let now = Utc::now();
+                                let grace = chrono::Duration::from_std(deletion_grace_period)
+                                    .unwrap_or(chrono::Duration::seconds(60));
+                                let delete_after = Utc::now() + grace;
                                 for result in &deleted {
                                     if let Some(ref parquet_path) = result.parquet_path {
                                         // Strip "/data.parquet" suffix to get directory path
@@ -2796,7 +2798,7 @@ impl RuntimeEngine {
                                             .strip_suffix("/data.parquet")
                                             .unwrap_or(parquet_path);
                                         if let Err(e) = catalog
-                                            .schedule_file_deletion(dir_path, now)
+                                            .schedule_file_deletion(dir_path, delete_after)
                                             .await
                                         {
                                             warn!(
@@ -3175,6 +3177,7 @@ impl RuntimeEngineBuilder {
             catalog.clone(),
             shutdown_token.clone(),
             self.result_retention_days,
+            self.deletion_grace_period,
         );
 
         // Initialize catalog (starts warmup loop if configured)
@@ -3838,16 +3841,32 @@ mod tests {
         catalog.run_migrations().await.unwrap();
 
         // Create a result in ready state with a fake parquet_path
-        let r1 = catalog.create_result(ResultStatus::Processing).await.unwrap();
+        let r1 = catalog
+            .create_result(ResultStatus::Processing)
+            .await
+            .unwrap();
         catalog
-            .update_result(&r1, ResultUpdate::Ready { parquet_path: "cache/_runtimedb_internal/runtimedb_results/r1/data.parquet" })
+            .update_result(
+                &r1,
+                ResultUpdate::Ready {
+                    parquet_path: "cache/_runtimedb_internal/runtimedb_results/r1/data.parquet",
+                },
+            )
             .await
             .unwrap();
 
         // Create a result in failed state
-        let r2 = catalog.create_result(ResultStatus::Processing).await.unwrap();
+        let r2 = catalog
+            .create_result(ResultStatus::Processing)
+            .await
+            .unwrap();
         catalog
-            .update_result(&r2, ResultUpdate::Failed { error_message: Some("test error") })
+            .update_result(
+                &r2,
+                ResultUpdate::Failed {
+                    error_message: Some("test error"),
+                },
+            )
             .await
             .unwrap();
 
@@ -3855,7 +3874,10 @@ mod tests {
         let r3 = catalog.create_result(ResultStatus::Pending).await.unwrap();
 
         // Create a result in processing state
-        let r4 = catalog.create_result(ResultStatus::Processing).await.unwrap();
+        let r4 = catalog
+            .create_result(ResultStatus::Processing)
+            .await
+            .unwrap();
 
         // Delete expired results with cutoff in the future (everything is expired)
         let cutoff = Utc::now() + chrono::Duration::seconds(60);
@@ -3868,12 +3890,24 @@ mod tests {
         assert!(deleted_ids.contains(&r2.as_str()));
 
         // Pending and processing should remain
-        assert!(catalog.get_result(&r3).await.unwrap().is_some(), "Pending result should remain");
-        assert!(catalog.get_result(&r4).await.unwrap().is_some(), "Processing result should remain");
+        assert!(
+            catalog.get_result(&r3).await.unwrap().is_some(),
+            "Pending result should remain"
+        );
+        assert!(
+            catalog.get_result(&r4).await.unwrap().is_some(),
+            "Processing result should remain"
+        );
 
         // Deleted results should be gone from DB
-        assert!(catalog.get_result(&r1).await.unwrap().is_none(), "Ready result should be deleted");
-        assert!(catalog.get_result(&r2).await.unwrap().is_none(), "Failed result should be deleted");
+        assert!(
+            catalog.get_result(&r1).await.unwrap().is_none(),
+            "Ready result should be deleted"
+        );
+        assert!(
+            catalog.get_result(&r2).await.unwrap().is_none(),
+            "Failed result should be deleted"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3889,9 +3923,17 @@ mod tests {
         catalog.run_migrations().await.unwrap();
 
         // Create a result in ready state
-        let r1 = catalog.create_result(ResultStatus::Processing).await.unwrap();
+        let r1 = catalog
+            .create_result(ResultStatus::Processing)
+            .await
+            .unwrap();
         catalog
-            .update_result(&r1, ResultUpdate::Ready { parquet_path: "some/path/data.parquet" })
+            .update_result(
+                &r1,
+                ResultUpdate::Ready {
+                    parquet_path: "some/path/data.parquet",
+                },
+            )
             .await
             .unwrap();
 
@@ -3899,8 +3941,14 @@ mod tests {
         let cutoff = Utc::now() - chrono::Duration::days(1);
         let deleted = catalog.delete_expired_results(cutoff).await.unwrap();
 
-        assert!(deleted.is_empty(), "No results should be deleted when cutoff is in the past");
-        assert!(catalog.get_result(&r1).await.unwrap().is_some(), "Result should still exist");
+        assert!(
+            deleted.is_empty(),
+            "No results should be deleted when cutoff is in the past"
+        );
+        assert!(
+            catalog.get_result(&r1).await.unwrap().is_some(),
+            "Result should still exist"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
