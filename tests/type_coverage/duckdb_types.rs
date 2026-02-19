@@ -43,6 +43,7 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Boolean,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -64,6 +65,7 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Int8,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // SMALLINT: -32768 to 32767
@@ -82,6 +84,7 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Int16,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // INTEGER: -2147483648 to 2147483647
@@ -100,6 +103,7 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Int32,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // BIGINT: -9223372036854775808 to 9223372036854775807
@@ -118,6 +122,7 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Int64,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // UTINYINT: 0 to 255
@@ -136,6 +141,7 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::UInt8,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // USMALLINT: 0 to 65535
@@ -154,6 +160,7 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::UInt16,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // UINTEGER: 0 to 4294967295
@@ -172,6 +179,7 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::UInt32,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // UBIGINT: 0 to 18446744073709551615
@@ -190,6 +198,7 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::UInt64,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -215,6 +224,7 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Float32,
             values: float_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // DOUBLE (64-bit) - exclude NaN/Infinity (DuckDB doesn't support these literals)
@@ -231,6 +241,7 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Float64,
             values: double_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -249,6 +260,7 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Decimal128(38, 10),
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -270,6 +282,7 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Utf8,
             values: varchar_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -285,6 +298,7 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, None),
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -298,6 +312,7 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Utf8,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -314,6 +329,7 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
             ),
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -355,6 +371,7 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Date32,
             values: date_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -399,6 +416,7 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Time64(TimeUnit::Microsecond),
             values: time_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -437,6 +455,7 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Interval(arrow_schema::IntervalUnit::MonthDayNano),
             values: interval_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -483,6 +502,7 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Binary,
             values: blob_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -528,7 +548,54 @@ fn build_duckdb_test_cases() -> Vec<TypeTestCase> {
         expected_arrow_type: DataType::Decimal128(38, 0),
         values: hugeint_values,
         shape: TestShape::Scalar,
+        setup_sql: None,
     });
+
+    // ========================================================================
+    // GEOMETRY type - requires DuckDB Spatial extension
+    // DuckDB stores geometry in an internal format; fetch converts via ST_AsBinary()
+    // to standard WKB Binary, matching PostgreSQL and MySQL adapters.
+    // ========================================================================
+    {
+        // WKB hex for POINT(1.0 2.0): 01 01000000 000000000000F03F 0000000000000040
+        let point_wkb = "0101000000000000000000f03f0000000000000040";
+        // WKB hex for POINT(0.0 0.0): 01 01000000 0000000000000000 0000000000000000
+        let origin_wkb = "01010000000000000000000000000000000000000000";
+
+        let geom_values = vec![
+            TestValue {
+                sql_literal: "ST_Point(1.0, 2.0)".to_string(),
+                expected: ExpectedOutput::String(point_wkb.to_string()),
+                comparison: ComparisonMode::Exact,
+                note: Some("Point(1,2)".to_string()),
+            },
+            TestValue {
+                sql_literal: "ST_Point(0.0, 0.0)".to_string(),
+                expected: ExpectedOutput::String(origin_wkb.to_string()),
+                comparison: ComparisonMode::Exact,
+                note: Some("Origin".to_string()),
+            },
+            TestValue {
+                sql_literal: "NULL".to_string(),
+                expected: ExpectedOutput::Null,
+                comparison: ComparisonMode::Exact,
+                note: Some("NULL geometry".to_string()),
+            },
+        ];
+        cases.push(TypeTestCase {
+            db_type: "GEOMETRY".to_string(),
+            semantic_type: SemanticType::Geometric,
+            expected_arrow_type: DataType::Binary,
+            values: geom_values,
+            shape: TestShape::Scalar,
+            setup_sql: Some(
+                "INSTALL spatial; LOAD spatial; \
+                 SET autoinstall_known_extensions=true; \
+                 SET autoload_known_extensions=true;"
+                    .to_string(),
+            ),
+        });
+    }
 
     cases
 }
@@ -591,6 +658,34 @@ async fn run_test_case(
                 );
             }
         };
+
+        // Run optional setup SQL (e.g., loading extensions)
+        if let Some(setup_sql) = &case.setup_sql {
+            if let Err(e) = conn.execute_batch(setup_sql) {
+                return TypeTestResult::skipped(
+                    &case.db_type,
+                    format!("Setup SQL failed (extension may not be available): {}", e),
+                );
+            }
+
+            // For spatial types, verify the extension works on a separate connection.
+            // fetch_table opens its own connection, and file-based DuckDB with the
+            // bundled crate may not support spatial extension loading across connections.
+            if case.semantic_type == SemanticType::Geometric {
+                let probe = Connection::open(db_path);
+                let spatial_works = probe.is_ok() && {
+                    let c = probe.unwrap();
+                    let _ = c.execute_batch("LOAD spatial;");
+                    c.prepare("SELECT ST_AsBinary(ST_Point(0,0))").is_ok()
+                };
+                if !spatial_works {
+                    return TypeTestResult::skipped(
+                        &case.db_type,
+                        "Spatial extension not functional across file-based connections (bundled crate limitation)",
+                    );
+                }
+            }
+        }
 
         // Drop table if exists (cleanup from previous run)
         let drop_sql = format!("DROP TABLE IF EXISTS {}", table_name);

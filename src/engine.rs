@@ -4,7 +4,7 @@ use crate::catalog::{
     SavedQuery, SavedQueryVersion, SqliteCatalogManager, TableInfo,
 };
 use crate::datafetch::native::StreamingParquetWriter;
-use crate::datafetch::{BatchWriter, FetchOrchestrator, NativeFetcher};
+use crate::datafetch::{BatchWriter, FetchOrchestrator, GeometryColumnInfo, NativeFetcher};
 use crate::datafusion::UnifiedCatalogList;
 use crate::http::models::{
     ConnectionRefreshResult, ConnectionSchemaError, RefreshWarning, SchemaRefreshResult,
@@ -173,6 +173,110 @@ pub struct RuntimeEngine {
     persistence_tasks: Mutex<JoinSet<()>>,
     /// Handle for the stale result cleanup worker task.
     stale_result_cleanup_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+/// Build a reader-compatible schema where geometry (Binary) columns are replaced with Utf8.
+///
+/// Arrow's CSV/JSON readers don't support `DataType::Binary` directly, so geometry
+/// columns must be read as strings first, then hex-decoded to binary afterwards.
+fn build_reader_schema(
+    schema: &Schema,
+    geometry_columns: &HashMap<String, GeometryColumnInfo>,
+) -> Arc<Schema> {
+    use datafusion::arrow::datatypes::{DataType, Field};
+
+    if geometry_columns.is_empty() {
+        return Arc::new(schema.clone());
+    }
+
+    let fields: Vec<Field> = schema
+        .fields()
+        .iter()
+        .map(|f| {
+            if geometry_columns.contains_key(f.name()) {
+                Field::new(f.name(), DataType::Utf8, f.is_nullable())
+            } else {
+                f.as_ref().clone()
+            }
+        })
+        .collect();
+
+    Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
+}
+
+/// Hex-decode geometry columns in a RecordBatch.
+///
+/// When CSV/JSON data contains geometry values as hex-encoded WKB strings,
+/// the reader stores them as Utf8 strings. This function converts those hex
+/// strings into actual WKB binary bytes that spatial functions can process,
+/// and rebuilds the batch with the target schema (Binary columns).
+fn hex_decode_geometry_columns(
+    batch: &RecordBatch,
+    target_schema: &Arc<Schema>,
+    geometry_columns: &HashMap<String, GeometryColumnInfo>,
+) -> Result<RecordBatch> {
+    use datafusion::arrow::array::{BinaryArray, StringArray};
+
+    if geometry_columns.is_empty() {
+        return Ok(batch.clone());
+    }
+
+    let mut columns: Vec<Arc<dyn datafusion::arrow::array::Array>> =
+        Vec::with_capacity(batch.num_columns());
+
+    for (i, field) in batch.schema().fields().iter().enumerate() {
+        if geometry_columns.contains_key(field.name()) {
+            // This column is a geometry column read as Utf8 - hex-decode to Binary
+            let col = batch.column(i);
+            let string_array = col.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Geometry column '{}' expected Utf8 type, got {:?}",
+                    field.name(),
+                    col.data_type()
+                )
+            })?;
+
+            let decoded: Vec<Option<Vec<u8>>> = string_array
+                .iter()
+                .map(|opt_val| {
+                    opt_val
+                        .map(|hex_str| {
+                            hex::decode(hex_str).map_err(|e| {
+                                anyhow::anyhow!(
+                                    "Geometry column '{}' contains invalid hex: {}",
+                                    field.name(),
+                                    e
+                                )
+                            })
+                        })
+                        .transpose()
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            let decoded_refs: Vec<Option<&[u8]>> = decoded.iter().map(|v| v.as_deref()).collect();
+            columns.push(Arc::new(BinaryArray::from(decoded_refs)));
+        } else {
+            columns.push(batch.column(i).clone());
+        }
+    }
+
+    Ok(RecordBatch::try_new(target_schema.clone(), columns)?)
+}
+
+/// Extract GeoParquet geometry column metadata from Parquet file-level metadata.
+///
+/// Looks for the "geo" key in Parquet key-value metadata and parses it
+/// according to the GeoParquet spec to extract geometry column info.
+fn extract_parquet_geometry_columns(
+    metadata: &datafusion::parquet::file::metadata::ParquetMetaData,
+) -> HashMap<String, GeometryColumnInfo> {
+    metadata
+        .file_metadata()
+        .key_value_metadata()
+        .and_then(|kv| kv.iter().find(|item| item.key == "geo"))
+        .and_then(|item| item.value.as_ref())
+        .map(|geo_json| crate::datafetch::parse_geoparquet_metadata(geo_json))
+        .unwrap_or_default()
 }
 
 impl RuntimeEngine {
@@ -1935,7 +2039,7 @@ impl RuntimeEngine {
                 match data_source {
                     DataSource::FilePath(path) => {
                         // Determine schema: use explicit columns if provided, otherwise infer
-                        let schema = if let Some(ref cols) = explicit_columns {
+                        let (schema, geometry_columns) = if let Some(ref cols) = explicit_columns {
                             // Read header to get column names from data
                             let file = release_on_parse_error!(File::open(&path));
                             let mut reader = BufReader::new(file);
@@ -1944,11 +2048,14 @@ impl RuntimeEngine {
                                 .infer_schema(&mut reader, Some(1)));
                             let data_columns: Vec<String> =
                                 inferred.fields().iter().map(|f| f.name().clone()).collect();
-                            // Build schema from explicit column definitions
-                            release_on_schema_error!(crate::datasets::build_schema_from_columns(
-                                cols,
-                                &data_columns
-                            ))
+                            // Build schema from explicit column definitions (with geometry metadata)
+                            let parsed = release_on_schema_error!(
+                                crate::datasets::build_schema_from_columns_full(
+                                    cols,
+                                    &data_columns
+                                )
+                            );
+                            (parsed.schema, parsed.geometry_columns)
                         } else {
                             // Infer schema from file (reads first 10000 rows)
                             let file = release_on_parse_error!(File::open(&path));
@@ -1956,36 +2063,46 @@ impl RuntimeEngine {
                             let (schema, _) = release_on_parse_error!(Format::default()
                                 .with_header(true)
                                 .infer_schema(&mut reader, Some(10_000)));
-                            Arc::new(schema)
+                            (Arc::new(schema), std::collections::HashMap::new())
                         };
+
+                        // Build reader schema (geometry columns as Utf8 for CSV parsing)
+                        let reader_schema = build_reader_schema(&schema, &geometry_columns);
 
                         // Reopen file for streaming read
                         let file = release_on_parse_error!(File::open(&path));
-                        let csv_reader =
-                            release_on_parse_error!(ReaderBuilder::new(schema.clone())
-                                .with_header(true)
-                                .with_batch_size(8192)
-                                .build(BufReader::new(file)));
+                        let csv_reader = release_on_parse_error!(ReaderBuilder::new(reader_schema)
+                            .with_header(true)
+                            .with_batch_size(8192)
+                            .build(BufReader::new(file)));
 
-                        // Initialize writer with schema
-                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
-                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        // Initialize writer with target schema and geometry metadata
+                        let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
+                        if !geometry_columns.is_empty() {
+                            writer.set_geometry_columns(geometry_columns.clone());
+                        }
                         release_on_storage_error!(writer.init(&schema));
 
                         // Stream batches directly to writer
                         let mut row_count = 0usize;
                         for batch_result in csv_reader {
                             let batch = release_on_parse_error!(batch_result);
+                            // Hex-decode geometry columns from CSV text to WKB binary
+                            let batch = release_on_parse_error!(hex_decode_geometry_columns(
+                                &batch,
+                                &schema,
+                                &geometry_columns
+                            ));
                             row_count += batch.num_rows();
                             release_on_storage_error!(writer.write_batch(&batch));
                         }
 
-                        release_on_storage_error!(writer.close());
+                        release_on_storage_error!(Box::new(writer).close());
                         (schema, row_count)
                     }
                     DataSource::InMemory(data) => {
                         // Determine schema: use explicit columns if provided, otherwise infer
-                        let schema = if let Some(ref cols) = explicit_columns {
+                        let (schema, geometry_columns) = if let Some(ref cols) = explicit_columns {
                             // Read header to get column names from data
                             let mut cursor = std::io::Cursor::new(&data);
                             let (inferred, _) = release_on_parse_error!(Format::default()
@@ -1993,40 +2110,53 @@ impl RuntimeEngine {
                                 .infer_schema(&mut cursor, Some(1)));
                             let data_columns: Vec<String> =
                                 inferred.fields().iter().map(|f| f.name().clone()).collect();
-                            // Build schema from explicit column definitions
-                            release_on_schema_error!(crate::datasets::build_schema_from_columns(
-                                cols,
-                                &data_columns
-                            ))
+                            // Build schema from explicit column definitions (with geometry metadata)
+                            let parsed = release_on_schema_error!(
+                                crate::datasets::build_schema_from_columns_full(
+                                    cols,
+                                    &data_columns
+                                )
+                            );
+                            (parsed.schema, parsed.geometry_columns)
                         } else {
                             // Infer schema (reads first 10000 rows)
                             let mut cursor = std::io::Cursor::new(&data);
                             let (schema, _) = release_on_parse_error!(Format::default()
                                 .with_header(true)
                                 .infer_schema(&mut cursor, Some(10_000)));
-                            Arc::new(schema)
+                            (Arc::new(schema), std::collections::HashMap::new())
                         };
+
+                        // Build reader schema (geometry columns as Utf8 for CSV parsing)
+                        let reader_schema = build_reader_schema(&schema, &geometry_columns);
 
                         // Reset cursor for reading
                         let cursor = std::io::Cursor::new(&data);
-                        let csv_reader =
-                            release_on_parse_error!(ReaderBuilder::new(schema.clone())
-                                .with_header(true)
-                                .with_batch_size(8192)
-                                .build(cursor));
+                        let csv_reader = release_on_parse_error!(ReaderBuilder::new(reader_schema)
+                            .with_header(true)
+                            .with_batch_size(8192)
+                            .build(cursor));
 
-                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
-                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
+                        if !geometry_columns.is_empty() {
+                            writer.set_geometry_columns(geometry_columns.clone());
+                        }
                         release_on_storage_error!(writer.init(&schema));
 
                         let mut row_count = 0usize;
                         for batch_result in csv_reader {
                             let batch = release_on_parse_error!(batch_result);
+                            // Hex-decode geometry columns from CSV text to WKB binary
+                            let batch = release_on_parse_error!(hex_decode_geometry_columns(
+                                &batch,
+                                &schema,
+                                &geometry_columns
+                            ));
                             row_count += batch.num_rows();
                             release_on_storage_error!(writer.write_batch(&batch));
                         }
 
-                        release_on_storage_error!(writer.close());
+                        release_on_storage_error!(Box::new(writer).close());
                         (schema, row_count)
                     }
                 }
@@ -2045,42 +2175,54 @@ impl RuntimeEngine {
 
                         // Determine final schema: use explicit columns validated against observed fields,
                         // or use inferred schema if no explicit columns provided
-                        let schema = if let Some(ref cols) = explicit_columns {
+                        let (schema, geometry_columns) = if let Some(ref cols) = explicit_columns {
                             // Get observed field names from inferred schema
                             let observed_fields: Vec<String> = inferred_schema
                                 .fields()
                                 .iter()
                                 .map(|f| f.name().clone())
                                 .collect();
-                            release_on_schema_error!(
-                                crate::datasets::build_schema_from_columns_for_json(
+                            let parsed = release_on_schema_error!(
+                                crate::datasets::build_schema_from_columns_for_json_full(
                                     cols,
                                     &observed_fields
                                 )
-                            )
+                            );
+                            (parsed.schema, parsed.geometry_columns)
                         } else {
-                            Arc::new(inferred_schema)
+                            (Arc::new(inferred_schema), std::collections::HashMap::new())
                         };
+
+                        // Build reader schema (geometry columns as Utf8 for JSON parsing)
+                        let reader_schema = build_reader_schema(&schema, &geometry_columns);
 
                         // Open file for streaming read
                         let file = release_on_parse_error!(File::open(&path));
                         let json_reader =
-                            release_on_parse_error!(arrow_json::ReaderBuilder::new(schema.clone())
+                            release_on_parse_error!(arrow_json::ReaderBuilder::new(reader_schema)
                                 .with_batch_size(8192)
                                 .build(BufReader::new(file)));
 
-                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
-                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
+                        if !geometry_columns.is_empty() {
+                            writer.set_geometry_columns(geometry_columns.clone());
+                        }
                         release_on_storage_error!(writer.init(&schema));
 
                         let mut row_count = 0usize;
                         for batch_result in json_reader {
                             let batch = release_on_parse_error!(batch_result);
+                            // Hex-decode geometry columns from JSON text to WKB binary
+                            let batch = release_on_parse_error!(hex_decode_geometry_columns(
+                                &batch,
+                                &schema,
+                                &geometry_columns
+                            ));
                             row_count += batch.num_rows();
                             release_on_storage_error!(writer.write_batch(&batch));
                         }
 
-                        release_on_storage_error!(writer.close());
+                        release_on_storage_error!(Box::new(writer).close());
                         (schema, row_count)
                     }
                     DataSource::InMemory(data) => {
@@ -2092,42 +2234,54 @@ impl RuntimeEngine {
 
                         // Determine final schema: use explicit columns validated against observed fields,
                         // or use inferred schema if no explicit columns provided
-                        let schema = if let Some(ref cols) = explicit_columns {
+                        let (schema, geometry_columns) = if let Some(ref cols) = explicit_columns {
                             // Get observed field names from inferred schema
                             let observed_fields: Vec<String> = inferred_schema
                                 .fields()
                                 .iter()
                                 .map(|f| f.name().clone())
                                 .collect();
-                            release_on_schema_error!(
-                                crate::datasets::build_schema_from_columns_for_json(
+                            let parsed = release_on_schema_error!(
+                                crate::datasets::build_schema_from_columns_for_json_full(
                                     cols,
                                     &observed_fields
                                 )
-                            )
+                            );
+                            (parsed.schema, parsed.geometry_columns)
                         } else {
-                            Arc::new(inferred_schema)
+                            (Arc::new(inferred_schema), std::collections::HashMap::new())
                         };
+
+                        // Build reader schema (geometry columns as Utf8 for JSON parsing)
+                        let reader_schema = build_reader_schema(&schema, &geometry_columns);
 
                         // Open cursor for reading
                         let cursor = std::io::Cursor::new(&data);
                         let json_reader =
-                            release_on_parse_error!(arrow_json::ReaderBuilder::new(schema.clone())
+                            release_on_parse_error!(arrow_json::ReaderBuilder::new(reader_schema)
                                 .with_batch_size(8192)
                                 .build(cursor));
 
-                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
-                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
+                        if !geometry_columns.is_empty() {
+                            writer.set_geometry_columns(geometry_columns.clone());
+                        }
                         release_on_storage_error!(writer.init(&schema));
 
                         let mut row_count = 0usize;
                         for batch_result in json_reader {
                             let batch = release_on_parse_error!(batch_result);
+                            // Hex-decode geometry columns from JSON text to WKB binary
+                            let batch = release_on_parse_error!(hex_decode_geometry_columns(
+                                &batch,
+                                &schema,
+                                &geometry_columns
+                            ));
                             row_count += batch.num_rows();
                             release_on_storage_error!(writer.write_batch(&batch));
                         }
 
-                        release_on_storage_error!(writer.close());
+                        release_on_storage_error!(Box::new(writer).close());
                         (schema, row_count)
                     }
                 }
@@ -2147,11 +2301,18 @@ impl RuntimeEngine {
                         let builder =
                             release_on_parse_error!(ParquetRecordBatchReaderBuilder::try_new(file));
                         let schema = builder.schema().clone();
+
+                        // Extract GeoParquet metadata if present
+                        let geometry_columns = extract_parquet_geometry_columns(builder.metadata());
+
                         let parquet_reader =
                             release_on_parse_error!(builder.with_batch_size(8192).build());
 
-                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
-                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
+                        // Set geometry columns before init() to include in GeoParquet metadata
+                        if !geometry_columns.is_empty() {
+                            writer.set_geometry_columns(geometry_columns);
+                        }
                         release_on_storage_error!(writer.init(&schema));
 
                         let mut row_count = 0usize;
@@ -2161,7 +2322,7 @@ impl RuntimeEngine {
                             release_on_storage_error!(writer.write_batch(&batch));
                         }
 
-                        release_on_storage_error!(writer.close());
+                        release_on_storage_error!(Box::new(writer).close());
                         (schema, row_count)
                     }
                     DataSource::InMemory(data) => {
@@ -2171,11 +2332,18 @@ impl RuntimeEngine {
                             ParquetRecordBatchReaderBuilder::try_new(cursor)
                         );
                         let schema = builder.schema().clone();
+
+                        // Extract GeoParquet metadata if present
+                        let geometry_columns = extract_parquet_geometry_columns(builder.metadata());
+
                         let parquet_reader =
                             release_on_parse_error!(builder.with_batch_size(8192).build());
 
-                        let mut writer: Box<dyn crate::datafetch::BatchWriter> =
-                            Box::new(StreamingParquetWriter::new(handle.local_path.clone()));
+                        let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
+                        // Set geometry columns before init() to include in GeoParquet metadata
+                        if !geometry_columns.is_empty() {
+                            writer.set_geometry_columns(geometry_columns);
+                        }
                         release_on_storage_error!(writer.init(&schema));
 
                         let mut row_count = 0usize;
@@ -2185,7 +2353,7 @@ impl RuntimeEngine {
                             release_on_storage_error!(writer.write_batch(&batch));
                         }
 
-                        release_on_storage_error!(writer.close());
+                        release_on_storage_error!(Box::new(writer).close());
                         (schema, row_count)
                     }
                 }
@@ -2841,6 +3009,9 @@ impl RuntimeEngineBuilder {
             // liquid-cache adds the PushdownOptimizer if configured
             build_instrumented_context(object_stores, liquid_cache_config)?
         };
+
+        // Register spatial functions from geodatafusion (st_area, st_distance, etc.)
+        geodatafusion::register(&df_ctx);
 
         // Step 6: Initialize secret manager
         let (secret_key, using_default_key) = match self.secret_key {

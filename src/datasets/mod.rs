@@ -7,7 +7,10 @@ pub mod validation;
 pub use error::DatasetError;
 pub use schema::{
     build_schema_from_columns, build_schema_from_columns_for_json,
-    build_schema_from_columns_unchecked, parse_column_type, ColumnTypeError, SchemaError,
+    build_schema_from_columns_for_json_full, build_schema_from_columns_full,
+    build_schema_from_columns_unchecked, build_schema_from_columns_unchecked_full,
+    parse_column_type, parse_column_type_full, ColumnTypeError, ParsedColumnType, ParsedSchema,
+    SchemaError,
 };
 pub use validation::*;
 

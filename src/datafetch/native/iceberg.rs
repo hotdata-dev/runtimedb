@@ -175,6 +175,7 @@ pub async fn discover_tables(
                 table_name: table_ident.name().to_string(),
                 table_type: "BASE TABLE".to_string(),
                 columns,
+                geometry_columns: std::collections::HashMap::new(),
             });
         }
     }

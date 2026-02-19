@@ -1,5 +1,7 @@
 //! Schema building from explicit column definitions.
 
+use crate::datafetch::types::normalize_geometry_type;
+use crate::datafetch::GeometryColumnInfo;
 use crate::http::models::ColumnDefinition;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use std::collections::HashMap;
@@ -62,6 +64,24 @@ impl std::error::Error for SchemaError {
     }
 }
 
+/// Result of parsing a column type, including optional geometry metadata.
+#[derive(Debug, Clone)]
+pub struct ParsedColumnType {
+    /// The Arrow data type for this column
+    pub data_type: DataType,
+    /// Optional geometry metadata for GEOMETRY/GEOGRAPHY columns
+    pub geometry_info: Option<GeometryColumnInfo>,
+}
+
+/// Result of building a schema, including the Arrow schema and geometry column metadata.
+#[derive(Debug)]
+pub struct ParsedSchema {
+    /// The Arrow schema
+    pub schema: Arc<Schema>,
+    /// Geometry column metadata for GeoParquet output (column name -> info)
+    pub geometry_columns: HashMap<String, GeometryColumnInfo>,
+}
+
 /// Supported type names for error messages.
 const SUPPORTED_TYPES: &[&str] = &[
     "VARCHAR",
@@ -95,28 +115,50 @@ const SUPPORTED_TYPES: &[&str] = &[
     "BYTEA",
     "UUID",
     "JSON",
+    "GEOMETRY",
+    "GEOGRAPHY",
 ];
 
 /// Parse a column definition into an Arrow DataType.
+///
+/// For backwards compatibility, this returns just the DataType.
+/// Use `parse_column_type_full` to get geometry metadata as well.
 pub fn parse_column_type(
     column_name: &str,
     definition: &ColumnDefinition,
 ) -> Result<DataType, ColumnTypeError> {
+    parse_column_type_full(column_name, definition).map(|parsed| parsed.data_type)
+}
+
+/// Parse a column definition into a full ParsedColumnType with optional geometry metadata.
+pub fn parse_column_type_full(
+    column_name: &str,
+    definition: &ColumnDefinition,
+) -> Result<ParsedColumnType, ColumnTypeError> {
     match definition {
-        ColumnDefinition::Simple(type_str) => parse_type_string(column_name, type_str, None, None),
-        ColumnDefinition::Detailed(spec) => {
-            parse_type_string(column_name, &spec.data_type, spec.precision, spec.scale)
+        ColumnDefinition::Simple(type_str) => {
+            parse_type_string_full(column_name, type_str, None, None, None, None)
         }
+        ColumnDefinition::Detailed(spec) => parse_type_string_full(
+            column_name,
+            &spec.data_type,
+            spec.precision,
+            spec.scale,
+            spec.srid,
+            spec.geometry_type.as_deref(),
+        ),
     }
 }
 
-/// Parse a type string into an Arrow DataType.
-fn parse_type_string(
+/// Parse a type string into a full ParsedColumnType with optional geometry metadata.
+fn parse_type_string_full(
     column_name: &str,
     type_str: &str,
     precision: Option<u8>,
     scale: Option<i8>,
-) -> Result<DataType, ColumnTypeError> {
+    srid: Option<i32>,
+    geometry_type: Option<&str>,
+) -> Result<ParsedColumnType, ColumnTypeError> {
     let type_upper = type_str.to_uppercase();
 
     // Check for mismatched parentheses early (before extracting base type)
@@ -132,28 +174,28 @@ fn parse_type_string(
     // Handle parameterized types like DECIMAL(10,2) by extracting base type
     let base_type = type_upper.split('(').next().unwrap_or(&type_upper).trim();
 
-    let data_type = match base_type {
+    let (data_type, geometry_info) = match base_type {
         // String types
-        "VARCHAR" | "TEXT" | "STRING" | "CHAR" | "BPCHAR" => DataType::Utf8,
+        "VARCHAR" | "TEXT" | "STRING" | "CHAR" | "BPCHAR" => (DataType::Utf8, None),
 
         // Boolean
-        "BOOLEAN" | "BOOL" => DataType::Boolean,
+        "BOOLEAN" | "BOOL" => (DataType::Boolean, None),
 
         // Signed integers
-        "TINYINT" | "INT1" => DataType::Int8,
-        "SMALLINT" | "INT2" => DataType::Int16,
-        "INTEGER" | "INT" | "INT4" => DataType::Int32,
-        "BIGINT" | "INT8" => DataType::Int64,
+        "TINYINT" | "INT1" => (DataType::Int8, None),
+        "SMALLINT" | "INT2" => (DataType::Int16, None),
+        "INTEGER" | "INT" | "INT4" => (DataType::Int32, None),
+        "BIGINT" | "INT8" => (DataType::Int64, None),
 
         // Unsigned integers
-        "UTINYINT" => DataType::UInt8,
-        "USMALLINT" => DataType::UInt16,
-        "UINTEGER" | "UINT" => DataType::UInt32,
-        "UBIGINT" => DataType::UInt64,
+        "UTINYINT" => (DataType::UInt8, None),
+        "USMALLINT" => (DataType::UInt16, None),
+        "UINTEGER" | "UINT" => (DataType::UInt32, None),
+        "UBIGINT" => (DataType::UInt64, None),
 
         // Floating point
-        "REAL" | "FLOAT4" | "FLOAT" => DataType::Float32,
-        "DOUBLE" | "FLOAT8" => DataType::Float64,
+        "REAL" | "FLOAT4" | "FLOAT" => (DataType::Float32, None),
+        "DOUBLE" | "FLOAT8" => (DataType::Float64, None),
 
         // Decimal - use explicit precision/scale if provided, else parse from string or default
         "DECIMAL" | "NUMERIC" => {
@@ -175,23 +217,30 @@ fn parse_type_string(
             };
             // Validate precision and scale
             validate_decimal_params(column_name, p, s)?;
-            DataType::Decimal128(p, s)
+            (DataType::Decimal128(p, s), None)
         }
 
         // Date/Time
-        "DATE" => DataType::Date32,
-        "TIME" => DataType::Time64(TimeUnit::Microsecond),
-        "TIMESTAMP" | "DATETIME" => DataType::Timestamp(TimeUnit::Microsecond, None),
-        "TIMESTAMPTZ" | "TIMESTAMP WITH TIME ZONE" => {
-            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
-        }
+        "DATE" => (DataType::Date32, None),
+        "TIME" => (DataType::Time64(TimeUnit::Microsecond), None),
+        "TIMESTAMP" | "DATETIME" => (DataType::Timestamp(TimeUnit::Microsecond, None), None),
+        "TIMESTAMPTZ" | "TIMESTAMP WITH TIME ZONE" => (
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            None,
+        ),
 
         // Binary
-        "BLOB" | "BYTEA" | "BINARY" | "VARBINARY" => DataType::Binary,
+        "BLOB" | "BYTEA" | "BINARY" | "VARBINARY" => (DataType::Binary, None),
 
         // Special string-backed types
-        "UUID" => DataType::Utf8,
-        "JSON" => DataType::Utf8,
+        "UUID" => (DataType::Utf8, None),
+        "JSON" => (DataType::Utf8, None),
+
+        // Geometry types - stored as WKB binary with GeoParquet metadata
+        "GEOMETRY" | "GEOGRAPHY" => {
+            let geo_info = parse_geometry_info(column_name, &type_upper, srid, geometry_type)?;
+            (DataType::Binary, Some(geo_info))
+        }
 
         _ => {
             return Err(ColumnTypeError {
@@ -205,7 +254,83 @@ fn parse_type_string(
         }
     };
 
-    Ok(data_type)
+    Ok(ParsedColumnType {
+        data_type,
+        geometry_info,
+    })
+}
+
+/// Parse geometry type information from type string and/or explicit parameters.
+///
+/// Supports formats:
+/// - `GEOMETRY` - untyped geometry with default SRID 4326
+/// - `GEOMETRY(Point)` - typed geometry with default SRID 4326
+/// - `GEOMETRY(Point, 4326)` - typed geometry with explicit SRID
+/// - Explicit srid/geometry_type parameters override parsed values
+fn parse_geometry_info(
+    column_name: &str,
+    type_str: &str,
+    explicit_srid: Option<i32>,
+    explicit_geometry_type: Option<&str>,
+) -> Result<GeometryColumnInfo, ColumnTypeError> {
+    // Try to parse from string like GEOMETRY(Point, 4326)
+    let (parsed_type, parsed_srid) = if let Some(start) = type_str.find('(') {
+        if let Some(end) = type_str.find(')') {
+            if end <= start {
+                return Err(ColumnTypeError {
+                    column_name: column_name.to_string(),
+                    message: format!(
+                        "Malformed geometry type '{}': invalid parentheses order",
+                        type_str
+                    ),
+                });
+            }
+            let params = &type_str[start + 1..end];
+            let parts: Vec<&str> = params.split(',').map(|s| s.trim()).collect();
+
+            match parts.len() {
+                1 if !parts[0].is_empty() => {
+                    // GEOMETRY(Point) - type only
+                    let geom_type = normalize_geometry_type(parts[0]);
+                    (Some(geom_type), None)
+                }
+                2 => {
+                    // GEOMETRY(Point, 4326) - type and SRID
+                    let geom_type = normalize_geometry_type(parts[0]);
+                    let srid = parts[1].parse::<i32>().map_err(|_| ColumnTypeError {
+                        column_name: column_name.to_string(),
+                        message: format!("Invalid SRID '{}': must be an integer", parts[1]),
+                    })?;
+                    (Some(geom_type), Some(srid))
+                }
+                _ => {
+                    // Empty parens or too many params
+                    return Err(ColumnTypeError {
+                        column_name: column_name.to_string(),
+                        message: format!(
+                            "Malformed geometry type '{}': expected GEOMETRY, GEOMETRY(type), or GEOMETRY(type, srid)",
+                            type_str
+                        ),
+                    });
+                }
+            }
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
+    // Explicit parameters override parsed values
+    let final_geometry_type = explicit_geometry_type
+        .map(|s| s.to_string())
+        .or(parsed_type);
+    let final_srid = explicit_srid.or(parsed_srid).unwrap_or(4326); // Default to WGS84
+
+    Ok(GeometryColumnInfo {
+        srid: final_srid,
+        geometry_type: final_geometry_type,
+    })
 }
 
 /// Parse DECIMAL(precision, scale) parameters from type string.
@@ -314,6 +439,16 @@ pub fn build_schema_from_columns(
     columns: &HashMap<String, ColumnDefinition>,
     data_columns: &[String],
 ) -> Result<Arc<Schema>, SchemaError> {
+    build_schema_from_columns_full(columns, data_columns).map(|parsed| parsed.schema)
+}
+
+/// Build an Arrow schema with geometry metadata from explicit column definitions.
+///
+/// Returns both the schema and any geometry column metadata for GeoParquet output.
+pub fn build_schema_from_columns_full(
+    columns: &HashMap<String, ColumnDefinition>,
+    data_columns: &[String],
+) -> Result<ParsedSchema, SchemaError> {
     // Check for columns in data but not defined
     for data_col in data_columns {
         if !columns.contains_key(data_col) {
@@ -332,17 +467,27 @@ pub fn build_schema_from_columns(
         }
     }
 
-    // Build fields in data order
+    // Build fields in data order, collecting geometry metadata
     let mut fields = Vec::with_capacity(data_columns.len());
+    let mut geometry_columns = HashMap::new();
+
     for col_name in data_columns {
         let definition = columns.get(col_name).unwrap(); // Safe: validated above
-        let data_type =
-            parse_column_type(col_name, definition).map_err(SchemaError::InvalidType)?;
+        let parsed =
+            parse_column_type_full(col_name, definition).map_err(SchemaError::InvalidType)?;
+
+        if let Some(geo_info) = parsed.geometry_info {
+            geometry_columns.insert(col_name.clone(), geo_info);
+        }
+
         // Default to nullable=true for flexibility
-        fields.push(Field::new(col_name, data_type, true));
+        fields.push(Field::new(col_name, parsed.data_type, true));
     }
 
-    Ok(Arc::new(Schema::new(fields)))
+    Ok(ParsedSchema {
+        schema: Arc::new(Schema::new(fields)),
+        geometry_columns,
+    })
 }
 
 /// Build an Arrow schema directly from explicit column definitions, validated against observed fields.
@@ -359,6 +504,16 @@ pub fn build_schema_from_columns_for_json(
     columns: &HashMap<String, ColumnDefinition>,
     observed_fields: &[String],
 ) -> Result<Arc<Schema>, SchemaError> {
+    build_schema_from_columns_for_json_full(columns, observed_fields).map(|parsed| parsed.schema)
+}
+
+/// Build an Arrow schema with geometry metadata from explicit column definitions for JSON.
+///
+/// Returns both the schema and any geometry column metadata for GeoParquet output.
+pub fn build_schema_from_columns_for_json_full(
+    columns: &HashMap<String, ColumnDefinition>,
+    observed_fields: &[String],
+) -> Result<ParsedSchema, SchemaError> {
     // Check for columns defined but never observed in the data
     // This catches typos like "scroe" instead of "score"
     for defined_col in columns.keys() {
@@ -383,15 +538,25 @@ pub fn build_schema_from_columns_for_json(
     col_names.sort();
 
     let mut fields = Vec::with_capacity(columns.len());
+    let mut geometry_columns = HashMap::new();
+
     for col_name in col_names {
         let definition = columns.get(col_name).unwrap();
-        let data_type =
-            parse_column_type(col_name, definition).map_err(SchemaError::InvalidType)?;
+        let parsed =
+            parse_column_type_full(col_name, definition).map_err(SchemaError::InvalidType)?;
+
+        if let Some(geo_info) = parsed.geometry_info {
+            geometry_columns.insert(col_name.clone(), geo_info);
+        }
+
         // Default to nullable=true since JSON fields can be missing
-        fields.push(Field::new(col_name.as_str(), data_type, true));
+        fields.push(Field::new(col_name.as_str(), parsed.data_type, true));
     }
 
-    Ok(Arc::new(Schema::new(fields)))
+    Ok(ParsedSchema {
+        schema: Arc::new(Schema::new(fields)),
+        geometry_columns,
+    })
 }
 
 /// Build an Arrow schema directly from explicit column definitions without validation.
@@ -404,20 +569,39 @@ pub fn build_schema_from_columns_for_json(
 pub fn build_schema_from_columns_unchecked(
     columns: &HashMap<String, ColumnDefinition>,
 ) -> Result<Arc<Schema>, SchemaError> {
+    build_schema_from_columns_unchecked_full(columns).map(|parsed| parsed.schema)
+}
+
+/// Build an Arrow schema with geometry metadata from column definitions without validation.
+///
+/// Returns both the schema and any geometry column metadata for GeoParquet output.
+pub fn build_schema_from_columns_unchecked_full(
+    columns: &HashMap<String, ColumnDefinition>,
+) -> Result<ParsedSchema, SchemaError> {
     // Sort column names for deterministic order
     let mut col_names: Vec<&String> = columns.keys().collect();
     col_names.sort();
 
     let mut fields = Vec::with_capacity(columns.len());
+    let mut geometry_columns = HashMap::new();
+
     for col_name in col_names {
         let definition = columns.get(col_name).unwrap();
-        let data_type =
-            parse_column_type(col_name, definition).map_err(SchemaError::InvalidType)?;
+        let parsed =
+            parse_column_type_full(col_name, definition).map_err(SchemaError::InvalidType)?;
+
+        if let Some(geo_info) = parsed.geometry_info {
+            geometry_columns.insert(col_name.clone(), geo_info);
+        }
+
         // Default to nullable=true since JSON fields can be missing
-        fields.push(Field::new(col_name.as_str(), data_type, true));
+        fields.push(Field::new(col_name.as_str(), parsed.data_type, true));
     }
 
-    Ok(Arc::new(Schema::new(fields)))
+    Ok(ParsedSchema {
+        schema: Arc::new(Schema::new(fields)),
+        geometry_columns,
+    })
 }
 
 #[cfg(test)]
@@ -481,6 +665,8 @@ mod tests {
                 data_type: "DECIMAL".to_string(),
                 precision: Some(12),
                 scale: Some(4),
+                srid: None,
+                geometry_type: None,
             }),
         );
         assert!(matches!(result, Ok(DataType::Decimal128(12, 4))));
@@ -726,6 +912,8 @@ mod tests {
                 data_type: "DECIMAL".to_string(),
                 precision: Some(12),
                 scale: None,
+                srid: None,
+                geometry_type: None,
             }),
         );
         assert!(matches!(result, Ok(DataType::Decimal128(12, 0))));
@@ -755,6 +943,8 @@ mod tests {
                 data_type: "DECIMAL".to_string(),
                 precision: Some(0),
                 scale: Some(0),
+                srid: None,
+                geometry_type: None,
             }),
         );
         assert!(result.is_err());
@@ -771,6 +961,8 @@ mod tests {
                 data_type: "DECIMAL".to_string(),
                 precision: Some(39),
                 scale: Some(2),
+                srid: None,
+                geometry_type: None,
             }),
         );
         assert!(result.is_err());
@@ -786,6 +978,8 @@ mod tests {
                 data_type: "DECIMAL".to_string(),
                 precision: Some(10),
                 scale: Some(-1),
+                srid: None,
+                geometry_type: None,
             }),
         );
         assert!(result.is_err());
@@ -801,6 +995,8 @@ mod tests {
                 data_type: "DECIMAL".to_string(),
                 precision: Some(5),
                 scale: Some(10),
+                srid: None,
+                geometry_type: None,
             }),
         );
         assert!(result.is_err());
@@ -849,5 +1045,210 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.message.contains("Malformed DECIMAL"));
+    }
+
+    // =========================================================================
+    // GEOMETRY type parsing tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_geometry_simple() {
+        let result =
+            parse_column_type_full("geom", &ColumnDefinition::Simple("GEOMETRY".to_string()));
+        let parsed = result.unwrap();
+        assert!(matches!(parsed.data_type, DataType::Binary));
+        assert!(parsed.geometry_info.is_some());
+        let geo = parsed.geometry_info.unwrap();
+        assert_eq!(geo.srid, 4326); // Default to WGS84
+        assert!(geo.geometry_type.is_none()); // No type specified
+    }
+
+    #[test]
+    fn test_parse_geometry_with_type() {
+        let result = parse_column_type_full(
+            "geom",
+            &ColumnDefinition::Simple("GEOMETRY(Point)".to_string()),
+        );
+        let parsed = result.unwrap();
+        assert!(matches!(parsed.data_type, DataType::Binary));
+        let geo = parsed.geometry_info.unwrap();
+        assert_eq!(geo.srid, 4326); // Default SRID
+        assert_eq!(geo.geometry_type, Some("Point".to_string()));
+    }
+
+    #[test]
+    fn test_parse_geometry_with_type_and_srid() {
+        let result = parse_column_type_full(
+            "geom",
+            &ColumnDefinition::Simple("GEOMETRY(Polygon, 3857)".to_string()),
+        );
+        let parsed = result.unwrap();
+        assert!(matches!(parsed.data_type, DataType::Binary));
+        let geo = parsed.geometry_info.unwrap();
+        assert_eq!(geo.srid, 3857);
+        assert_eq!(geo.geometry_type, Some("Polygon".to_string()));
+    }
+
+    #[test]
+    fn test_parse_geography_simple() {
+        let result =
+            parse_column_type_full("geog", &ColumnDefinition::Simple("GEOGRAPHY".to_string()));
+        let parsed = result.unwrap();
+        assert!(matches!(parsed.data_type, DataType::Binary));
+        let geo = parsed.geometry_info.unwrap();
+        assert_eq!(geo.srid, 4326);
+    }
+
+    #[test]
+    fn test_parse_geometry_case_insensitive() {
+        let result = parse_column_type_full(
+            "geom",
+            &ColumnDefinition::Simple("geometry(point, 4326)".to_string()),
+        );
+        let parsed = result.unwrap();
+        let geo = parsed.geometry_info.unwrap();
+        assert_eq!(geo.geometry_type, Some("Point".to_string()));
+        assert_eq!(geo.srid, 4326);
+    }
+
+    #[test]
+    fn test_parse_geometry_detailed_spec() {
+        let result = parse_column_type_full(
+            "location",
+            &ColumnDefinition::Detailed(ColumnTypeSpec {
+                data_type: "GEOMETRY".to_string(),
+                precision: None,
+                scale: None,
+                srid: Some(4269),
+                geometry_type: Some("MultiPolygon".to_string()),
+            }),
+        );
+        let parsed = result.unwrap();
+        assert!(matches!(parsed.data_type, DataType::Binary));
+        let geo = parsed.geometry_info.unwrap();
+        assert_eq!(geo.srid, 4269);
+        assert_eq!(geo.geometry_type, Some("MultiPolygon".to_string()));
+    }
+
+    #[test]
+    fn test_parse_geometry_explicit_overrides_parsed() {
+        // String says Point,4326 but explicit spec says LineString,3857
+        let result = parse_column_type_full(
+            "geom",
+            &ColumnDefinition::Detailed(ColumnTypeSpec {
+                data_type: "GEOMETRY(Point, 4326)".to_string(),
+                precision: None,
+                scale: None,
+                srid: Some(3857),
+                geometry_type: Some("LineString".to_string()),
+            }),
+        );
+        let parsed = result.unwrap();
+        let geo = parsed.geometry_info.unwrap();
+        // Explicit params should win
+        assert_eq!(geo.srid, 3857);
+        assert_eq!(geo.geometry_type, Some("LineString".to_string()));
+    }
+
+    #[test]
+    fn test_parse_geometry_all_types_normalized() {
+        let types = [
+            ("point", "Point"),
+            ("LINESTRING", "LineString"),
+            ("Polygon", "Polygon"),
+            ("multipoint", "MultiPoint"),
+            ("MULTILINESTRING", "MultiLineString"),
+            ("multipolygon", "MultiPolygon"),
+            ("GeometryCollection", "GeometryCollection"),
+        ];
+
+        for (input, expected) in types {
+            let result = parse_column_type_full(
+                "geom",
+                &ColumnDefinition::Simple(format!("GEOMETRY({})", input)),
+            );
+            let parsed = result.unwrap();
+            let geo = parsed.geometry_info.unwrap();
+            assert_eq!(
+                geo.geometry_type,
+                Some(expected.to_string()),
+                "Failed for input: {}",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_geometry_invalid_srid() {
+        let result = parse_column_type_full(
+            "geom",
+            &ColumnDefinition::Simple("GEOMETRY(Point, abc)".to_string()),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("SRID"));
+    }
+
+    #[test]
+    fn test_parse_geometry_empty_parens_rejected() {
+        let result =
+            parse_column_type_full("geom", &ColumnDefinition::Simple("GEOMETRY()".to_string()));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Malformed geometry"));
+    }
+
+    #[test]
+    fn test_build_schema_with_geometry_columns() {
+        let mut columns = HashMap::new();
+        columns.insert(
+            "id".to_string(),
+            ColumnDefinition::Simple("INT".to_string()),
+        );
+        columns.insert(
+            "name".to_string(),
+            ColumnDefinition::Simple("VARCHAR".to_string()),
+        );
+        columns.insert(
+            "location".to_string(),
+            ColumnDefinition::Simple("GEOMETRY(Point, 4326)".to_string()),
+        );
+
+        let data_columns = vec!["id".to_string(), "name".to_string(), "location".to_string()];
+        let parsed = build_schema_from_columns_full(&columns, &data_columns).unwrap();
+
+        assert_eq!(parsed.schema.fields().len(), 3);
+        assert!(matches!(
+            parsed.schema.field(2).data_type(),
+            DataType::Binary
+        ));
+        assert_eq!(parsed.geometry_columns.len(), 1);
+        assert!(parsed.geometry_columns.contains_key("location"));
+        let geo = parsed.geometry_columns.get("location").unwrap();
+        assert_eq!(geo.srid, 4326);
+        assert_eq!(geo.geometry_type, Some("Point".to_string()));
+    }
+
+    #[test]
+    fn test_build_schema_multiple_geometry_columns() {
+        let mut columns = HashMap::new();
+        columns.insert(
+            "point_geom".to_string(),
+            ColumnDefinition::Simple("GEOMETRY(Point, 4326)".to_string()),
+        );
+        columns.insert(
+            "boundary".to_string(),
+            ColumnDefinition::Simple("GEOMETRY(Polygon, 3857)".to_string()),
+        );
+
+        let data_columns = vec!["point_geom".to_string(), "boundary".to_string()];
+        let parsed = build_schema_from_columns_full(&columns, &data_columns).unwrap();
+
+        assert_eq!(parsed.geometry_columns.len(), 2);
+        assert_eq!(
+            parsed.geometry_columns.get("point_geom").unwrap().srid,
+            4326
+        );
+        assert_eq!(parsed.geometry_columns.get("boundary").unwrap().srid, 3857);
     }
 }

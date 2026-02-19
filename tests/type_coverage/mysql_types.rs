@@ -82,6 +82,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Boolean, // TINYINT(1) is MySQL's boolean convention
             values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -103,6 +104,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Int8,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // SMALLINT: -32768 to 32767
@@ -121,6 +123,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Int16,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // INT: -2147483648 to 2147483647
@@ -139,6 +142,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Int32,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // BIGINT: -9223372036854775808 to 9223372036854775807
@@ -157,6 +161,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Int64,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // TINYINT UNSIGNED: 0 to 255
@@ -175,6 +180,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::UInt8,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // INT UNSIGNED: 0 to 4294967295
@@ -193,6 +199,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::UInt32,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // BIGINT UNSIGNED: 0 to 18446744073709551615
@@ -211,6 +218,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::UInt64,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // SMALLINT UNSIGNED: 0 to 65535
@@ -229,6 +237,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::UInt16,
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // MEDIUMINT: -8388608 to 8388607
@@ -247,6 +256,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Int32, // MEDIUMINT maps to Int32
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // MEDIUMINT UNSIGNED: 0 to 16777215
@@ -265,6 +275,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::UInt32, // MEDIUMINT UNSIGNED maps to UInt32
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // YEAR: 1901 to 2155 (or 0)
@@ -283,6 +294,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Int32, // YEAR maps to Int32
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -308,6 +320,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Float32,
             values: float_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // DOUBLE (64-bit) - exclude NaN/Infinity (MySQL doesn't support literals)
@@ -324,6 +337,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Float64,
             values: double_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -350,6 +364,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Utf8,
             values: varchar_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // TEXT
@@ -368,6 +383,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Utf8,
             values: text_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -383,6 +399,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, None),
             values: filtered.values.into_iter().map(TestValue::from).collect(),
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // NOTE: TIMESTAMP(6) is not yet fully supported - there's a schema mismatch bug
@@ -417,6 +434,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Date32,
             values: date_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
 
         // NOTE: TIME type is not yet supported by the production fetch code.
@@ -459,6 +477,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
             expected_arrow_type: DataType::Binary,
             values: blob_values,
             shape: TestShape::Scalar,
+            setup_sql: None,
         });
     }
 
@@ -501,6 +520,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
         expected_arrow_type: DataType::Utf8,
         values: enum_values,
         shape: TestShape::Scalar,
+        setup_sql: None,
     });
 
     // ========================================================================
@@ -544,6 +564,7 @@ fn build_mysql_test_cases() -> Vec<TypeTestCase> {
         expected_arrow_type: DataType::Utf8,
         values: set_values,
         shape: TestShape::Scalar,
+        setup_sql: None,
     });
 
     cases

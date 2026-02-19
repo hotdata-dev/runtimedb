@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tracing::warn;
 
 use crate::datafetch::batch_writer::BatchWriter;
+use crate::datafetch::types::GeometryColumnInfo;
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::secrets::SecretManager;
 use crate::source::Source;
@@ -148,19 +149,22 @@ pub async fn discover_tables(
         let is_nullable: String = row.get(6);
         let ordinal: u32 = row.get(7);
 
+        let is_spatial = is_spatial_type(&data_type);
+
         let column = ColumnMetadata {
-            name: col_name,
+            name: col_name.clone(),
             data_type: mysql_type_to_arrow(&data_type),
             nullable: is_nullable.to_uppercase() == "YES",
             ordinal_position: ordinal as i32,
         };
 
         // Find or create table entry
-        if let Some(existing) = tables
+        let table_meta = if let Some(existing) = tables
             .iter_mut()
             .find(|t| t.catalog_name == catalog && t.schema_name == schema && t.table_name == table)
         {
             existing.columns.push(column);
+            existing
         } else {
             tables.push(TableMetadata {
                 catalog_name: catalog,
@@ -168,7 +172,15 @@ pub async fn discover_tables(
                 table_name: table,
                 table_type,
                 columns: vec![column],
+                geometry_columns: std::collections::HashMap::new(),
             });
+            tables.last_mut().unwrap()
+        };
+
+        // Populate geometry column metadata for GeoParquet support
+        if is_spatial {
+            let geo_info = parse_mysql_geometry_info(&data_type);
+            table_meta.geometry_columns.insert(col_name, geo_info);
         }
     }
 
@@ -186,13 +198,6 @@ pub async fn fetch_table(
 ) -> Result<(), DataFetchError> {
     let options = resolve_connect_options(source, secrets).await?;
     let mut conn = connect_with_ssl_retry(options).await?;
-
-    // Build query - use backticks for MySQL identifier escaping
-    let query = format!(
-        "SELECT * FROM `{}`.`{}`",
-        schema.replace('`', "``"),
-        table.replace('`', "``")
-    );
 
     const BATCH_SIZE: usize = 10_000;
 
@@ -223,21 +228,42 @@ pub async fn fetch_table(
         )));
     }
 
-    let fields: Vec<Field> = schema_rows
-        .iter()
-        .map(|row| {
-            let col_name: String = row.get(0);
-            let data_type: String = row.get(1);
-            let is_nullable: String = row.get(2);
-            Field::new(
-                col_name,
-                mysql_type_to_arrow(&data_type),
-                is_nullable.to_uppercase() == "YES",
-            )
-        })
-        .collect();
+    // Build column list with ST_AsBinary for spatial columns
+    let mut fields: Vec<Field> = Vec::with_capacity(schema_rows.len());
+    let mut column_exprs: Vec<String> = Vec::with_capacity(schema_rows.len());
+
+    for row in &schema_rows {
+        let col_name: String = row.get(0);
+        let data_type: String = row.get(1);
+        let is_nullable: String = row.get(2);
+
+        let arrow_type = mysql_type_to_arrow(&data_type);
+        fields.push(Field::new(
+            &col_name,
+            arrow_type.clone(),
+            is_nullable.to_uppercase() == "YES",
+        ));
+
+        // Escape column name for SQL
+        let escaped_col = format!("`{}`", col_name.replace('`', "``"));
+
+        // Use ST_AsBinary for spatial columns to get WKB format
+        if is_spatial_type(&data_type) {
+            column_exprs.push(format!("ST_AsBinary({}) AS {}", escaped_col, escaped_col));
+        } else {
+            column_exprs.push(escaped_col);
+        }
+    }
 
     let arrow_schema = Schema::new(fields);
+
+    // Build query with explicit column list
+    let query = format!(
+        "SELECT {} FROM `{}`.`{}`",
+        column_exprs.join(", "),
+        schema.replace('`', "``"),
+        table.replace('`', "``")
+    );
 
     // Stream rows instead of loading all into memory
     let mut stream = sqlx::query(&query).fetch(&mut conn);
@@ -366,7 +392,54 @@ pub fn mysql_type_to_arrow(mysql_type: &str) -> DataType {
         "year" => DataType::Int32,
         "json" => DataType::Utf8,
         "bit" => DataType::Binary,
+        // MySQL spatial types - stored as Binary (WKB format)
+        "geometry" | "point" | "linestring" | "polygon" | "multipoint" | "multilinestring"
+        | "multipolygon" | "geometrycollection" | "geomcollection" => DataType::Binary,
         _ => DataType::Utf8, // Default fallback
+    }
+}
+
+/// Check if a MySQL type is a spatial type
+pub fn is_spatial_type(mysql_type: &str) -> bool {
+    let type_lower = mysql_type.to_lowercase();
+    let base_type = type_lower.split('(').next().unwrap_or(&type_lower).trim();
+    matches!(
+        base_type,
+        "geometry"
+            | "point"
+            | "linestring"
+            | "polygon"
+            | "multipoint"
+            | "multilinestring"
+            | "multipolygon"
+            | "geometrycollection"
+            | "geomcollection"
+    )
+}
+
+/// Parse MySQL spatial type into GeometryColumnInfo.
+///
+/// MySQL spatial types don't carry SRID information in the column type
+/// (SRID is specified per-value or via table constraints), so we default to
+/// SRID 0 (unspecified) and extract the geometry type from the column type.
+fn parse_mysql_geometry_info(mysql_type: &str) -> GeometryColumnInfo {
+    let type_lower = mysql_type.to_lowercase();
+    let base_type = type_lower.split('(').next().unwrap_or(&type_lower).trim();
+
+    let geometry_type = match base_type {
+        "point" => Some("Point".to_string()),
+        "linestring" => Some("LineString".to_string()),
+        "polygon" => Some("Polygon".to_string()),
+        "multipoint" => Some("MultiPoint".to_string()),
+        "multilinestring" => Some("MultiLineString".to_string()),
+        "multipolygon" => Some("MultiPolygon".to_string()),
+        "geometrycollection" | "geomcollection" => Some("GeometryCollection".to_string()),
+        _ => None, // "geometry" — unknown sub-type
+    };
+
+    GeometryColumnInfo {
+        srid: 0, // MySQL doesn't expose SRID in column type
+        geometry_type,
     }
 }
 
@@ -1105,8 +1178,30 @@ mod tests {
             DataType::Utf8
         ));
         assert!(matches!(mysql_type_to_arrow("custom_type"), DataType::Utf8));
-        assert!(matches!(mysql_type_to_arrow("geometry"), DataType::Utf8));
-        assert!(matches!(mysql_type_to_arrow("point"), DataType::Utf8));
+        // MySQL spatial types map to Binary (WKB format)
+        assert!(matches!(mysql_type_to_arrow("geometry"), DataType::Binary));
+        assert!(matches!(mysql_type_to_arrow("point"), DataType::Binary));
+        assert!(matches!(
+            mysql_type_to_arrow("linestring"),
+            DataType::Binary
+        ));
+        assert!(matches!(mysql_type_to_arrow("polygon"), DataType::Binary));
+        assert!(matches!(
+            mysql_type_to_arrow("multipoint"),
+            DataType::Binary
+        ));
+        assert!(matches!(
+            mysql_type_to_arrow("multilinestring"),
+            DataType::Binary
+        ));
+        assert!(matches!(
+            mysql_type_to_arrow("multipolygon"),
+            DataType::Binary
+        ));
+        assert!(matches!(
+            mysql_type_to_arrow("geometrycollection"),
+            DataType::Binary
+        ));
     }
 
     // =========================================================================

@@ -10,6 +10,7 @@ use snowflake_api::{QueryResult, SnowflakeApi};
 use std::sync::Arc;
 
 use crate::datafetch::batch_writer::BatchWriter;
+use crate::datafetch::types::GeometryColumnInfo;
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
 use crate::secrets::SecretManager;
 use crate::source::Source;
@@ -214,8 +215,11 @@ pub async fn discover_tables(
                 .unwrap_or(true);
             let ordinal = get_int_value(ordinal_col.as_ref(), row).unwrap_or(0) as i32;
 
+            // Check if this is a spatial column
+            let is_spatial = is_spatial_type(&data_type_str);
+
             let column = ColumnMetadata {
-                name: col_name,
+                name: col_name.clone(),
                 data_type: snowflake_type_to_arrow(&data_type_str),
                 nullable: is_nullable,
                 ordinal_position: ordinal,
@@ -228,14 +232,26 @@ pub async fn discover_tables(
                     && t.table_name == table_name
             }) {
                 existing.columns.push(column);
+                // Add geometry column info if spatial
+                if is_spatial {
+                    let geo_info = parse_snowflake_geometry_info(&data_type_str);
+                    existing.geometry_columns.insert(col_name, geo_info);
+                }
             } else {
-                tables.push(TableMetadata {
+                let mut table_meta = TableMetadata {
                     catalog_name: catalog,
                     schema_name,
                     table_name,
                     table_type,
                     columns: vec![column],
-                });
+                    geometry_columns: std::collections::HashMap::new(),
+                };
+                // Add geometry column info if spatial
+                if is_spatial {
+                    let geo_info = parse_snowflake_geometry_info(&data_type_str);
+                    table_meta.geometry_columns.insert(col_name, geo_info);
+                }
+                tables.push(table_meta);
             }
         }
     }
@@ -264,9 +280,125 @@ pub async fn fetch_table(
         }
     };
 
-    // Build SELECT query with properly quoted identifiers
+    // Query column info to detect spatial columns
+    // Try exact case first to avoid mixing columns from case-variant tables (e.g., "Foo" vs "FOO")
+    // Only fall back to case-insensitive if exact match returns no rows
+    let exact_schema_query = format!(
+        r#"
+        SELECT column_name, data_type
+        FROM "{database}".information_schema.columns
+        WHERE table_schema = '{schema}' AND table_name = '{table}'
+        ORDER BY ordinal_position
+        "#,
+        database = database.replace('"', "\"\""),
+        schema = schema.replace('\'', "''"),
+        table = table.replace('\'', "''")
+    );
+
+    let case_insensitive_schema_query = format!(
+        r#"
+        SELECT column_name, data_type
+        FROM "{database}".information_schema.columns
+        WHERE UPPER(table_schema) = UPPER('{schema}') AND UPPER(table_name) = UPPER('{table}')
+        ORDER BY ordinal_position
+        "#,
+        database = database.replace('"', "\"\""),
+        schema = schema.replace('\'', "''"),
+        table = table.replace('\'', "''")
+    );
+
+    // Helper to parse column expressions from query result
+    fn parse_column_exprs(
+        batches: &[arrow54_array::RecordBatch],
+    ) -> Result<Vec<String>, DataFetchError> {
+        let mut exprs = Vec::new();
+        for batch in batches {
+            let converted = convert_arrow_batch(batch)?;
+            for row in 0..converted.num_rows() {
+                if let (Some(col_name), Some(data_type)) = (
+                    get_string_value(converted.column(0).as_ref(), row),
+                    get_string_value(converted.column(1).as_ref(), row),
+                ) {
+                    let escaped_col = format!("\"{}\"", col_name.replace('"', "\"\""));
+                    if is_spatial_type(&data_type) {
+                        exprs.push(format!("ST_AsBinary({}) AS {}", escaped_col, escaped_col));
+                    } else {
+                        exprs.push(escaped_col);
+                    }
+                }
+            }
+        }
+        Ok(exprs)
+    }
+
+    // Try exact case first
+    let column_exprs: Vec<String> = {
+        let exact_result = client
+            .exec(&exact_schema_query)
+            .await
+            .map_err(|e| DataFetchError::Query(format!("Schema query failed: {}", e)))?;
+
+        match exact_result {
+            QueryResult::Arrow(batches) if !batches.is_empty() => {
+                let exprs = parse_column_exprs(&batches)?;
+                if !exprs.is_empty() {
+                    exprs
+                } else {
+                    // Exact query returned batches but no columns, try case-insensitive
+                    Vec::new()
+                }
+            }
+            _ => Vec::new(),
+        }
+    };
+
+    // If exact case returned nothing, try case-insensitive fallback
+    let column_exprs = if column_exprs.is_empty() {
+        let fallback_result = client
+            .exec(&case_insensitive_schema_query)
+            .await
+            .map_err(|e| DataFetchError::Query(format!("Schema query failed: {}", e)))?;
+
+        match fallback_result {
+            QueryResult::Arrow(batches) => parse_column_exprs(&batches)?,
+            _ => Vec::new(),
+        }
+    } else {
+        column_exprs
+    };
+
+    // Build SELECT query with column expressions
+    // Guard against empty column list which could silently skip ST_AsBinary wrapping
+    let select_clause = if column_exprs.is_empty() {
+        // If schema query returned nothing, check if table has spatial columns
+        // This handles edge cases like permissions issues where info_schema doesn't return columns
+        let spatial_check_query = build_spatial_check_query(database, schema, table);
+
+        let has_spatial = match client.exec(&spatial_check_query).await {
+            Ok(QueryResult::Arrow(batches)) => batches.first().is_some_and(|b| {
+                if let Ok(converted) = convert_arrow_batch(b) {
+                    get_int_value(converted.column(0).as_ref(), 0).unwrap_or(0) > 0
+                } else {
+                    false
+                }
+            }),
+            _ => false,
+        };
+
+        if has_spatial {
+            return Err(DataFetchError::Query(
+                "Table contains spatial columns but column schema query returned no results. \
+                 Cannot fetch geometry data without ST_AsBinary() wrapping."
+                    .to_string(),
+            ));
+        }
+        "*".to_string()
+    } else {
+        column_exprs.join(", ")
+    };
     let query = format!(
-        r#"SELECT * FROM "{}"."{}"."{}"#,
+        r#"SELECT {} FROM "{}"."{}"."{}"#,
+        select_clause,
         database.replace('"', "\"\""),
         schema.replace('"', "\"\""),
         table.replace('"', "\"\"")
@@ -409,10 +541,53 @@ fn snowflake_type_to_arrow(sf_type: &str) -> DataType {
         // Semi-structured types - store as JSON strings
         "VARIANT" | "OBJECT" | "ARRAY" => DataType::LargeUtf8,
 
-        // Geography/Geometry - store as string
-        "GEOGRAPHY" | "GEOMETRY" => DataType::Utf8,
+        // Geography/Geometry - stored as Binary (WKB format)
+        "GEOGRAPHY" | "GEOMETRY" => DataType::Binary,
 
         _ => DataType::Utf8, // Default fallback
+    }
+}
+
+/// Check if a Snowflake type is a spatial type
+pub fn is_spatial_type(sf_type: &str) -> bool {
+    let type_upper = sf_type.to_uppercase();
+    let base_type = type_upper.split('(').next().unwrap_or(&type_upper).trim();
+    matches!(base_type, "GEOGRAPHY" | "GEOMETRY")
+}
+
+/// Build SQL query to check if a table has spatial columns.
+/// Exported for testing to verify correct boolean precedence.
+fn build_spatial_check_query(database: &str, schema: &str, table: &str) -> String {
+    format!(
+        r#"
+        SELECT COUNT(*) as cnt
+        FROM "{database}".information_schema.columns
+        WHERE ((table_schema = '{schema}' AND table_name = '{table}')
+           OR (UPPER(table_schema) = UPPER('{schema}') AND UPPER(table_name) = UPPER('{table}')))
+          AND data_type IN ('GEOGRAPHY', 'GEOMETRY')
+        "#,
+        database = database.replace('"', "\"\""),
+        schema = schema.replace('\'', "''"),
+        table = table.replace('\'', "''")
+    )
+}
+
+/// Parse Snowflake geometry type info for GeoParquet metadata.
+/// Snowflake only has GEOGRAPHY (WGS84, SRID 4326) and GEOMETRY (planar, SRID 0).
+fn parse_snowflake_geometry_info(sf_type: &str) -> GeometryColumnInfo {
+    let type_upper = sf_type.to_uppercase();
+    let base_type = type_upper.split('(').next().unwrap_or(&type_upper).trim();
+
+    // GEOGRAPHY is always WGS84 (SRID 4326), GEOMETRY is planar (SRID 0)
+    let srid = if base_type == "GEOGRAPHY" { 4326 } else { 0 };
+
+    // Snowflake doesn't expose the specific geometry subtype (Point, Polygon, etc.)
+    // in information_schema, so we use the generic type
+    let geometry_type = Some("Geometry".to_string());
+
+    GeometryColumnInfo {
+        srid,
+        geometry_type,
     }
 }
 
@@ -727,5 +902,54 @@ mod tests {
         let array_ref: Arc<dyn datafusion::arrow::array::Array> = Arc::new(array);
 
         assert_eq!(get_int_value(array_ref.as_ref(), 0), None);
+    }
+
+    #[test]
+    fn test_spatial_check_query_boolean_precedence() {
+        // Verify the spatial check query has correct boolean precedence.
+        // The OR branches must be grouped together before ANDing with data_type filter,
+        // otherwise the exact-case branch would match ALL columns (not just spatial).
+        //
+        // Correct: WHERE ((exact_case) OR (upper_case)) AND data_type IN (...)
+        // Wrong:   WHERE (exact_case) OR (upper_case) AND data_type IN (...)
+        //          (due to AND binding tighter than OR, this becomes:
+        //           WHERE (exact_case) OR ((upper_case) AND data_type IN (...))
+        //           which means exact_case matches ALL columns!)
+
+        let query = build_spatial_check_query("mydb", "myschema", "mytable");
+        let normalized = query.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        // The query structure should be:
+        // WHERE (( ... ) OR ( ... )) AND data_type
+        // Look for the pattern: closing the OR group "))" followed by "AND data_type"
+
+        // Find where "OR" appears and verify the structure around it
+        let or_pos = normalized.find(" OR ").expect("Query should contain OR");
+        let and_data_type_pos = normalized
+            .find("AND data_type")
+            .expect("Query should contain AND data_type");
+
+        // Between OR and AND data_type, we need to close out the OR group
+        let between = &normalized[or_pos..and_data_type_pos];
+
+        // The buggy version has: "OR (UPPER(...)) AND data_type"
+        // The fixed version has: "OR (UPPER(...))) AND data_type"
+        // The difference is the extra ")" that closes the outer group containing both OR branches
+
+        // Count parentheses between OR and AND data_type
+        // In the fixed version, there should be more closing parens than opening
+        // because we close both the UPPER() clause AND the outer grouping
+        let open_parens = between.matches('(').count();
+        let close_parens = between.matches(')').count();
+
+        assert!(
+            close_parens > open_parens,
+            "After OR clause, there should be more closing parens than opening (to close the outer OR group). \
+             Found {} open, {} close in segment: '{}'\nFull query: {}",
+            open_parens,
+            close_parens,
+            between,
+            normalized
+        );
     }
 }
