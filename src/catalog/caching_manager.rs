@@ -1098,6 +1098,10 @@ impl CatalogManager for CachingCatalogManager {
         self.inner().cleanup_stale_results(cutoff).await
     }
 
+    async fn delete_expired_results(&self, cutoff: DateTime<Utc>) -> Result<Vec<QueryResult>> {
+        self.inner().delete_expired_results(cutoff).await
+    }
+
     // Upload management methods
 
     async fn create_upload(&self, upload: &UploadInfo) -> Result<()> {
