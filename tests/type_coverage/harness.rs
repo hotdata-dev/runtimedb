@@ -1084,10 +1084,17 @@ pub fn compare_arrow_value(
             ExpectedOutput::String(expected_str),
         ) => compare_decimal128(*value, *scale, expected_str, mode),
 
-        // String comparison - use JSON semantics if semantic type is JSON
+        // String comparison - use JSON semantics if semantic type is JSON,
+        // numeric equality for Decimal (normalizes trailing zeros, e.g. "0" == "0.00")
         (ArrowValue::Utf8(actual_str), ExpectedOutput::String(expected_str)) => {
             if matches!(_semantic_type, SemanticType::Json) {
                 compare_strings(expected_str, actual_str, &ComparisonMode::Json)
+            } else if matches!(_semantic_type, SemanticType::Decimal) {
+                compare_strings(
+                    expected_str,
+                    actual_str,
+                    &ComparisonMode::Approx { epsilon: 0.0 },
+                )
             } else {
                 compare_strings(expected_str, actual_str, mode)
             }
