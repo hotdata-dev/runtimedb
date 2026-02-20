@@ -2733,6 +2733,19 @@ impl RuntimeEngine {
                                 warn!(error = %e, "Failed to cleanup stale results");
                             }
                         }
+                        match catalog.cleanup_stale_query_runs(cutoff).await {
+                            Ok(0) => {}
+                            Ok(count) => {
+                                info!(
+                                    count = count,
+                                    cutoff = %cutoff,
+                                    "Cleaned up stale query runs"
+                                );
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "Failed to cleanup stale query runs");
+                            }
+                        }
                     }
                 }
             }
@@ -3109,6 +3122,21 @@ impl RuntimeEngineBuilder {
         // Process any pending deletions from previous runs
         if let Err(e) = engine.process_pending_deletions().await {
             warn!("Failed to process pending deletions on startup: {}", e);
+        }
+
+        // Nothing can be in-flight on startup; clean up all orphaned running query runs
+        let cutoff = Utc::now() + chrono::Duration::seconds(1);
+        match engine.catalog.cleanup_stale_query_runs(cutoff).await {
+            Ok(0) => {}
+            Ok(count) => {
+                info!(
+                    count = count,
+                    "Cleaned up orphaned query runs from previous crash"
+                );
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to cleanup orphaned query runs on startup");
+            }
         }
 
         Ok(engine)
