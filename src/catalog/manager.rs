@@ -729,6 +729,11 @@ pub trait CatalogManager: Debug + Send + Sync {
     /// Get a single query run by ID.
     async fn get_query_run(&self, id: &str) -> Result<Option<QueryRun>>;
 
+    /// Mark orphaned running query runs as failed.
+    /// Runs that have been in "running" status since before the cutoff are marked failed.
+    /// Returns the number of query runs cleaned up.
+    async fn cleanup_stale_query_runs(&self, cutoff: DateTime<Utc>) -> Result<usize>;
+
     // Query result persistence methods
 
     /// Create a new query result with the given initial status.

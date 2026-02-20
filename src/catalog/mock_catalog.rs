@@ -313,6 +313,10 @@ impl CatalogManager for MockCatalog {
         Ok(None)
     }
 
+    async fn cleanup_stale_query_runs(&self, _cutoff: DateTime<Utc>) -> Result<usize> {
+        Ok(0)
+    }
+
     async fn count_connections_by_secret_id(&self, _secret_id: &str) -> Result<i64> {
         Ok(0)
     }

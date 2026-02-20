@@ -10,8 +10,9 @@ use datafusion::prelude::SessionContext;
 use rand::RngCore;
 use runtimedb::catalog::{
     CatalogManager, ConnectionInfo, CreateQueryRun, DatasetInfo, OptimisticLock, PendingDeletion,
-    QueryResult, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus, ResultUpdate, SavedQuery,
-    SavedQueryVersion, SqlSnapshot, SqliteCatalogManager, TableInfo, UploadInfo,
+    QueryResult, QueryRun, QueryRunCursor, QueryRunStatus, QueryRunUpdate, ResultStatus,
+    ResultUpdate, SavedQuery, SavedQueryVersion, SqlSnapshot, SqliteCatalogManager, TableInfo,
+    UploadInfo,
 };
 use runtimedb::http::app_server::{AppServer, PATH_QUERY, PATH_RESULT, PATH_RESULTS};
 use runtimedb::secrets::{SecretMetadata, SecretStatus};
@@ -257,6 +258,10 @@ impl CatalogManager for FailingCatalog {
 
     async fn cleanup_stale_results(&self, cutoff: DateTime<Utc>) -> Result<usize> {
         self.inner.cleanup_stale_results(cutoff).await
+    }
+
+    async fn cleanup_stale_query_runs(&self, cutoff: DateTime<Utc>) -> Result<usize> {
+        self.inner.cleanup_stale_query_runs(cutoff).await
     }
 
     // Upload management methods
@@ -1970,6 +1975,81 @@ async fn test_get_result_missing_parquet_returns_failed_status() -> Result<()> {
         json["error_message"].is_string(),
         "Should have error_message explaining the failure"
     );
+
+    Ok(())
+}
+
+/// Orphaned "running" query runs from a previous crash are marked failed on startup.
+#[tokio::test]
+async fn startup_cleans_up_orphaned_query_runs() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let catalog_path = temp_dir.path().join("catalog.db");
+    let catalog = SqliteCatalogManager::new(catalog_path.to_str().unwrap()).await?;
+    catalog.run_migrations().await?;
+
+    let snap = catalog.get_or_create_snapshot("SELECT 1").await?;
+
+    // Create a running query run (simulates orphaned run from crash)
+    let orphaned_id = runtimedb::id::generate_query_run_id();
+    catalog
+        .create_query_run(CreateQueryRun {
+            id: &orphaned_id,
+            snapshot_id: &snap.id,
+            saved_query_id: None,
+            saved_query_version: None,
+            trace_id: None,
+        })
+        .await?;
+
+    // Create a succeeded run (should not be affected)
+    let succeeded_id = runtimedb::id::generate_query_run_id();
+    catalog
+        .create_query_run(CreateQueryRun {
+            id: &succeeded_id,
+            snapshot_id: &snap.id,
+            saved_query_id: None,
+            saved_query_version: None,
+            trace_id: None,
+        })
+        .await?;
+    catalog
+        .update_query_run(
+            &succeeded_id,
+            QueryRunUpdate::Succeeded {
+                result_id: None,
+                row_count: 1,
+                execution_time_ms: 10,
+                warning_message: None,
+            },
+        )
+        .await?;
+
+    assert_eq!(
+        catalog.get_query_run(&orphaned_id).await?.unwrap().status,
+        QueryRunStatus::Running
+    );
+
+    // Boot engine — startup cleanup should catch the orphaned run regardless of timeout
+    let catalog = Arc::new(catalog);
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .catalog(catalog.clone())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+
+    let run = catalog.get_query_run(&orphaned_id).await?.unwrap();
+    assert_eq!(run.status, QueryRunStatus::Failed);
+    assert_eq!(
+        run.error_message.as_deref(),
+        Some("Server interrupted before query completed")
+    );
+    assert!(run.completed_at.is_some());
+
+    let run = catalog.get_query_run(&succeeded_id).await?.unwrap();
+    assert_eq!(run.status, QueryRunStatus::Succeeded);
+
+    engine.shutdown().await?;
 
     Ok(())
 }

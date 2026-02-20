@@ -764,6 +764,26 @@ impl CatalogManager for PostgresCatalogManager {
     }
 
     #[tracing::instrument(
+        name = "catalog_cleanup_stale_query_runs",
+        skip(self),
+        fields(db = "postgres")
+    )]
+    async fn cleanup_stale_query_runs(&self, cutoff: DateTime<Utc>) -> Result<usize> {
+        let now = Utc::now();
+        let result = sqlx::query(
+            "UPDATE query_runs SET status = 'failed', \
+             error_message = 'Server interrupted before query completed', \
+             completed_at = $1 \
+             WHERE status = 'running' AND created_at < $2",
+        )
+        .bind(now)
+        .bind(cutoff)
+        .execute(self.backend.pool())
+        .await?;
+        Ok(result.rows_affected() as usize)
+    }
+
+    #[tracing::instrument(
         name = "catalog_count_connections_by_secret_id",
         skip(self),
         fields(db = "postgres")

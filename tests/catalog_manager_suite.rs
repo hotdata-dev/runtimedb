@@ -1300,6 +1300,70 @@ macro_rules! catalog_manager_tests {
             }
 
             #[tokio::test]
+            async fn cleanup_stale_query_runs() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+
+                // Create a running query run
+                let running_id = runtimedb::id::generate_query_run_id();
+                catalog
+                    .create_query_run(CreateQueryRun {
+                        id: &running_id,
+                        snapshot_id: &snap.id,
+                        saved_query_id: None,
+                        saved_query_version: None,
+                        trace_id: None,
+                    })
+                    .await
+                    .unwrap();
+
+                // Create a succeeded query run
+                let succeeded_id = runtimedb::id::generate_query_run_id();
+                catalog
+                    .create_query_run(CreateQueryRun {
+                        id: &succeeded_id,
+                        snapshot_id: &snap.id,
+                        saved_query_id: None,
+                        saved_query_version: None,
+                        trace_id: None,
+                    })
+                    .await
+                    .unwrap();
+                catalog
+                    .update_query_run(
+                        &succeeded_id,
+                        QueryRunUpdate::Succeeded {
+                            result_id: None,
+                            row_count: 1,
+                            execution_time_ms: 10,
+                            warning_message: None,
+                        },
+                    )
+                    .await
+                    .unwrap();
+
+                // Cleanup with a cutoff in the future (should catch the running run)
+                let cutoff = chrono::Utc::now() + chrono::Duration::seconds(60);
+                let cleaned = catalog.cleanup_stale_query_runs(cutoff).await.unwrap();
+                assert_eq!(cleaned, 1);
+
+                // Verify the running run is now failed
+                let run = catalog.get_query_run(&running_id).await.unwrap().unwrap();
+                assert_eq!(run.status, QueryRunStatus::Failed);
+                assert_eq!(
+                    run.error_message.as_deref(),
+                    Some("Server interrupted before query completed")
+                );
+                assert!(run.completed_at.is_some());
+
+                // Verify the succeeded run is unchanged
+                let run = catalog.get_query_run(&succeeded_id).await.unwrap().unwrap();
+                assert_eq!(run.status, QueryRunStatus::Succeeded);
+            }
+
+            #[tokio::test]
             async fn saved_query_version_list_pagination() {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();

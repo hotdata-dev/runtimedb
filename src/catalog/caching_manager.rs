@@ -1098,6 +1098,10 @@ impl CatalogManager for CachingCatalogManager {
         self.inner().cleanup_stale_results(cutoff).await
     }
 
+    async fn cleanup_stale_query_runs(&self, cutoff: DateTime<Utc>) -> Result<usize> {
+        self.inner().cleanup_stale_query_runs(cutoff).await
+    }
+
     // Upload management methods
 
     async fn create_upload(&self, upload: &UploadInfo) -> Result<()> {
