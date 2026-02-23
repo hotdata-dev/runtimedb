@@ -443,4 +443,13 @@ impl CatalogManager for MockCatalog {
     async fn delete_dataset(&self, _id: &str) -> Result<Option<DatasetInfo>> {
         Ok(None)
     }
+
+    async fn record_request_rollup_minute(
+        &self,
+        _minute: &str,
+        _path: &str,
+        _bucket: &crate::metrics::RollupBucket,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
