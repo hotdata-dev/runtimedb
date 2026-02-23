@@ -9,6 +9,7 @@ use crate::http::controllers::{
     refresh_handler, update_dataset, update_saved_query, update_secret_handler, upload_file,
     MAX_UPLOAD_SIZE,
 };
+use crate::http::metrics_middleware::metrics_middleware;
 use crate::RuntimeEngine;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderName, HeaderValue, Request};
@@ -160,6 +161,10 @@ impl AppServer {
                 .route(PATH_SAVED_QUERY_VERSIONS, get(list_saved_query_versions))
                 .route(PATH_SAVED_QUERY_EXECUTE, post(execute_saved_query))
                 .with_state(engine.clone())
+                .layer(middleware::from_fn_with_state(
+                    engine.clone(),
+                    metrics_middleware,
+                ))
                 .layer(middleware::from_fn(trace_id_response_header))
                 .layer(
                     TraceLayer::new_for_http()

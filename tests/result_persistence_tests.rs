@@ -404,6 +404,17 @@ impl CatalogManager for FailingCatalog {
             .list_saved_query_versions(saved_query_id, limit, offset)
             .await
     }
+
+    async fn record_request_rollup_minute(
+        &self,
+        minute: &str,
+        path: &str,
+        bucket: &runtimedb::metrics::RollupBucket,
+    ) -> Result<()> {
+        self.inner
+            .record_request_rollup_minute(minute, path, bucket)
+            .await
+    }
 }
 
 async fn setup_test() -> Result<(AppServer, TempDir)> {

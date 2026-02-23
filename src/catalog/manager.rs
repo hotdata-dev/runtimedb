@@ -872,4 +872,17 @@ pub trait CatalogManager: Debug + Send + Sync {
 
     /// Delete a dataset by ID. Returns the deleted dataset if it existed.
     async fn delete_dataset(&self, id: &str) -> Result<Option<DatasetInfo>>;
+
+    // Metrics methods
+
+    /// Insert or additively update a per-minute HTTP request rollup row.
+    ///
+    /// `minute` is an ISO-8601 string truncated to the minute, e.g. `"2026-01-01T12:00:00Z"`.
+    /// All numeric fields are added to any existing row for the same (minute, path).
+    async fn record_request_rollup_minute(
+        &self,
+        minute: &str,
+        path: &str,
+        bucket: &crate::metrics::RollupBucket,
+    ) -> Result<()>;
 }

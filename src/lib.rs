@@ -6,6 +6,7 @@ pub mod datasets;
 mod engine;
 pub mod http;
 pub mod id;
+pub mod metrics;
 pub mod secrets;
 pub mod source;
 pub mod storage;

@@ -10,6 +10,7 @@ use crate::http::models::{
     ConnectionRefreshResult, ConnectionSchemaError, RefreshWarning, SchemaRefreshResult,
     TableRefreshError, TableRefreshResult,
 };
+use crate::metrics::{worker::MetricsWorker, MetricsEvent, METRICS_CHANNEL_CAPACITY};
 use crate::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
@@ -173,6 +174,10 @@ pub struct RuntimeEngine {
     persistence_tasks: Mutex<JoinSet<()>>,
     /// Handle for the stale result cleanup worker task.
     stale_result_cleanup_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Sender half of the metrics event channel. Shared with the HTTP middleware.
+    pub metrics_sender: crate::metrics::MetricsSender,
+    /// Handle for the metrics worker background task.
+    metrics_worker_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// Build a reader-compatible schema where geometry (Binary) columns are replaced with Utf8.
@@ -1397,6 +1402,13 @@ impl RuntimeEngine {
 
         // Wait for the stale result cleanup worker to finish
         if let Some(handle) = self.stale_result_cleanup_handle.lock().await.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
+
+        // Wait for the metrics worker to finish its final flush.
+        // The worker exits when the sender is dropped; we drop our clone here so the
+        // worker sees the close signal and flushes any buffered events before we return.
+        if let Some(handle) = self.metrics_worker_handle.lock().await.take() {
             let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
         }
 
@@ -3075,6 +3087,14 @@ impl RuntimeEngineBuilder {
             self.stale_result_timeout,
         );
 
+        // Start background metrics worker
+        let (metrics_sender, metrics_rx) =
+            tokio::sync::mpsc::channel::<MetricsEvent>(METRICS_CHANNEL_CAPACITY);
+        let metrics_worker_handle = {
+            let worker = MetricsWorker::new(metrics_rx, catalog.clone());
+            tokio::spawn(worker.run())
+        };
+
         // Initialize catalog (starts warmup loop if configured)
         catalog.init().await?;
 
@@ -3101,6 +3121,8 @@ impl RuntimeEngineBuilder {
             persistence_semaphore: Arc::new(Semaphore::new(self.max_concurrent_persistence)),
             persistence_tasks: Mutex::new(JoinSet::new()),
             stale_result_cleanup_handle: Mutex::new(stale_result_cleanup_handle),
+            metrics_sender,
+            metrics_worker_handle: Mutex::new(Some(metrics_worker_handle)),
         };
 
         // Note: All catalogs (connections, datasets, runtimedb) are now resolved on-demand

@@ -1336,6 +1336,35 @@ impl CatalogManager for PostgresCatalogManager {
 
         Ok(dataset)
     }
+
+    async fn record_request_rollup_minute(
+        &self,
+        minute: &str,
+        path: &str,
+        bucket: &crate::metrics::RollupBucket,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO metrics_request_rollup_minute
+                (minute, path, request_count, error_count, total_latency_ms, min_latency_ms, max_latency_ms)
+             VALUES ($1::timestamptz, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (minute, path) DO UPDATE SET
+                request_count    = metrics_request_rollup_minute.request_count    + EXCLUDED.request_count,
+                error_count      = metrics_request_rollup_minute.error_count      + EXCLUDED.error_count,
+                total_latency_ms = metrics_request_rollup_minute.total_latency_ms + EXCLUDED.total_latency_ms,
+                min_latency_ms   = LEAST(metrics_request_rollup_minute.min_latency_ms, EXCLUDED.min_latency_ms),
+                max_latency_ms   = GREATEST(metrics_request_rollup_minute.max_latency_ms, EXCLUDED.max_latency_ms)",
+        )
+        .bind(minute)
+        .bind(path)
+        .bind(bucket.request_count as i32)
+        .bind(bucket.error_count as i32)
+        .bind(bucket.total_latency_ms as i32)
+        .bind(bucket.min_latency_ms as i32)
+        .bind(bucket.max_latency_ms as i32)
+        .execute(self.backend.pool())
+        .await?;
+        Ok(())
+    }
 }
 
 impl Debug for PostgresCatalogManager {

@@ -1447,6 +1447,35 @@ impl CatalogManager for SqliteCatalogManager {
 
         Ok(dataset)
     }
+
+    async fn record_request_rollup_minute(
+        &self,
+        minute: &str,
+        path: &str,
+        bucket: &crate::metrics::RollupBucket,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO metrics_request_rollup_minute
+                (minute, path, request_count, error_count, total_latency_ms, min_latency_ms, max_latency_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (minute, path) DO UPDATE SET
+                request_count    = request_count    + EXCLUDED.request_count,
+                error_count      = error_count      + EXCLUDED.error_count,
+                total_latency_ms = total_latency_ms + EXCLUDED.total_latency_ms,
+                min_latency_ms   = MIN(min_latency_ms, EXCLUDED.min_latency_ms),
+                max_latency_ms   = MAX(max_latency_ms, EXCLUDED.max_latency_ms)",
+        )
+        .bind(minute)
+        .bind(path)
+        .bind(bucket.request_count)
+        .bind(bucket.error_count)
+        .bind(bucket.total_latency_ms)
+        .bind(bucket.min_latency_ms)
+        .bind(bucket.max_latency_ms)
+        .execute(self.backend.pool())
+        .await?;
+        Ok(())
+    }
 }
 
 impl CatalogMigrations for SqliteMigrationBackend {

@@ -1304,4 +1304,15 @@ impl CatalogManager for CachingCatalogManager {
         self.cached_read(&key, || self.inner().list_dataset_table_names(&schema))
             .await
     }
+
+    async fn record_request_rollup_minute(
+        &self,
+        minute: &str,
+        path: &str,
+        bucket: &crate::metrics::RollupBucket,
+    ) -> Result<()> {
+        self.inner()
+            .record_request_rollup_minute(minute, path, bucket)
+            .await
+    }
 }
