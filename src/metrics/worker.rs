@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
-use tracing::{error, warn};
+use tracing::warn;
 
 /// Interval between metric flushes to the database.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(30);
