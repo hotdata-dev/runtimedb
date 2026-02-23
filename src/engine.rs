@@ -3,7 +3,6 @@ use crate::catalog::{
     CreateQueryRun, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus, ResultUpdate,
     SavedQuery, SavedQueryVersion, SqliteCatalogManager, TableInfo,
 };
-use crate::metrics::{worker::MetricsWorker, MetricsEvent, METRICS_CHANNEL_CAPACITY};
 use crate::datafetch::native::StreamingParquetWriter;
 use crate::datafetch::{BatchWriter, FetchOrchestrator, GeometryColumnInfo, NativeFetcher};
 use crate::datafusion::UnifiedCatalogList;
@@ -11,6 +10,7 @@ use crate::http::models::{
     ConnectionRefreshResult, ConnectionSchemaError, RefreshWarning, SchemaRefreshResult,
     TableRefreshError, TableRefreshResult,
 };
+use crate::metrics::{worker::MetricsWorker, MetricsEvent, METRICS_CHANNEL_CAPACITY};
 use crate::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};

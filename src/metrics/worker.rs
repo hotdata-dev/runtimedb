@@ -53,8 +53,7 @@ impl MetricsWorker {
 }
 
 fn truncate_to_minute(ts: DateTime<Utc>) -> DateTime<Utc> {
-    ts.duration_trunc(TimeDelta::minutes(1))
-        .unwrap_or_else(|_| ts)
+    ts.duration_trunc(TimeDelta::minutes(1)).unwrap_or(ts)
 }
 
 fn accumulate(event: MetricsEvent, buckets: &mut HashMap<(String, String), RollupBucket>) {
@@ -112,12 +111,7 @@ mod tests {
     use chrono::TimeZone;
     use tokio::sync::mpsc;
 
-    fn make_event(
-        ts: DateTime<Utc>,
-        path: &str,
-        status: u16,
-        latency_ms: u64,
-    ) -> MetricsEvent {
+    fn make_event(ts: DateTime<Utc>, path: &str, status: u16, latency_ms: u64) -> MetricsEvent {
         MetricsEvent::HttpRequest {
             timestamp: ts,
             path: path.to_owned(),
