@@ -123,3 +123,254 @@ impl TableProvider for SingleFileParquetProvider {
         Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::array::{Int32Array, StringArray};
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::arrow::record_batch::RecordBatch;
+    use datafusion::parquet::arrow::ArrowWriter;
+    use datafusion::prelude::SessionContext;
+    use tempfile::TempDir;
+
+    /// Create a test parquet file and return (file_url, schema).
+    fn create_test_parquet(dir: &std::path::Path) -> (String, SchemaRef) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("name", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["alice", "bob", "charlie"])),
+                Arc::new(Int32Array::from(vec![10, 20, 30])),
+            ],
+        )
+        .unwrap();
+
+        let file_path = dir.join("test.parquet");
+        let file = std::fs::File::create(&file_path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema.clone(), None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let file_url = format!("file://{}", file_path.display());
+        (file_url, schema)
+    }
+
+    #[tokio::test]
+    async fn test_build_parquet_exec_reads_all_rows() {
+        let tmp = TempDir::new().unwrap();
+        let (file_url, schema) = create_test_parquet(tmp.path());
+
+        let ctx = SessionContext::new();
+        let state = ctx.state();
+
+        let plan = build_parquet_exec(&file_url, schema, &state, None, None)
+            .await
+            .unwrap();
+
+        let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx())
+            .await
+            .unwrap();
+
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 3);
+    }
+
+    #[tokio::test]
+    async fn test_build_parquet_exec_with_projection() {
+        let tmp = TempDir::new().unwrap();
+        let (file_url, schema) = create_test_parquet(tmp.path());
+
+        let ctx = SessionContext::new();
+        let state = ctx.state();
+
+        // Project only "value" column (index 1)
+        let projection = vec![1];
+        let plan = build_parquet_exec(&file_url, schema, &state, Some(&projection), None)
+            .await
+            .unwrap();
+
+        let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx())
+            .await
+            .unwrap();
+
+        assert_eq!(batches[0].num_columns(), 1);
+        assert_eq!(batches[0].schema().field(0).name(), "value");
+    }
+
+    #[tokio::test]
+    async fn test_build_parquet_exec_with_limit() {
+        let tmp = TempDir::new().unwrap();
+        let (file_url, schema) = create_test_parquet(tmp.path());
+
+        let ctx = SessionContext::new();
+        let state = ctx.state();
+
+        let plan = build_parquet_exec(&file_url, schema, &state, None, Some(1))
+            .await
+            .unwrap();
+
+        let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx())
+            .await
+            .unwrap();
+
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 1);
+    }
+
+    #[tokio::test]
+    async fn test_build_parquet_exec_nonexistent_file() {
+        let ctx = SessionContext::new();
+        let state = ctx.state();
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, false)]));
+
+        let result = build_parquet_exec(
+            "file:///nonexistent/path.parquet",
+            schema,
+            &state,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Failed to get file metadata"),
+            "Expected metadata error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_single_file_provider_schema() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Utf8, false),
+            Field::new("b", DataType::Int32, false),
+        ]));
+
+        let provider =
+            SingleFileParquetProvider::new(schema.clone(), "file:///fake.parquet".to_string());
+
+        assert_eq!(provider.schema(), schema);
+        assert_eq!(provider.table_type(), TableType::Base);
+    }
+
+    #[tokio::test]
+    async fn test_single_file_provider_scan() {
+        let tmp = TempDir::new().unwrap();
+        let (file_url, schema) = create_test_parquet(tmp.path());
+
+        let provider = SingleFileParquetProvider::new(schema, file_url);
+
+        let ctx = SessionContext::new();
+        ctx.register_table("test_table", Arc::new(provider))
+            .unwrap();
+
+        let df = ctx
+            .sql("SELECT name, value FROM test_table ORDER BY value")
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 3);
+
+        let names = batches[0]
+            .column_by_name("name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(names.value(0), "alice");
+        assert_eq!(names.value(1), "bob");
+        assert_eq!(names.value(2), "charlie");
+    }
+
+    #[tokio::test]
+    async fn test_single_file_provider_filter_pushdown() {
+        let tmp = TempDir::new().unwrap();
+        let (file_url, schema) = create_test_parquet(tmp.path());
+
+        let provider = SingleFileParquetProvider::new(schema, file_url);
+
+        let ctx = SessionContext::new();
+        ctx.register_table("test_table", Arc::new(provider))
+            .unwrap();
+
+        // Filter should be pushed down (inexact) and applied
+        let df = ctx
+            .sql("SELECT name FROM test_table WHERE value > 15")
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2); // bob (20) and charlie (30)
+    }
+
+    #[tokio::test]
+    async fn test_single_file_provider_supports_filters_pushdown() {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, false)]));
+        let provider = SingleFileParquetProvider::new(schema, "file:///fake.parquet".to_string());
+
+        let col_expr = datafusion::logical_expr::col("x").gt(datafusion::logical_expr::lit(5));
+        let filters = vec![&col_expr];
+        let result = provider.supports_filters_pushdown(&filters).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], TableProviderFilterPushDown::Inexact);
+    }
+
+    #[tokio::test]
+    async fn test_metadata_cache_is_populated_and_hit() {
+        let tmp = TempDir::new().unwrap();
+        let (file_url, schema) = create_test_parquet(tmp.path());
+
+        let ctx = SessionContext::new();
+        let cache = ctx.runtime_env().cache_manager.get_file_metadata_cache();
+
+        // Cache should be empty before any query
+        assert_eq!(cache.len(), 0);
+
+        // First query — populates the cache
+        let state = ctx.state();
+        let plan = build_parquet_exec(&file_url, schema.clone(), &state, None, None)
+            .await
+            .unwrap();
+        let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
+
+        // Cache should now have one entry
+        assert_eq!(
+            cache.len(),
+            1,
+            "metadata cache should have 1 entry after first query"
+        );
+
+        // Second query — should hit the cache
+        let plan = build_parquet_exec(&file_url, schema, &state, None, None)
+            .await
+            .unwrap();
+        let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
+
+        // Cache should still have one entry (same file), with at least one hit
+        assert_eq!(cache.len(), 1);
+        let entries = cache.list_entries();
+        let entry = entries.values().next().unwrap();
+        assert!(
+            entry.hits >= 1,
+            "expected at least 1 cache hit, got {}",
+            entry.hits
+        );
+    }
+}
