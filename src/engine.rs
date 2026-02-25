@@ -20,7 +20,7 @@ use datafusion::arrow::datatypes::Schema;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::AsyncCatalogProviderList;
 use datafusion::execution::object_store::ObjectStoreUrl;
-use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::prelude::*;
 use datafusion_tracing::{instrument_with_info_spans, InstrumentationOptions};
