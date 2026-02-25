@@ -688,9 +688,12 @@ impl RuntimeEngine {
         ))
         .await?;
 
-        info!("Execution completed in {:?}", start.elapsed());
-
         let row_count: usize = results.iter().map(|b| b.num_rows()).sum();
+        info!(
+            rows = row_count,
+            elapsed = ?start.elapsed(),
+            "Execution completed"
+        );
         tracing::Span::current().record("runtimedb.rows_returned", row_count);
 
         Ok(QueryResponse {
