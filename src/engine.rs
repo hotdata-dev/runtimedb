@@ -3270,11 +3270,11 @@ fn build_instrumented_context(
     }
 
     // Non-liquid-cache path: build with full local instrumentation.
-    // Increase metadata cache from default 50 MB to 512 MB so large Parquet
+    // Increase metadata cache from default 50 MB to 256 MB so large Parquet
     // footers are cached across queries.
     let runtime_env = Arc::new(
         RuntimeEnvBuilder::new()
-            .with_metadata_cache_limit(512 * 1024 * 1024)
+            .with_metadata_cache_limit(256 * 1024 * 1024)
             .build()?,
     );
 
