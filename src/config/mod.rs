@@ -181,6 +181,13 @@ pub struct EngineConfig {
     /// Default: 300 (5 minutes).
     #[serde(default = "default_stale_result_timeout_secs")]
     pub stale_result_timeout_secs: u64,
+
+    /// Number of days to retain query results before automatic cleanup.
+    /// Results older than this (in ready/failed status) are deleted along with their parquet files.
+    /// Set to 0 to disable automatic cleanup (keep results indefinitely).
+    /// Default: 7.
+    #[serde(default = "default_result_retention_days")]
+    pub result_retention_days: u64,
 }
 
 impl Default for EngineConfig {
@@ -189,6 +196,7 @@ impl Default for EngineConfig {
             max_concurrent_persistence: default_max_concurrent_persistence(),
             stale_result_cleanup_interval_secs: default_stale_result_cleanup_interval_secs(),
             stale_result_timeout_secs: default_stale_result_timeout_secs(),
+            result_retention_days: default_result_retention_days(),
         }
     }
 }
@@ -203,6 +211,10 @@ fn default_stale_result_cleanup_interval_secs() -> u64 {
 
 fn default_stale_result_timeout_secs() -> u64 {
     300
+}
+
+pub fn default_result_retention_days() -> u64 {
+    7
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -357,5 +369,39 @@ type = "filesystem"
 
         std::env::remove_var("RUNTIMEDB_STORAGE__AUTHORIZATION_HEADER");
         std::env::remove_var("RUNTIMEDB_SERVER__PORT");
+    }
+
+    #[test]
+    fn test_engine_config_result_retention_days_default() {
+        let config = EngineConfig::default();
+        assert_eq!(config.result_retention_days, 7);
+    }
+
+    #[test]
+    fn test_engine_config_result_retention_days_from_env() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let temp_file = tempfile::Builder::new().suffix(".toml").tempfile().unwrap();
+        std::fs::write(
+            temp_file.path(),
+            r#"
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[catalog]
+type = "sqlite"
+
+[storage]
+type = "filesystem"
+"#,
+        )
+        .unwrap();
+
+        std::env::set_var("RUNTIMEDB_ENGINE__RESULT_RETENTION_DAYS", "30");
+
+        let config = AppConfig::load(temp_file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.engine.result_retention_days, 30);
+
+        std::env::remove_var("RUNTIMEDB_ENGINE__RESULT_RETENTION_DAYS");
     }
 }

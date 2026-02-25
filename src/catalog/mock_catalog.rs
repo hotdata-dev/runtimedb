@@ -293,6 +293,26 @@ impl CatalogManager for MockCatalog {
         Ok(count)
     }
 
+    async fn delete_expired_results(&self, cutoff: DateTime<Utc>) -> Result<Vec<QueryResult>> {
+        let mut results = self.results.write().unwrap();
+        let expired_ids: Vec<String> = results
+            .values()
+            .filter(|r| {
+                (r.status == ResultStatus::Ready || r.status == ResultStatus::Failed)
+                    && r.created_at < cutoff
+            })
+            .map(|r| r.id.clone())
+            .collect();
+
+        let mut deleted = Vec::new();
+        for id in expired_ids {
+            if let Some(result) = results.remove(&id) {
+                deleted.push(result);
+            }
+        }
+        Ok(deleted)
+    }
+
     async fn create_query_run(&self, params: CreateQueryRun<'_>) -> Result<String> {
         Ok(params.id.to_string())
     }

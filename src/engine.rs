@@ -63,6 +63,9 @@ const DEFAULT_DELETION_WORKER_INTERVAL_SECS: u64 = 30;
 /// Default interval (in seconds) between stale result cleanup runs.
 const DEFAULT_STALE_RESULT_CLEANUP_INTERVAL_SECS: u64 = 60;
 
+/// Interval (in seconds) between result retention cleanup runs (1 hour).
+const RESULT_RETENTION_CLEANUP_INTERVAL_SECS: u64 = 3600;
+
 /// Default timeout (in seconds) after which pending/processing results are considered stale.
 const DEFAULT_STALE_RESULT_TIMEOUT_SECS: u64 = 300;
 
@@ -173,6 +176,8 @@ pub struct RuntimeEngine {
     persistence_tasks: Mutex<JoinSet<()>>,
     /// Handle for the stale result cleanup worker task.
     stale_result_cleanup_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Handle for the result retention cleanup worker task.
+    result_retention_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// Build a reader-compatible schema where geometry (Binary) columns are replaced with Utf8.
@@ -348,6 +353,7 @@ impl RuntimeEngine {
         ));
         builder = builder
             .stale_result_timeout(Duration::from_secs(config.engine.stale_result_timeout_secs));
+        builder = builder.result_retention_days(config.engine.result_retention_days);
 
         builder.build().await
     }
@@ -1396,6 +1402,11 @@ impl RuntimeEngine {
 
         // Wait for the stale result cleanup worker to finish
         if let Some(handle) = self.stale_result_cleanup_handle.lock().await.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
+
+        // Wait for the result retention worker to finish
+        if let Some(handle) = self.result_retention_handle.lock().await.take() {
             let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
         }
 
@@ -2737,6 +2748,80 @@ impl RuntimeEngine {
             }
         }))
     }
+
+    /// Start background task that deletes expired query results (ready/failed) and schedules
+    /// their parquet files for deletion. Returns None if retention_days is 0 (disabled).
+    fn start_result_retention_worker(
+        catalog: Arc<dyn CatalogManager>,
+        shutdown_token: CancellationToken,
+        retention_days: u64,
+        deletion_grace_period: Duration,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        if retention_days == 0 {
+            info!("Result retention worker disabled (retention_days is 0)");
+            return None;
+        }
+
+        info!(
+            retention_days = retention_days,
+            interval_secs = RESULT_RETENTION_CLEANUP_INTERVAL_SECS,
+            "Starting result retention worker"
+        );
+
+        Some(tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(RESULT_RETENTION_CLEANUP_INTERVAL_SECS));
+            loop {
+                tokio::select! {
+                    _ = shutdown_token.cancelled() => {
+                        info!("Result retention worker received shutdown signal");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        let cutoff = Utc::now() - chrono::Duration::days(retention_days as i64);
+                        match catalog.delete_expired_results(cutoff).await {
+                            Ok(deleted) if deleted.is_empty() => {
+                                // Nothing expired — normal case, don't log
+                            }
+                            Ok(deleted) => {
+                                let count = deleted.len();
+                                let grace = chrono::Duration::from_std(deletion_grace_period)
+                                    .unwrap_or(chrono::Duration::seconds(60));
+                                let delete_after = Utc::now() + grace;
+                                for result in &deleted {
+                                    if let Some(ref parquet_path) = result.parquet_path {
+                                        // Strip "/data.parquet" suffix to get directory path
+                                        let dir_path = parquet_path
+                                            .strip_suffix("/data.parquet")
+                                            .unwrap_or(parquet_path);
+                                        if let Err(e) = catalog
+                                            .schedule_file_deletion(dir_path, delete_after)
+                                            .await
+                                        {
+                                            warn!(
+                                                result_id = %result.id,
+                                                path = %dir_path,
+                                                error = %e,
+                                                "Failed to schedule file deletion for expired result"
+                                            );
+                                        }
+                                    }
+                                }
+                                info!(
+                                    count = count,
+                                    cutoff = %cutoff,
+                                    "Deleted expired results"
+                                );
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "Failed to delete expired results");
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+    }
 }
 
 impl Drop for RuntimeEngine {
@@ -2790,6 +2875,7 @@ pub struct RuntimeEngineBuilder {
     cache_config: Option<crate::config::CacheConfig>,
     stale_result_cleanup_interval: Duration,
     stale_result_timeout: Duration,
+    result_retention_days: u64,
 }
 
 impl Default for RuntimeEngineBuilder {
@@ -2819,6 +2905,7 @@ impl RuntimeEngineBuilder {
                 DEFAULT_STALE_RESULT_CLEANUP_INTERVAL_SECS,
             ),
             stale_result_timeout: Duration::from_secs(DEFAULT_STALE_RESULT_TIMEOUT_SECS),
+            result_retention_days: crate::config::default_result_retention_days(),
         }
     }
 
@@ -2920,6 +3007,14 @@ impl RuntimeEngineBuilder {
     /// Defaults to 300 seconds (5 minutes).
     pub fn stale_result_timeout(mut self, timeout: Duration) -> Self {
         self.stale_result_timeout = timeout;
+        self
+    }
+
+    /// Set the number of days to retain query results before automatic cleanup.
+    /// Results older than this (in ready/failed status) are deleted along with their parquet files.
+    /// Set to 0 to disable automatic cleanup. Defaults to 7.
+    pub fn result_retention_days(mut self, days: u64) -> Self {
+        self.result_retention_days = days;
         self
     }
 
@@ -3074,6 +3169,14 @@ impl RuntimeEngineBuilder {
             self.stale_result_timeout,
         );
 
+        // Start background result retention worker
+        let result_retention_handle = RuntimeEngine::start_result_retention_worker(
+            catalog.clone(),
+            shutdown_token.clone(),
+            self.result_retention_days,
+            self.deletion_grace_period,
+        );
+
         // Initialize catalog (starts warmup loop if configured)
         catalog.init().await?;
 
@@ -3100,6 +3203,7 @@ impl RuntimeEngineBuilder {
             persistence_semaphore: Arc::new(Semaphore::new(self.max_concurrent_persistence)),
             persistence_tasks: Mutex::new(JoinSet::new()),
             stale_result_cleanup_handle: Mutex::new(stale_result_cleanup_handle),
+            result_retention_handle: Mutex::new(result_retention_handle),
         };
 
         // Note: All catalogs (connections, datasets, runtimedb) are now resolved on-demand
@@ -3717,5 +3821,168 @@ mod tests {
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(name_col.value(0), "Alice");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_result_retention_deletes_expired_ready_and_failed() {
+        use crate::catalog::ResultUpdate;
+
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().to_path_buf();
+
+        let catalog = Arc::new(
+            SqliteCatalogManager::new(base_dir.join("catalog.db").to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        catalog.run_migrations().await.unwrap();
+
+        // Create a result in ready state with a fake parquet_path
+        let r1 = catalog
+            .create_result(ResultStatus::Processing)
+            .await
+            .unwrap();
+        catalog
+            .update_result(
+                &r1,
+                ResultUpdate::Ready {
+                    parquet_path: "cache/_runtimedb_internal/runtimedb_results/r1/data.parquet",
+                },
+            )
+            .await
+            .unwrap();
+
+        // Create a result in failed state
+        let r2 = catalog
+            .create_result(ResultStatus::Processing)
+            .await
+            .unwrap();
+        catalog
+            .update_result(
+                &r2,
+                ResultUpdate::Failed {
+                    error_message: Some("test error"),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Create a result still in pending state
+        let r3 = catalog.create_result(ResultStatus::Pending).await.unwrap();
+
+        // Create a result in processing state
+        let r4 = catalog
+            .create_result(ResultStatus::Processing)
+            .await
+            .unwrap();
+
+        // Delete expired results with cutoff in the future (everything is expired)
+        let cutoff = Utc::now() + chrono::Duration::seconds(60);
+        let deleted = catalog.delete_expired_results(cutoff).await.unwrap();
+
+        // Should only delete ready and failed results
+        assert_eq!(deleted.len(), 2, "Should delete 2 terminal results");
+        let deleted_ids: Vec<&str> = deleted.iter().map(|r| r.id.as_str()).collect();
+        assert!(deleted_ids.contains(&r1.as_str()));
+        assert!(deleted_ids.contains(&r2.as_str()));
+
+        // Pending and processing should remain
+        assert!(
+            catalog.get_result(&r3).await.unwrap().is_some(),
+            "Pending result should remain"
+        );
+        assert!(
+            catalog.get_result(&r4).await.unwrap().is_some(),
+            "Processing result should remain"
+        );
+
+        // Deleted results should be gone from DB
+        assert!(
+            catalog.get_result(&r1).await.unwrap().is_none(),
+            "Ready result should be deleted"
+        );
+        assert!(
+            catalog.get_result(&r2).await.unwrap().is_none(),
+            "Failed result should be deleted"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_result_retention_does_not_delete_non_expired() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().to_path_buf();
+
+        let catalog = Arc::new(
+            SqliteCatalogManager::new(base_dir.join("catalog.db").to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        catalog.run_migrations().await.unwrap();
+
+        // Create a result in ready state
+        let r1 = catalog
+            .create_result(ResultStatus::Processing)
+            .await
+            .unwrap();
+        catalog
+            .update_result(
+                &r1,
+                ResultUpdate::Ready {
+                    parquet_path: "some/path/data.parquet",
+                },
+            )
+            .await
+            .unwrap();
+
+        // Use cutoff in the past (nothing should be expired since results were just created)
+        let cutoff = Utc::now() - chrono::Duration::days(1);
+        let deleted = catalog.delete_expired_results(cutoff).await.unwrap();
+
+        assert!(
+            deleted.is_empty(),
+            "No results should be deleted when cutoff is in the past"
+        );
+        assert!(
+            catalog.get_result(&r1).await.unwrap().is_some(),
+            "Result should still exist"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_result_retention_worker_disabled_when_days_zero() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().to_path_buf();
+
+        let engine = RuntimeEngine::builder()
+            .base_dir(base_dir)
+            .result_retention_days(0)
+            .build()
+            .await
+            .unwrap();
+
+        assert!(
+            engine.result_retention_handle.lock().await.is_none(),
+            "Retention worker should be None when disabled"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_result_retention_worker_enabled_when_days_nonzero() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().to_path_buf();
+
+        let engine = RuntimeEngine::builder()
+            .base_dir(base_dir)
+            .result_retention_days(30)
+            .build()
+            .await
+            .unwrap();
+
+        assert!(
+            engine.result_retention_handle.lock().await.is_some(),
+            "Retention worker should be running when days > 0"
+        );
+
+        engine.shutdown().await.unwrap();
     }
 }
