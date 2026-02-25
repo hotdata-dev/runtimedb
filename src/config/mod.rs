@@ -53,7 +53,14 @@ impl std::fmt::Debug for CatalogConfig {
             .field("port", &self.port)
             .field("database", &self.database)
             .field("user", &self.user)
-            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "password",
+                if self.password.is_some() {
+                    &"[REDACTED]" as &dyn std::fmt::Debug
+                } else {
+                    &"[NOT SET]" as &dyn std::fmt::Debug
+                },
+            )
             .finish()
     }
 }
@@ -86,11 +93,29 @@ impl std::fmt::Debug for StorageConfig {
             .field("bucket", &self.bucket)
             .field("region", &self.region)
             .field("endpoint", &self.endpoint)
-            .field("access_key", &self.access_key.as_ref().map(|_| "[REDACTED]"))
-            .field("secret_key", &self.secret_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "access_key",
+                if self.access_key.is_some() {
+                    &"[REDACTED]" as &dyn std::fmt::Debug
+                } else {
+                    &"[NOT SET]" as &dyn std::fmt::Debug
+                },
+            )
+            .field(
+                "secret_key",
+                if self.secret_key.is_some() {
+                    &"[REDACTED]" as &dyn std::fmt::Debug
+                } else {
+                    &"[NOT SET]" as &dyn std::fmt::Debug
+                },
+            )
             .field(
                 "authorization_header",
-                &self.authorization_header.as_ref().map(|_| "[REDACTED]"),
+                if self.authorization_header.is_some() {
+                    &"[REDACTED]" as &dyn std::fmt::Debug
+                } else {
+                    &"[NOT SET]" as &dyn std::fmt::Debug
+                },
             )
             .field("s3_compat", &self.s3_compat)
             .finish()
@@ -118,7 +143,11 @@ impl std::fmt::Debug for SecretsConfig {
         f.debug_struct("SecretsConfig")
             .field(
                 "encryption_key",
-                &self.encryption_key.as_ref().map(|_| "[REDACTED]"),
+                if self.encryption_key.is_some() {
+                    &"[REDACTED]" as &dyn std::fmt::Debug
+                } else {
+                    &"[NOT SET]" as &dyn std::fmt::Debug
+                },
             )
             .finish()
     }
