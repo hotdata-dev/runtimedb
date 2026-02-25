@@ -496,19 +496,16 @@ impl RuntimeEngine {
     }
 
     /// Get a reference to the storage manager
-    #[inline]
     pub fn storage(&self) -> &Arc<dyn StorageManager> {
         &self.storage
     }
 
     /// Get a reference to the DataFusion session context.
-    #[inline]
     pub fn session_context(&self) -> &SessionContext {
         &self.df_ctx
     }
 
     /// Get a reference to the secret manager.
-    #[inline]
     pub fn secret_manager(&self) -> &Arc<SecretManager> {
         &self.secret_manager
     }
@@ -692,7 +689,6 @@ impl RuntimeEngine {
         .await?;
 
         info!("Execution completed in {:?}", start.elapsed());
-        info!("Results available");
 
         let row_count: usize = results.iter().map(|b| b.num_rows()).sum();
         tracing::Span::current().record("runtimedb.rows_returned", row_count);
