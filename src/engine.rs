@@ -1,4 +1,3 @@
-// Query engine core implementation
 use crate::catalog::{
     is_dataset_table_name_conflict, CachingCatalogManager, CatalogManager, ConnectionInfo,
     CreateQueryRun, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus, ResultUpdate,
@@ -3959,7 +3958,6 @@ mod tests {
 
         let engine = RuntimeEngine::builder()
             .base_dir(base_dir)
-            .secret_key(test_secret_key())
             .result_retention_days(0)
             .build()
             .await
@@ -3978,7 +3976,6 @@ mod tests {
 
         let engine = RuntimeEngine::builder()
             .base_dir(base_dir)
-            .secret_key(test_secret_key())
             .result_retention_days(30)
             .build()
             .await
