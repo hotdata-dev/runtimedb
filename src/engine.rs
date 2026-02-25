@@ -688,12 +688,9 @@ impl RuntimeEngine {
         ))
         .await?;
 
+        info!("Execution completed in {:?}", start.elapsed());
+
         let row_count: usize = results.iter().map(|b| b.num_rows()).sum();
-        info!(
-            rows = row_count,
-            elapsed = ?start.elapsed(),
-            "Execution completed"
-        );
         tracing::Span::current().record("runtimedb.rows_returned", row_count);
 
         Ok(QueryResponse {
@@ -3001,7 +2998,7 @@ impl RuntimeEngineBuilder {
             // Get actual object stores for instrumentation (preserves full config like MinIO path-style)
             let object_stores: Vec<_> = storage.get_object_store().into_iter().collect();
 
-            // Build liquid-cache config if server is configured
+            // Build liquid-cache config if server is configured (credentials passed securely)
             let liquid_cache_config = self.liquid_cache_server.map(|server| {
                 let store_configs: Vec<_> = storage.get_object_store_config().into_iter().collect();
                 (server, store_configs)
