@@ -3002,6 +3002,7 @@ impl RuntimeEngineBuilder {
             let liquid_cache_config = self.liquid_cache_server.map(|server| {
                 let store_configs: Vec<_> =
                     storage.get_object_store_config().into_iter().collect();
+                info!("Liquid cache configured with {} store(s) for server {}", store_configs.len(), server);
                 (server, store_configs)
             });
 
