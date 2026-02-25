@@ -176,7 +176,7 @@ impl CatalogManager for SqliteCatalogManager {
 
     #[tracing::instrument(
         name = "catalog_add_connection",
-        skip(self, config_json, secret_id),
+        skip(self, config_json),
         fields(db = "sqlite")
     )]
     async fn add_connection(

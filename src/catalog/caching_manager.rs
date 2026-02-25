@@ -758,7 +758,7 @@ impl CatalogManager for CachingCatalogManager {
         self.inner().run_migrations().await
     }
 
-    #[tracing::instrument(name = "catalog.add_connection", skip(self, config_json, secret_id))]
+    #[tracing::instrument(name = "catalog.add_connection", skip(self, config_json))]
     async fn add_connection(
         &self,
         name: &str,
