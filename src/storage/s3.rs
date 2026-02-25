@@ -143,10 +143,19 @@ impl ObjectStore for S3CompatObjectStore {
 }
 
 /// Explicit credentials for S3 access (used for MinIO or explicit AWS credentials)
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct S3Creds {
     access_key: String,
     secret_key: String,
+}
+
+impl std::fmt::Debug for S3Creds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3Creds")
+            .field("access_key", &"[REDACTED]")
+            .field("secret_key", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// S3 storage configuration
