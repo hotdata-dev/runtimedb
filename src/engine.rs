@@ -1,4 +1,3 @@
-// Query engine core implementation
 use crate::catalog::{
     is_dataset_table_name_conflict, CachingCatalogManager, CatalogManager, ConnectionInfo,
     CreateQueryRun, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus, ResultUpdate,
@@ -497,16 +496,19 @@ impl RuntimeEngine {
     }
 
     /// Get a reference to the storage manager
+    #[inline]
     pub fn storage(&self) -> &Arc<dyn StorageManager> {
         &self.storage
     }
 
     /// Get a reference to the DataFusion session context.
+    #[inline]
     pub fn session_context(&self) -> &SessionContext {
         &self.df_ctx
     }
 
     /// Get a reference to the secret manager.
+    #[inline]
     pub fn secret_manager(&self) -> &Arc<SecretManager> {
         &self.secret_manager
     }
