@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::Session;
 use datafusion::datasource::listing::ListingTableUrl;
+use datafusion::datasource::physical_plan::parquet::CachedParquetFileReaderFactory;
 use datafusion::datasource::physical_plan::{FileScanConfigBuilder, ParquetSource};
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::datasource::{TableProvider, TableType};
@@ -47,8 +48,15 @@ pub async fn build_parquet_exec(
         )
     })?;
 
+    // Use CachedParquetFileReaderFactory so parsed parquet footer metadata is
+    // cached across queries, avoiding repeated I/O + deserialization.
+    let metadata_cache = state.runtime_env().cache_manager.get_file_metadata_cache();
+    let cached_reader_factory = Arc::new(CachedParquetFileReaderFactory::new(
+        Arc::clone(&store),
+        metadata_cache,
+    ));
     let parquet_source: Arc<dyn datafusion::datasource::physical_plan::FileSource> =
-        Arc::new(ParquetSource::default());
+        Arc::new(ParquetSource::default().with_parquet_file_reader_factory(cached_reader_factory));
 
     let config = FileScanConfigBuilder::new(object_store_url, file_schema, parquet_source)
         .with_file(object_meta.into())
@@ -316,5 +324,53 @@ mod tests {
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], TableProviderFilterPushDown::Inexact);
+    }
+
+    #[tokio::test]
+    async fn test_metadata_cache_is_populated_and_hit() {
+        let tmp = TempDir::new().unwrap();
+        let (file_url, schema) = create_test_parquet(tmp.path());
+
+        let ctx = SessionContext::new();
+        let cache = ctx.runtime_env().cache_manager.get_file_metadata_cache();
+
+        // Cache should be empty before any query
+        assert_eq!(cache.len(), 0);
+
+        // First query — populates the cache
+        let state = ctx.state();
+        let plan = build_parquet_exec(&file_url, schema.clone(), &state, None, None)
+            .await
+            .unwrap();
+        let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
+
+        // Cache should now have one entry
+        assert_eq!(
+            cache.len(),
+            1,
+            "metadata cache should have 1 entry after first query"
+        );
+
+        // Second query — should hit the cache
+        let plan = build_parquet_exec(&file_url, schema, &state, None, None)
+            .await
+            .unwrap();
+        let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
+
+        // Cache should still have one entry (same file), with at least one hit
+        assert_eq!(cache.len(), 1);
+        let entries = cache.list_entries();
+        let entry = entries.values().next().unwrap();
+        assert!(
+            entry.hits >= 1,
+            "expected at least 1 cache hit, got {}",
+            entry.hits
+        );
     }
 }

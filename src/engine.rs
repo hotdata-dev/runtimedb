@@ -20,7 +20,7 @@ use datafusion::arrow::datatypes::Schema;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::AsyncCatalogProviderList;
 use datafusion::execution::object_store::ObjectStoreUrl;
-use datafusion::execution::runtime_env::RuntimeEnv;
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::prelude::*;
 use datafusion_tracing::{instrument_with_info_spans, InstrumentationOptions};
@@ -3269,8 +3269,14 @@ fn build_instrumented_context(
         return Ok(liquid_cache_builder.build(session_config)?);
     }
 
-    // Non-liquid-cache path: build with full local instrumentation
-    let runtime_env = Arc::new(RuntimeEnv::default());
+    // Non-liquid-cache path: build with full local instrumentation.
+    // Increase metadata cache from default 50 MB to 256 MB so large Parquet
+    // footers are cached across queries.
+    let runtime_env = Arc::new(
+        RuntimeEnvBuilder::new()
+            .with_metadata_cache_limit(256 * 1024 * 1024)
+            .build()?,
+    );
 
     // Register instrumented object stores (using actual pre-built stores)
     for (url, store) in object_stores {
