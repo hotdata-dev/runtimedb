@@ -34,7 +34,7 @@ fn default_port() -> u16 {
     3000
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct CatalogConfig {
     #[serde(rename = "type")]
     pub catalog_type: String,
@@ -45,7 +45,27 @@ pub struct CatalogConfig {
     pub password: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+impl std::fmt::Debug for CatalogConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CatalogConfig")
+            .field("catalog_type", &self.catalog_type)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("database", &self.database)
+            .field("user", &self.user)
+            .field(
+                "password",
+                if self.password.is_some() {
+                    &"[REDACTED]" as &dyn std::fmt::Debug
+                } else {
+                    &"[NOT SET]" as &dyn std::fmt::Debug
+                },
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
 pub struct StorageConfig {
     #[serde(rename = "type")]
     pub storage_type: String,
@@ -66,6 +86,42 @@ pub struct StorageConfig {
     pub s3_compat: bool,
 }
 
+impl std::fmt::Debug for StorageConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StorageConfig")
+            .field("storage_type", &self.storage_type)
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("endpoint", &self.endpoint)
+            .field(
+                "access_key",
+                if self.access_key.is_some() {
+                    &"[REDACTED]" as &dyn std::fmt::Debug
+                } else {
+                    &"[NOT SET]" as &dyn std::fmt::Debug
+                },
+            )
+            .field(
+                "secret_key",
+                if self.secret_key.is_some() {
+                    &"[REDACTED]" as &dyn std::fmt::Debug
+                } else {
+                    &"[NOT SET]" as &dyn std::fmt::Debug
+                },
+            )
+            .field(
+                "authorization_header",
+                if self.authorization_header.is_some() {
+                    &"[REDACTED]" as &dyn std::fmt::Debug
+                } else {
+                    &"[NOT SET]" as &dyn std::fmt::Debug
+                },
+            )
+            .field("s3_compat", &self.s3_compat)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct PathsConfig {
     /// Base directory for all RuntimeDB data (catalog.db, cache/).
@@ -75,11 +131,26 @@ pub struct PathsConfig {
     pub cache_dir: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Clone, Deserialize, Serialize, Default)]
 pub struct SecretsConfig {
     /// Encryption key for secrets (base64-encoded 32-byte key).
     /// Can also be set via RUNTIMEDB_SECRET_KEY environment variable.
     pub encryption_key: Option<String>,
+}
+
+impl std::fmt::Debug for SecretsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretsConfig")
+            .field(
+                "encryption_key",
+                if self.encryption_key.is_some() {
+                    &"[REDACTED]" as &dyn std::fmt::Debug
+                } else {
+                    &"[NOT SET]" as &dyn std::fmt::Debug
+                },
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
