@@ -213,7 +213,7 @@ fn default_stale_result_timeout_secs() -> u64 {
     300
 }
 
-fn default_result_retention_days() -> u64 {
+pub fn default_result_retention_days() -> u64 {
     7
 }
 

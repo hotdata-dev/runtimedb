@@ -63,9 +63,6 @@ const DEFAULT_DELETION_WORKER_INTERVAL_SECS: u64 = 30;
 /// Default interval (in seconds) between stale result cleanup runs.
 const DEFAULT_STALE_RESULT_CLEANUP_INTERVAL_SECS: u64 = 60;
 
-/// Default number of days to retain query results before automatic cleanup.
-const DEFAULT_RESULT_RETENTION_DAYS: u64 = 7;
-
 /// Interval (in seconds) between result retention cleanup runs (1 hour).
 const RESULT_RETENTION_CLEANUP_INTERVAL_SECS: u64 = 3600;
 
@@ -2908,7 +2905,7 @@ impl RuntimeEngineBuilder {
                 DEFAULT_STALE_RESULT_CLEANUP_INTERVAL_SECS,
             ),
             stale_result_timeout: Duration::from_secs(DEFAULT_STALE_RESULT_TIMEOUT_SECS),
-            result_retention_days: DEFAULT_RESULT_RETENTION_DAYS,
+            result_retention_days: crate::config::default_result_retention_days(),
         }
     }
 
