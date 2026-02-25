@@ -2998,9 +2998,10 @@ impl RuntimeEngineBuilder {
             // Get actual object stores for instrumentation (preserves full config like MinIO path-style)
             let object_stores: Vec<_> = storage.get_object_store().into_iter().collect();
 
-            // Build liquid-cache config if server is configured (credentials passed securely)
+            // Build liquid-cache config if server is configured
             let liquid_cache_config = self.liquid_cache_server.map(|server| {
-                let store_configs: Vec<_> = storage.get_object_store_config().into_iter().collect();
+                let store_configs: Vec<_> =
+                    storage.get_object_store_config().into_iter().collect();
                 (server, store_configs)
             });
 
