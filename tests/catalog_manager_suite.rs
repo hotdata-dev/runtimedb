@@ -1,6 +1,6 @@
 use runtimedb::catalog::{
     CatalogManager, CreateQueryRun, PostgresCatalogManager, QueryClassificationData,
-    QueryRunCursor, QueryRunStatus, QueryRunUpdate, SqliteCatalogManager,
+    QueryRunCursor, QueryRunStatus, QueryRunUpdate, SqliteCatalogManager, VersionOverrides,
 };
 use runtimedb::datasets::DEFAULT_SCHEMA;
 use sqlx::{PgPool, SqlitePool};
@@ -936,7 +936,7 @@ macro_rules! catalog_manager_tests {
 
                 let snap2 = catalog.get_or_create_snapshot("SELECT 2").await.unwrap();
                 let updated = catalog
-                    .update_saved_query(&sq.id, None, &snap2.id, None, None, None)
+                    .update_saved_query(&sq.id, None, &snap2.id, None, None, None, &Default::default())
                     .await
                     .unwrap()
                     .expect("update should return saved query");
@@ -1037,7 +1037,7 @@ macro_rules! catalog_manager_tests {
 
                 let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
                 let result = catalog
-                    .update_saved_query("svqr_nope", None, &snap.id, None, None, None)
+                    .update_saved_query("svqr_nope", None, &snap.id, None, None, None, &Default::default())
                     .await
                     .unwrap();
                 assert!(result.is_none());
@@ -1056,7 +1056,7 @@ macro_rules! catalog_manager_tests {
 
                 let snap2 = catalog.get_or_create_snapshot("SELECT 2").await.unwrap();
                 let updated = catalog
-                    .update_saved_query(&sq.id, Some("renamed"), &snap2.id, None, None, None)
+                    .update_saved_query(&sq.id, Some("renamed"), &snap2.id, None, None, None, &Default::default())
                     .await
                     .unwrap()
                     .unwrap();
@@ -1080,12 +1080,12 @@ macro_rules! catalog_manager_tests {
                     .unwrap();
                 let snap2 = catalog.get_or_create_snapshot("SELECT 2").await.unwrap();
                 catalog
-                    .update_saved_query(&sq.id, None, &snap2.id, None, None, None)
+                    .update_saved_query(&sq.id, None, &snap2.id, None, None, None, &Default::default())
                     .await
                     .unwrap();
                 let snap3 = catalog.get_or_create_snapshot("SELECT 3").await.unwrap();
                 catalog
-                    .update_saved_query(&sq.id, None, &snap3.id, None, None, None)
+                    .update_saved_query(&sq.id, None, &snap3.id, None, None, None, &Default::default())
                     .await
                     .unwrap();
 
@@ -1182,7 +1182,7 @@ macro_rules! catalog_manager_tests {
 
                 // Update with the exact same SQL and no name change
                 let updated = catalog
-                    .update_saved_query(&sq.id, None, &snap.id, None, None, None)
+                    .update_saved_query(&sq.id, None, &snap.id, None, None, None, &Default::default())
                     .await
                     .unwrap()
                     .unwrap();
@@ -1212,7 +1212,7 @@ macro_rules! catalog_manager_tests {
 
                 // Rename without changing SQL
                 let updated = catalog
-                    .update_saved_query(&sq.id, Some("new_name"), &snap.id, None, None, None)
+                    .update_saved_query(&sq.id, Some("new_name"), &snap.id, None, None, None, &Default::default())
                     .await
                     .unwrap()
                     .unwrap();
@@ -1320,7 +1320,7 @@ macro_rules! catalog_manager_tests {
                         .await
                         .unwrap();
                     catalog
-                        .update_saved_query(&sq.id, None, &snap.id, None, None, None)
+                        .update_saved_query(&sq.id, None, &snap.id, None, None, None, &Default::default())
                         .await
                         .unwrap();
                 }
@@ -1439,6 +1439,7 @@ macro_rules! catalog_manager_tests {
                         None,
                         Some(&new_tags),
                         Some("new desc"),
+                        &Default::default(),
                     )
                     .await
                     .unwrap()
@@ -1490,6 +1491,7 @@ macro_rules! catalog_manager_tests {
                         Some(&cls2),
                         None,
                         None,
+                        &Default::default(),
                     )
                     .await
                     .unwrap();
@@ -1564,9 +1566,10 @@ async fn sqlite_concurrent_saved_query_updates() {
     let snap3 = catalog.get_or_create_snapshot("SELECT 3").await.unwrap();
 
     // Launch two updates concurrently against the same saved query.
+    let no_overrides = VersionOverrides::default();
     let (r1, r2) = tokio::join!(
-        catalog.update_saved_query(&sq.id, None, &snap2.id, None, None, None),
-        catalog.update_saved_query(&sq.id, None, &snap3.id, None, None, None),
+        catalog.update_saved_query(&sq.id, None, &snap2.id, None, None, None, &no_overrides),
+        catalog.update_saved_query(&sq.id, None, &snap3.id, None, None, None, &no_overrides),
     );
 
     // Both must succeed — no PK violation.
@@ -1616,7 +1619,7 @@ async fn sqlite_version_overflow_returns_error() {
     // Attempt to create a new version — should fail, not overflow
     let snap2 = manager.get_or_create_snapshot("SELECT 2").await.unwrap();
     let result = manager
-        .update_saved_query(&sq.id, None, &snap2.id, None, None, None)
+        .update_saved_query(&sq.id, None, &snap2.id, None, None, None, &Default::default())
         .await;
     assert!(result.is_err(), "Should fail on version overflow");
     let err = result.unwrap_err().to_string();
