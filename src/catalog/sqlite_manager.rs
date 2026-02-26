@@ -3,7 +3,7 @@ use crate::catalog::manager::{
     CatalogManager, ConnectionInfo, CreateQueryRun, DatasetInfo, OptimisticLock, PendingDeletion,
     QueryClassificationData, QueryResult, QueryResultRow, QueryRun, QueryRunCursor, QueryRunRow,
     QueryRunUpdate, ResultStatus, ResultUpdate, SavedQuery, SavedQueryRow, SavedQueryVersion,
-    SavedQueryVersionRow, SqlSnapshot, SqlSnapshotRow, TableInfo, UploadInfo,
+    SavedQueryVersionRow, SqlSnapshot, SqlSnapshotRow, TableInfo, UploadInfo, VersionOverrides,
 };
 use crate::catalog::migrations::{
     run_migrations, wrap_migration_sql, CatalogMigrations, Migration, SQLITE_MIGRATIONS,
@@ -1046,8 +1046,9 @@ impl CatalogManager for SqliteCatalogManager {
                 "INSERT INTO saved_query_versions \
                  (saved_query_id, version, snapshot_id, category, \
                   num_tables, has_predicate, has_join, has_aggregation, \
-                  has_group_by, has_order_by, has_limit, created_at) \
-                 VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  has_group_by, has_order_by, has_limit, \
+                  category_override, table_size_override, created_at) \
+                 VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(snapshot_id)
@@ -1059,6 +1060,8 @@ impl CatalogManager for SqliteCatalogManager {
             .bind(classification.map(|c| c.has_group_by as i32))
             .bind(classification.map(|c| c.has_order_by as i32))
             .bind(classification.map(|c| c.has_limit as i32))
+            .bind(None::<String>) // category_override
+            .bind(None::<String>) // table_size_override
             .bind(&now)
             .execute(&mut *conn)
             .await?;
@@ -1144,6 +1147,7 @@ impl CatalogManager for SqliteCatalogManager {
         classification: Option<&QueryClassificationData>,
         tags: Option<&[String]>,
         description: Option<&str>,
+        overrides: &VersionOverrides,
     ) -> Result<Option<SavedQuery>> {
         // Use BEGIN IMMEDIATE to acquire a RESERVED lock up front, so the
         // read of latest_version and subsequent insert of the next version are
@@ -1186,27 +1190,58 @@ impl CatalogManager for SqliteCatalogManager {
             let name_unchanged = effective_name == existing.name;
             let tags_unchanged = tags.is_none();
             let description_unchanged = description.is_none();
+            let overrides_unchanged = overrides.is_empty();
 
-            if sql_unchanged && name_unchanged && tags_unchanged && description_unchanged {
+            if sql_unchanged
+                && name_unchanged
+                && tags_unchanged
+                && description_unchanged
+                && overrides_unchanged
+            {
                 // Complete no-op — nothing to change
                 return Ok(Some(existing.into_saved_query()));
             }
 
             let now = Utc::now().to_rfc3339();
-            let tags_json = tags.map(|t| serde_json::to_string(t)).transpose()?;
+            let tags_json = tags.map(serde_json::to_string).transpose()?;
 
             let new_version = if !sql_unchanged {
-                // SQL changed — create a new version
+                // SQL changed — create a new version.
+                // Carry forward overrides from the previous version unless explicitly changed.
                 let v = existing.latest_version.checked_add(1).ok_or_else(|| {
                     anyhow::anyhow!("Version limit reached for saved query '{}'", id)
                 })?;
+
+                // Read previous version's overrides to carry forward
+                let prev_overrides: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+                    "SELECT category_override, table_size_override \
+                     FROM saved_query_versions \
+                     WHERE saved_query_id = ? AND version = ?",
+                )
+                .bind(id)
+                .bind(existing.latest_version)
+                .fetch_optional(&mut *conn)
+                .await?;
+
+                let (prev_cat, prev_ts) = prev_overrides.unwrap_or((None, None));
+
+                // If caller explicitly set/cleared, use that; otherwise carry forward
+                let effective_cat_override = match &overrides.category_override {
+                    Some(v) => v.clone(),
+                    None => prev_cat,
+                };
+                let effective_ts_override = match &overrides.table_size_override {
+                    Some(v) => v.clone(),
+                    None => prev_ts,
+                };
 
                 sqlx::query(
                     "INSERT INTO saved_query_versions \
                      (saved_query_id, version, snapshot_id, category, \
                       num_tables, has_predicate, has_join, has_aggregation, \
-                      has_group_by, has_order_by, has_limit, created_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      has_group_by, has_order_by, has_limit, \
+                      category_override, table_size_override, created_at) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(id)
                 .bind(v)
@@ -1219,12 +1254,46 @@ impl CatalogManager for SqliteCatalogManager {
                 .bind(classification.map(|c| c.has_group_by as i32))
                 .bind(classification.map(|c| c.has_order_by as i32))
                 .bind(classification.map(|c| c.has_limit as i32))
+                .bind(&effective_cat_override)
+                .bind(&effective_ts_override)
                 .bind(&now)
                 .execute(&mut *conn)
                 .await?;
 
                 v
             } else {
+                // SQL unchanged — update overrides on the existing version row if needed
+                if !overrides_unchanged {
+                    let mut set_clauses = Vec::new();
+
+                    if overrides.category_override.is_some() {
+                        set_clauses.push("category_override = ?");
+                    }
+                    if overrides.table_size_override.is_some() {
+                        set_clauses.push("table_size_override = ?");
+                    }
+
+                    let sql = format!(
+                        "UPDATE saved_query_versions SET {} \
+                         WHERE saved_query_id = ? AND version = ?",
+                        set_clauses.join(", ")
+                    );
+
+                    let mut q = sqlx::query(&sql);
+
+                    if let Some(ref cat) = overrides.category_override {
+                        q = q.bind(cat.as_deref());
+                    }
+                    if let Some(ref ts) = overrides.table_size_override {
+                        q = q.bind(ts.as_deref());
+                    }
+
+                    q.bind(id)
+                        .bind(existing.latest_version)
+                        .execute(&mut *conn)
+                        .await?;
+                }
+
                 existing.latest_version
             };
 
@@ -1325,6 +1394,7 @@ impl CatalogManager for SqliteCatalogManager {
             "SELECT sqv.saved_query_id, sqv.version, sqv.snapshot_id, \
              snap.sql_text, snap.sql_hash, \
              COALESCE(sqv.category_override, sqv.category) as category, \
+             sqv.table_size_override as table_size, \
              sqv.num_tables, sqv.has_predicate, sqv.has_join, sqv.has_aggregation, \
              sqv.has_group_by, sqv.has_order_by, sqv.has_limit, sqv.created_at \
              FROM saved_query_versions sqv \
@@ -1355,6 +1425,7 @@ impl CatalogManager for SqliteCatalogManager {
             "SELECT sqv.saved_query_id, sqv.version, sqv.snapshot_id, \
              snap.sql_text, snap.sql_hash, \
              COALESCE(sqv.category_override, sqv.category) as category, \
+             sqv.table_size_override as table_size, \
              sqv.num_tables, sqv.has_predicate, sqv.has_join, sqv.has_aggregation, \
              sqv.has_group_by, sqv.has_order_by, sqv.has_limit, sqv.created_at \
              FROM saved_query_versions sqv \

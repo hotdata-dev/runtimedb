@@ -1,4 +1,5 @@
-use crate::catalog::{SavedQuery, SavedQueryVersion};
+use crate::catalog::{SavedQuery, SavedQueryVersion, VersionOverrides};
+use crate::classify::QueryCategory;
 use crate::http::controllers::query_controller::serialize_batches;
 use crate::http::error::ApiError;
 use crate::http::models::{
@@ -27,7 +28,7 @@ const MAX_TAGS: usize = 50;
 const MAX_TAG_LENGTH: usize = 100;
 const MAX_DESCRIPTION_LENGTH: usize = 10_000;
 
-fn validate_tags_and_description(tags: &[String], description: &str) -> Result<(), ApiError> {
+fn validate_tags(tags: &[String]) -> Result<(), ApiError> {
     if tags.len() > MAX_TAGS {
         return Err(ApiError::bad_request(format!(
             "Too many tags (max {})",
@@ -35,19 +36,23 @@ fn validate_tags_and_description(tags: &[String], description: &str) -> Result<(
         )));
     }
     for tag in tags {
-        if tag.trim().is_empty() {
+        if tag.is_empty() {
             return Err(ApiError::bad_request(
                 "Tags cannot be empty or whitespace-only",
             ));
         }
-        if tag.len() > MAX_TAG_LENGTH {
+        if tag.chars().count() > MAX_TAG_LENGTH {
             return Err(ApiError::bad_request(format!(
                 "Tag exceeds maximum length of {} characters",
                 MAX_TAG_LENGTH
             )));
         }
     }
-    if description.len() > MAX_DESCRIPTION_LENGTH {
+    Ok(())
+}
+
+fn validate_description(description: &str) -> Result<(), ApiError> {
+    if description.chars().count() > MAX_DESCRIPTION_LENGTH {
         return Err(ApiError::bad_request(format!(
             "Description exceeds maximum length of {} characters",
             MAX_DESCRIPTION_LENGTH
@@ -66,6 +71,7 @@ fn build_saved_query_detail(sq: SavedQuery, version: SavedQueryVersion) -> Saved
         tags: sq.tags,
         description: sq.description,
         category: version.category,
+        table_size: version.table_size,
         num_tables: version.num_tables,
         has_predicate: version.has_predicate,
         has_join: version.has_join,
@@ -96,7 +102,7 @@ pub async fn create_saved_query(
     if name.is_empty() {
         return Err(ApiError::bad_request("Saved query name cannot be empty"));
     }
-    if name.len() > MAX_NAME_LENGTH {
+    if name.chars().count() > MAX_NAME_LENGTH {
         return Err(ApiError::bad_request(format!(
             "Saved query name exceeds maximum length of {} characters",
             MAX_NAME_LENGTH
@@ -105,7 +111,7 @@ pub async fn create_saved_query(
     if sql.is_empty() {
         return Err(ApiError::bad_request("SQL cannot be empty"));
     }
-    if sql.len() > MAX_SQL_LENGTH {
+    if sql.chars().count() > MAX_SQL_LENGTH {
         return Err(ApiError::bad_request(format!(
             "SQL exceeds maximum length of {} characters",
             MAX_SQL_LENGTH
@@ -117,9 +123,13 @@ pub async fn create_saved_query(
         .unwrap_or_default()
         .into_iter()
         .map(|t| t.trim().to_string())
-        .collect();
+        .collect::<Vec<_>>();
+    // Deduplicate tags while preserving order
+    let mut seen = std::collections::HashSet::new();
+    let tags: Vec<String> = tags.into_iter().filter(|t| seen.insert(t.clone())).collect();
     let description = request.description.unwrap_or_default();
-    validate_tags_and_description(&tags, &description)?;
+    validate_tags(&tags)?;
+    validate_description(&description)?;
 
     let saved_query = engine
         .create_saved_query(&name, &sql, &tags, &description)
@@ -232,7 +242,7 @@ pub async fn update_saved_query(
         if sql.is_empty() {
             return Err(ApiError::bad_request("SQL cannot be empty"));
         }
-        if sql.len() > MAX_SQL_LENGTH {
+        if sql.chars().count() > MAX_SQL_LENGTH {
             return Err(ApiError::bad_request(format!(
                 "SQL exceeds maximum length of {} characters",
                 MAX_SQL_LENGTH
@@ -245,7 +255,7 @@ pub async fn update_saved_query(
         if name.is_empty() {
             return Err(ApiError::bad_request("Saved query name cannot be empty"));
         }
-        if name.len() > MAX_NAME_LENGTH {
+        if name.chars().count() > MAX_NAME_LENGTH {
             return Err(ApiError::bad_request(format!(
                 "Saved query name exceeds maximum length of {} characters",
                 MAX_NAME_LENGTH
@@ -254,24 +264,56 @@ pub async fn update_saved_query(
     }
 
     let trimmed_tags = request.tags.map(|tags| {
-        tags.into_iter()
-            .map(|t| t.trim().to_string())
+        let trimmed: Vec<String> = tags.into_iter().map(|t| t.trim().to_string()).collect();
+        // Deduplicate tags while preserving order
+        let mut seen = std::collections::HashSet::new();
+        trimmed
+            .into_iter()
+            .filter(|t| seen.insert(t.clone()))
             .collect::<Vec<_>>()
     });
     if let Some(ref tags) = trimmed_tags {
-        validate_tags_and_description(tags, "")?;
+        validate_tags(tags)?;
     }
     if let Some(ref desc) = request.description {
-        validate_tags_and_description(&[], desc)?;
+        validate_description(desc)?;
     }
+
+    // Validate category_override against known categories
+    if let Some(Some(ref cat)) = request.category_override {
+        if QueryCategory::parse(cat).is_none() {
+            return Err(ApiError::bad_request(format!(
+                "Unknown category '{}'. Valid categories: full_scan, projection, \
+                 filtered_scan, point_lookup, aggregation, join",
+                cat
+            )));
+        }
+    }
+
+    // Validate table_size_override length
+    if let Some(Some(ref ts)) = request.table_size_override {
+        if ts.chars().count() > MAX_TAG_LENGTH {
+            return Err(ApiError::bad_request(format!(
+                "table_size_override exceeds maximum length of {} characters",
+                MAX_TAG_LENGTH
+            )));
+        }
+    }
+
+    let overrides = VersionOverrides {
+        category_override: request.category_override,
+        table_size_override: request.table_size_override,
+    };
 
     if trimmed_name.is_none()
         && trimmed_sql.is_none()
         && trimmed_tags.is_none()
         && request.description.is_none()
+        && overrides.is_empty()
     {
         return Err(ApiError::bad_request(
-            "At least one of 'name', 'sql', 'tags', or 'description' must be provided",
+            "At least one of 'name', 'sql', 'tags', 'description', \
+             'category_override', or 'table_size_override' must be provided",
         ));
     }
 
@@ -282,6 +324,7 @@ pub async fn update_saved_query(
             trimmed_sql,
             trimmed_tags.as_deref(),
             request.description.as_deref(),
+            &overrides,
         )
         .await
         .map_err(|e| -> ApiError { e.into() })?
@@ -352,6 +395,7 @@ pub async fn list_saved_query_versions(
             sql: v.sql_text,
             sql_hash: v.sql_hash,
             category: v.category,
+            table_size: v.table_size,
             num_tables: v.num_tables,
             has_predicate: v.has_predicate,
             has_join: v.has_join,

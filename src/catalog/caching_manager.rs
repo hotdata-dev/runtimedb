@@ -8,6 +8,7 @@ use super::{
     CatalogManager, ConnectionInfo, CreateQueryRun, DatasetInfo, OptimisticLock, PendingDeletion,
     QueryClassificationData, QueryResult, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus,
     ResultUpdate, SavedQuery, SavedQueryVersion, SqlSnapshot, TableInfo, UploadInfo,
+    VersionOverrides,
 };
 use crate::config::CacheConfig;
 use crate::secrets::{SecretMetadata, SecretStatus};
@@ -1169,9 +1170,12 @@ impl CatalogManager for CachingCatalogManager {
         classification: Option<&QueryClassificationData>,
         tags: Option<&[String]>,
         description: Option<&str>,
+        overrides: &VersionOverrides,
     ) -> Result<Option<SavedQuery>> {
         self.inner()
-            .update_saved_query(id, name, snapshot_id, classification, tags, description)
+            .update_saved_query(
+                id, name, snapshot_id, classification, tags, description, overrides,
+            )
             .await
     }
 

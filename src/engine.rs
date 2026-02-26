@@ -1168,6 +1168,7 @@ impl RuntimeEngine {
         sql: Option<&str>,
         tags: Option<&[String]>,
         description: Option<&str>,
+        overrides: &crate::catalog::VersionOverrides,
     ) -> Result<Option<SavedQuery>> {
         let (snapshot_id, classification) = match sql {
             Some(sql) => {
@@ -1204,6 +1205,7 @@ impl RuntimeEngine {
                 classification.as_ref(),
                 tags,
                 description,
+                overrides,
             )
             .await
     }
@@ -1229,17 +1231,8 @@ impl RuntimeEngine {
             classify_ctx.register_catalog_list(resolved_catalog_list);
             let session_state = classify_ctx.state();
             let plan = session_state.statement_to_plan(statement).await?;
-            let c = crate::classify::classify_plan(&plan);
-            Ok(crate::catalog::QueryClassificationData {
-                category: c.category.as_str().to_string(),
-                num_tables: c.num_tables,
-                has_predicate: c.has_predicate,
-                has_join: c.has_join,
-                has_aggregation: c.has_aggregation,
-                has_group_by: c.has_group_by,
-                has_order_by: c.has_order_by,
-                has_limit: c.has_limit,
-            })
+            let c = crate::classify::classify_plan(&plan)?;
+            Ok(crate::catalog::QueryClassificationData::from(c))
         }
         .await;
 

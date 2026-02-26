@@ -523,6 +523,21 @@ impl From<SqlSnapshotRowPg> for SqlSnapshot {
     }
 }
 
+/// User-provided overrides for a saved query version.
+/// `Some(Some(val))` = set to val, `Some(None)` = clear (revert to auto), `None` = leave unchanged.
+#[derive(Debug, Clone, Default)]
+pub struct VersionOverrides {
+    pub category_override: Option<Option<String>>,
+    pub table_size_override: Option<Option<String>>,
+}
+
+impl VersionOverrides {
+    /// Returns true if no override field was provided (all None).
+    pub fn is_empty(&self) -> bool {
+        self.category_override.is_none() && self.table_size_override.is_none()
+    }
+}
+
 /// Classification data for a saved query version.
 /// Passed from the engine to catalog managers when creating/updating versions.
 #[derive(Debug, Clone)]
@@ -537,6 +552,21 @@ pub struct QueryClassificationData {
     pub has_limit: bool,
 }
 
+impl From<crate::classify::QueryClassification> for QueryClassificationData {
+    fn from(c: crate::classify::QueryClassification) -> Self {
+        Self {
+            category: c.category.as_str().to_string(),
+            num_tables: c.num_tables,
+            has_predicate: c.has_predicate,
+            has_join: c.has_join,
+            has_aggregation: c.has_aggregation,
+            has_group_by: c.has_group_by,
+            has_order_by: c.has_order_by,
+            has_limit: c.has_limit,
+        }
+    }
+}
+
 /// An immutable SQL version under a saved query.
 /// The sql_text and sql_hash fields are resolved via JOIN to sql_snapshots at query time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -547,6 +577,7 @@ pub struct SavedQueryVersion {
     pub sql_text: String,
     pub sql_hash: String,
     pub category: Option<String>,
+    pub table_size: Option<String>,
     pub num_tables: Option<i32>,
     pub has_predicate: Option<bool>,
     pub has_join: Option<bool>,
@@ -568,6 +599,7 @@ pub struct SavedQueryVersionRow {
     pub sql_text: String,
     pub sql_hash: String,
     pub category: Option<String>,
+    pub table_size: Option<String>,
     pub num_tables: Option<i32>,
     pub has_predicate: Option<i32>,
     pub has_join: Option<i32>,
@@ -597,6 +629,7 @@ impl SavedQueryVersionRow {
             sql_text: self.sql_text,
             sql_hash: self.sql_hash,
             category: self.category,
+            table_size: self.table_size,
             num_tables: self.num_tables,
             has_predicate: self.has_predicate.map(|v| v != 0),
             has_join: self.has_join.map(|v| v != 0),
@@ -619,6 +652,7 @@ pub struct SavedQueryVersionRowPg {
     pub sql_text: String,
     pub sql_hash: String,
     pub category: Option<String>,
+    pub table_size: Option<String>,
     pub num_tables: Option<i32>,
     pub has_predicate: Option<bool>,
     pub has_join: Option<bool>,
@@ -638,6 +672,7 @@ impl From<SavedQueryVersionRowPg> for SavedQueryVersion {
             sql_text: row.sql_text,
             sql_hash: row.sql_hash,
             category: row.category,
+            table_size: row.table_size,
             num_tables: row.num_tables,
             has_predicate: row.has_predicate,
             has_join: row.has_join,
@@ -667,6 +702,7 @@ pub struct DatasetInfo {
 
 /// Async interface for catalog operations.
 #[async_trait]
+#[allow(clippy::too_many_arguments)]
 pub trait CatalogManager: Debug + Send + Sync {
     /// Initialize the catalog manager. Called after construction to start any background tasks.
     /// Default implementation does nothing.
@@ -909,6 +945,7 @@ pub trait CatalogManager: Debug + Send + Sync {
         classification: Option<&QueryClassificationData>,
         tags: Option<&[String]>,
         description: Option<&str>,
+        overrides: &VersionOverrides,
     ) -> Result<Option<SavedQuery>>;
 
     /// Delete a saved query by ID. Returns true if it existed.

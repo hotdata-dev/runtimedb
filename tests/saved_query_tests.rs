@@ -1230,3 +1230,259 @@ async fn test_tags_are_trimmed() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_set_category_override() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let created = create_saved_query(&router, "override cat", "SELECT 1").await?;
+    let id = created["id"].as_str().unwrap();
+    let original_category = created["category"].as_str().unwrap().to_string();
+
+    // Set category_override to "join"
+    let uri = PATH_SAVED_QUERY.replace("{id}", id);
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("PUT")
+            .uri(&uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(
+                &json!({ "category_override": "join" }),
+            )?))?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await?;
+
+    // Category should now be the override value
+    assert_eq!(json["category"], "join");
+    assert_ne!("join", original_category, "override should differ from auto");
+    assert_eq!(json["latest_version"], 1); // No new version
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_clear_category_override() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let created = create_saved_query(&router, "clear cat", "SELECT 1").await?;
+    let id = created["id"].as_str().unwrap();
+    let original_category = created["category"].as_str().unwrap().to_string();
+
+    // Set override
+    let uri = PATH_SAVED_QUERY.replace("{id}", id);
+    send_request(
+        &router,
+        Request::builder()
+            .method("PUT")
+            .uri(&uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(
+                &json!({ "category_override": "join" }),
+            )?))?,
+    )
+    .await?;
+
+    // Clear override with explicit null
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("PUT")
+            .uri(&uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(
+                &json!({ "category_override": null }),
+            )?))?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await?;
+
+    // Category should revert to auto-detected
+    assert_eq!(json["category"], original_category);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_set_table_size_override() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let created = create_saved_query(&router, "table size", "SELECT 1").await?;
+    let id = created["id"].as_str().unwrap();
+
+    // Set table_size_override
+    let uri = PATH_SAVED_QUERY.replace("{id}", id);
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("PUT")
+            .uri(&uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(
+                &json!({ "table_size_override": "large" }),
+            )?))?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await?;
+
+    assert_eq!(json["table_size"], "large");
+    assert_eq!(json["latest_version"], 1); // No new version
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_invalid_category_override_rejected() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let created = create_saved_query(&router, "bad cat", "SELECT 1").await?;
+    let id = created["id"].as_str().unwrap();
+
+    let uri = PATH_SAVED_QUERY.replace("{id}", id);
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("PUT")
+            .uri(&uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(
+                &json!({ "category_override": "not_a_real_category" }),
+            )?))?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = response_json(response).await?;
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Unknown category"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_override_carried_forward_on_sql_change() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let created = create_saved_query(&router, "carry fwd", "SELECT 1").await?;
+    let id = created["id"].as_str().unwrap();
+
+    // Set overrides on version 1
+    let uri = PATH_SAVED_QUERY.replace("{id}", id);
+    send_request(
+        &router,
+        Request::builder()
+            .method("PUT")
+            .uri(&uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(
+                &json!({ "category_override": "join", "table_size_override": "small" }),
+            )?))?,
+    )
+    .await?;
+
+    // Change SQL → creates version 2; overrides should carry forward
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("PUT")
+            .uri(&uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(
+                &json!({ "sql": "SELECT 2" }),
+            )?))?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await?;
+
+    assert_eq!(json["latest_version"], 2);
+    assert_eq!(json["category"], "join"); // carried forward
+    assert_eq!(json["table_size"], "small"); // carried forward
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_override_without_new_version() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let created = create_saved_query(&router, "override only", "SELECT 1").await?;
+    let id = created["id"].as_str().unwrap();
+
+    // Set override only (no sql/name/tags/description change)
+    let uri = PATH_SAVED_QUERY.replace("{id}", id);
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("PUT")
+            .uri(&uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(
+                &json!({ "table_size_override": "medium" }),
+            )?))?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await?;
+
+    assert_eq!(json["latest_version"], 1); // No version bump
+    assert_eq!(json["table_size"], "medium");
+
+    // Verify via versions endpoint
+    let versions_uri = PATH_SAVED_QUERY_VERSIONS.replace("{id}", id);
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("GET")
+            .uri(&versions_uri)
+            .body(Body::empty())?,
+    )
+    .await?;
+
+    let json = response_json(response).await?;
+    let versions = json["versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0]["table_size"], "medium");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_description_only_update() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let created = create_saved_query(&router, "desc only", "SELECT 1").await?;
+    let id = created["id"].as_str().unwrap();
+
+    let uri = PATH_SAVED_QUERY.replace("{id}", id);
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("PUT")
+            .uri(&uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(
+                &json!({ "description": "updated description" }),
+            )?))?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await?;
+
+    assert_eq!(json["description"], "updated description");
+    assert_eq!(json["latest_version"], 1); // No version bump
+
+    Ok(())
+}

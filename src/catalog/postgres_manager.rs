@@ -3,7 +3,7 @@ use crate::catalog::manager::{
     CatalogManager, ConnectionInfo, CreateQueryRun, DatasetInfo, OptimisticLock, PendingDeletion,
     QueryClassificationData, QueryResult, QueryResultRow, QueryRun, QueryRunCursor, QueryRunRowPg,
     QueryRunUpdate, ResultStatus, ResultUpdate, SavedQuery, SavedQueryRowPg, SavedQueryVersion,
-    SavedQueryVersionRowPg, SqlSnapshot, SqlSnapshotRowPg, TableInfo, UploadInfo,
+    SavedQueryVersionRowPg, SqlSnapshot, SqlSnapshotRowPg, TableInfo, UploadInfo, VersionOverrides,
 };
 use crate::catalog::migrations::{
     run_migrations, wrap_migration_sql, CatalogMigrations, Migration, POSTGRES_MIGRATIONS,
@@ -959,8 +959,9 @@ impl CatalogManager for PostgresCatalogManager {
             "INSERT INTO saved_query_versions \
              (saved_query_id, version, snapshot_id, category, \
               num_tables, has_predicate, has_join, has_aggregation, \
-              has_group_by, has_order_by, has_limit, created_at) \
-             VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+              has_group_by, has_order_by, has_limit, \
+              category_override, table_size_override, created_at) \
+             VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
         .bind(&id)
         .bind(snapshot_id)
@@ -972,6 +973,8 @@ impl CatalogManager for PostgresCatalogManager {
         .bind(classification.map(|c| c.has_group_by))
         .bind(classification.map(|c| c.has_order_by))
         .bind(classification.map(|c| c.has_limit))
+        .bind(None::<String>) // category_override
+        .bind(None::<String>) // table_size_override
         .bind(now)
         .execute(&mut *tx)
         .await?;
@@ -1046,6 +1049,7 @@ impl CatalogManager for PostgresCatalogManager {
         classification: Option<&QueryClassificationData>,
         tags: Option<&[String]>,
         description: Option<&str>,
+        overrides: &VersionOverrides,
     ) -> Result<Option<SavedQuery>> {
         let mut tx = self.backend.pool().begin().await?;
 
@@ -1084,29 +1088,60 @@ impl CatalogManager for PostgresCatalogManager {
         let name_unchanged = effective_name == existing.name;
         let tags_unchanged = tags.is_none();
         let description_unchanged = description.is_none();
+        let overrides_unchanged = overrides.is_empty();
 
-        if sql_unchanged && name_unchanged && tags_unchanged && description_unchanged {
+        if sql_unchanged
+            && name_unchanged
+            && tags_unchanged
+            && description_unchanged
+            && overrides_unchanged
+        {
             // Complete no-op — nothing to change
             tx.commit().await?;
             return Ok(Some(SavedQuery::from(existing)));
         }
 
         let now = Utc::now();
-        let tags_json = tags.map(|t| serde_json::to_string(t)).transpose()?;
+        let tags_json = tags.map(serde_json::to_string).transpose()?;
 
         let new_version = if !sql_unchanged {
-            // SQL changed — create a new version
+            // SQL changed — create a new version.
+            // Carry forward overrides from the previous version unless explicitly changed.
             let v = existing
                 .latest_version
                 .checked_add(1)
                 .ok_or_else(|| anyhow::anyhow!("Version limit reached for saved query '{}'", id))?;
 
+            // Read previous version's overrides to carry forward
+            let prev_overrides: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+                "SELECT category_override, table_size_override \
+                 FROM saved_query_versions \
+                 WHERE saved_query_id = $1 AND version = $2",
+            )
+            .bind(id)
+            .bind(existing.latest_version)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            let (prev_cat, prev_ts) = prev_overrides.unwrap_or((None, None));
+
+            // If caller explicitly set/cleared, use that; otherwise carry forward
+            let effective_cat_override = match &overrides.category_override {
+                Some(v) => v.clone(),
+                None => prev_cat,
+            };
+            let effective_ts_override = match &overrides.table_size_override {
+                Some(v) => v.clone(),
+                None => prev_ts,
+            };
+
             sqlx::query(
                 "INSERT INTO saved_query_versions \
                  (saved_query_id, version, snapshot_id, category, \
                   num_tables, has_predicate, has_join, has_aggregation, \
-                  has_group_by, has_order_by, has_limit, created_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                  has_group_by, has_order_by, has_limit, \
+                  category_override, table_size_override, created_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
             )
             .bind(id)
             .bind(v)
@@ -1119,12 +1154,47 @@ impl CatalogManager for PostgresCatalogManager {
             .bind(classification.map(|c| c.has_group_by))
             .bind(classification.map(|c| c.has_order_by))
             .bind(classification.map(|c| c.has_limit))
+            .bind(&effective_cat_override)
+            .bind(&effective_ts_override)
             .bind(now)
             .execute(&mut *tx)
             .await?;
 
             v
         } else {
+            // SQL unchanged — update overrides on the existing version row if needed
+            if !overrides_unchanged {
+                let mut set_clauses = Vec::new();
+                let mut param_idx = 3u32; // $1 = id, $2 = version
+
+                if overrides.category_override.is_some() {
+                    set_clauses.push(format!("category_override = ${param_idx}"));
+                    param_idx += 1;
+                }
+                if overrides.table_size_override.is_some() {
+                    set_clauses.push(format!("table_size_override = ${param_idx}"));
+                }
+
+                let sql = format!(
+                    "UPDATE saved_query_versions SET {} \
+                     WHERE saved_query_id = $1 AND version = $2",
+                    set_clauses.join(", ")
+                );
+
+                let mut q = sqlx::query(&sql)
+                    .bind(id)
+                    .bind(existing.latest_version);
+
+                if let Some(ref cat) = overrides.category_override {
+                    q = q.bind(cat.as_deref());
+                }
+                if let Some(ref ts) = overrides.table_size_override {
+                    q = q.bind(ts.as_deref());
+                }
+
+                q.execute(&mut *tx).await?;
+            }
+
             existing.latest_version
         };
 
@@ -1190,6 +1260,7 @@ impl CatalogManager for PostgresCatalogManager {
             "SELECT sqv.saved_query_id, sqv.version, sqv.snapshot_id, \
              snap.sql_text, snap.sql_hash, \
              COALESCE(sqv.category_override, sqv.category) as category, \
+             sqv.table_size_override as table_size, \
              sqv.num_tables, sqv.has_predicate, sqv.has_join, sqv.has_aggregation, \
              sqv.has_group_by, sqv.has_order_by, sqv.has_limit, sqv.created_at \
              FROM saved_query_versions sqv \
@@ -1220,6 +1291,7 @@ impl CatalogManager for PostgresCatalogManager {
             "SELECT sqv.saved_query_id, sqv.version, sqv.snapshot_id, \
              snap.sql_text, snap.sql_hash, \
              COALESCE(sqv.category_override, sqv.category) as category, \
+             sqv.table_size_override as table_size, \
              sqv.num_tables, sqv.has_predicate, sqv.has_join, sqv.has_aggregation, \
              sqv.has_group_by, sqv.has_order_by, sqv.has_limit, sqv.created_at \
              FROM saved_query_versions sqv \

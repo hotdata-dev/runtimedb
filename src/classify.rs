@@ -1,3 +1,4 @@
+use anyhow::Result;
 use datafusion::common::tree_node::TreeNode;
 use datafusion::logical_expr::LogicalPlan;
 
@@ -61,7 +62,7 @@ pub struct QueryClassification {
 /// Walks the plan tree and determines the highest-priority category based on
 /// which operators are present. Priority (highest first):
 /// join > aggregation > point_lookup > filtered_scan > projection > full_scan
-pub fn classify_plan(plan: &LogicalPlan) -> QueryClassification {
+pub fn classify_plan(plan: &LogicalPlan) -> Result<QueryClassification> {
     let mut has_join = false;
     let mut has_aggregation = false;
     let mut has_predicate = false;
@@ -111,8 +112,7 @@ pub fn classify_plan(plan: &LogicalPlan) -> QueryClassification {
             _ => {}
         }
         Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
-    })
-    .ok();
+    })?;
 
     // Priority: join > aggregation > point_lookup > filtered_scan > projection > full_scan
     let category = if has_join {
@@ -129,7 +129,7 @@ pub fn classify_plan(plan: &LogicalPlan) -> QueryClassification {
         QueryCategory::FullScan
     };
 
-    QueryClassification {
+    Ok(QueryClassification {
         category,
         num_tables,
         has_predicate,
@@ -138,7 +138,7 @@ pub fn classify_plan(plan: &LogicalPlan) -> QueryClassification {
         has_group_by,
         has_order_by,
         has_limit,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -165,7 +165,7 @@ mod tests {
     #[test]
     fn test_full_scan() {
         let plan = test_table_scan().build().unwrap();
-        let c = classify_plan(&plan);
+        let c = classify_plan(&plan).unwrap();
         assert_eq!(c.category, QueryCategory::FullScan);
         assert_eq!(c.num_tables, 1);
         assert!(!c.has_predicate);
@@ -183,7 +183,7 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let c = classify_plan(&plan);
+        let c = classify_plan(&plan).unwrap();
         assert_eq!(c.category, QueryCategory::Projection);
         assert_eq!(c.num_tables, 1);
         assert!(!c.has_predicate);
@@ -196,7 +196,7 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let c = classify_plan(&plan);
+        let c = classify_plan(&plan).unwrap();
         assert_eq!(c.category, QueryCategory::FilteredScan);
         assert!(c.has_predicate);
         assert!(!c.has_limit);
@@ -211,7 +211,7 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let c = classify_plan(&plan);
+        let c = classify_plan(&plan).unwrap();
         assert_eq!(c.category, QueryCategory::PointLookup);
         assert!(c.has_predicate);
         assert!(c.has_limit);
@@ -227,7 +227,7 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let c = classify_plan(&plan);
+        let c = classify_plan(&plan).unwrap();
         assert_eq!(c.category, QueryCategory::Aggregation);
         assert!(c.has_aggregation);
         assert!(c.has_group_by);
@@ -243,7 +243,7 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let c = classify_plan(&plan);
+        let c = classify_plan(&plan).unwrap();
         assert_eq!(c.category, QueryCategory::Aggregation);
         assert!(c.has_aggregation);
         assert!(!c.has_group_by);
@@ -268,7 +268,7 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let c = classify_plan(&plan);
+        let c = classify_plan(&plan).unwrap();
         assert_eq!(c.category, QueryCategory::Join);
         assert!(c.has_join);
         assert_eq!(c.num_tables, 2);
@@ -300,7 +300,7 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        assert_eq!(classify_plan(&plan).category, QueryCategory::Join);
+        assert_eq!(classify_plan(&plan).unwrap().category, QueryCategory::Join);
     }
 
     #[test]
@@ -315,7 +315,7 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let c = classify_plan(&plan);
+        let c = classify_plan(&plan).unwrap();
         assert_eq!(c.category, QueryCategory::Aggregation);
         assert!(c.has_predicate);
         assert!(c.has_aggregation);
@@ -330,7 +330,7 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let c = classify_plan(&plan);
+        let c = classify_plan(&plan).unwrap();
         assert_eq!(c.category, QueryCategory::FilteredScan);
         assert!(c.has_limit);
         assert!(c.has_predicate);
@@ -343,7 +343,7 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let c = classify_plan(&plan);
+        let c = classify_plan(&plan).unwrap();
         assert!(c.has_order_by);
         assert!(!c.has_predicate);
     }
@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn test_num_tables_single() {
         let plan = test_table_scan().build().unwrap();
-        assert_eq!(classify_plan(&plan).num_tables, 1);
+        assert_eq!(classify_plan(&plan).unwrap().num_tables, 1);
     }
 
     #[test]
@@ -372,7 +372,7 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        assert_eq!(classify_plan(&plan).num_tables, 2);
+        assert_eq!(classify_plan(&plan).unwrap().num_tables, 2);
     }
 
     #[test]

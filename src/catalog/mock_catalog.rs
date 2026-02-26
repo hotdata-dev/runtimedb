@@ -7,6 +7,7 @@ use super::{
     CatalogManager, ConnectionInfo, CreateQueryRun, DatasetInfo, OptimisticLock, PendingDeletion,
     QueryClassificationData, QueryResult, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus,
     ResultUpdate, SavedQuery, SavedQueryVersion, SqlSnapshot, TableInfo, UploadInfo,
+    VersionOverrides,
 };
 use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
@@ -409,6 +410,7 @@ impl CatalogManager for MockCatalog {
         _classification: Option<&QueryClassificationData>,
         _tags: Option<&[String]>,
         _description: Option<&str>,
+        _overrides: &VersionOverrides,
     ) -> Result<Option<SavedQuery>> {
         Ok(None)
     }

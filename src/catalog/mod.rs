@@ -18,6 +18,7 @@ pub use manager::{
     PendingDeletion, QueryClassificationData, QueryResult, QueryResultRow, QueryRun,
     QueryRunCursor, QueryRunRow, QueryRunRowPg, QueryRunStatus, QueryRunUpdate, ResultStatus,
     ResultUpdate, SavedQuery, SavedQueryVersion, SqlSnapshot, TableInfo, UploadInfo,
+    VersionOverrides,
 };
 pub use postgres_manager::PostgresCatalogManager;
 pub use sqlite_manager::SqliteCatalogManager;
