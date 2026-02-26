@@ -1,6 +1,6 @@
 use runtimedb::catalog::{
-    CatalogManager, CreateQueryRun, PostgresCatalogManager, QueryRunCursor, QueryRunStatus,
-    QueryRunUpdate, SqliteCatalogManager,
+    CatalogManager, CreateQueryRun, PostgresCatalogManager, QueryClassificationData,
+    QueryRunCursor, QueryRunStatus, QueryRunUpdate, SqliteCatalogManager, VersionOverrides,
 };
 use runtimedb::datasets::DEFAULT_SCHEMA;
 use sqlx::{PgPool, SqlitePool};
@@ -885,7 +885,7 @@ macro_rules! catalog_manager_tests {
 
                 let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
                 let sq = catalog
-                    .create_saved_query("my query", &snap.id)
+                    .create_saved_query("my query", &snap.id, None, &[], "")
                     .await
                     .unwrap();
 
@@ -906,7 +906,7 @@ macro_rules! catalog_manager_tests {
 
                 let snap = catalog.get_or_create_snapshot("SELECT 42").await.unwrap();
                 let sq = catalog
-                    .create_saved_query("q1", &snap.id)
+                    .create_saved_query("q1", &snap.id, None, &[], "")
                     .await
                     .unwrap();
 
@@ -930,13 +930,13 @@ macro_rules! catalog_manager_tests {
 
                 let snap1 = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
                 let sq = catalog
-                    .create_saved_query("q1", &snap1.id)
+                    .create_saved_query("q1", &snap1.id, None, &[], "")
                     .await
                     .unwrap();
 
                 let snap2 = catalog.get_or_create_snapshot("SELECT 2").await.unwrap();
                 let updated = catalog
-                    .update_saved_query(&sq.id, None, &snap2.id)
+                    .update_saved_query(&sq.id, None, &snap2.id, None, None, None, &Default::default())
                     .await
                     .unwrap()
                     .expect("update should return saved query");
@@ -973,6 +973,9 @@ macro_rules! catalog_manager_tests {
                         .create_saved_query(
                             &format!("query_{}", i),
                             &snap.id,
+                            None,
+                            &[],
+                            "",
                         )
                         .await
                         .unwrap();
@@ -994,7 +997,7 @@ macro_rules! catalog_manager_tests {
 
                 let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
                 let sq = catalog
-                    .create_saved_query("to_delete", &snap.id)
+                    .create_saved_query("to_delete", &snap.id, None, &[], "")
                     .await
                     .unwrap();
 
@@ -1034,7 +1037,7 @@ macro_rules! catalog_manager_tests {
 
                 let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
                 let result = catalog
-                    .update_saved_query("svqr_nope", None, &snap.id)
+                    .update_saved_query("svqr_nope", None, &snap.id, None, None, None, &Default::default())
                     .await
                     .unwrap();
                 assert!(result.is_none());
@@ -1047,13 +1050,13 @@ macro_rules! catalog_manager_tests {
 
                 let snap1 = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
                 let sq = catalog
-                    .create_saved_query("original", &snap1.id)
+                    .create_saved_query("original", &snap1.id, None, &[], "")
                     .await
                     .unwrap();
 
                 let snap2 = catalog.get_or_create_snapshot("SELECT 2").await.unwrap();
                 let updated = catalog
-                    .update_saved_query(&sq.id, Some("renamed"), &snap2.id)
+                    .update_saved_query(&sq.id, Some("renamed"), &snap2.id, None, None, None, &Default::default())
                     .await
                     .unwrap()
                     .unwrap();
@@ -1072,17 +1075,17 @@ macro_rules! catalog_manager_tests {
 
                 let snap1 = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
                 let sq = catalog
-                    .create_saved_query("q1", &snap1.id)
+                    .create_saved_query("q1", &snap1.id, None, &[], "")
                     .await
                     .unwrap();
                 let snap2 = catalog.get_or_create_snapshot("SELECT 2").await.unwrap();
                 catalog
-                    .update_saved_query(&sq.id, None, &snap2.id)
+                    .update_saved_query(&sq.id, None, &snap2.id, None, None, None, &Default::default())
                     .await
                     .unwrap();
                 let snap3 = catalog.get_or_create_snapshot("SELECT 3").await.unwrap();
                 catalog
-                    .update_saved_query(&sq.id, None, &snap3.id)
+                    .update_saved_query(&sq.id, None, &snap3.id, None, None, None, &Default::default())
                     .await
                     .unwrap();
 
@@ -1104,7 +1107,7 @@ macro_rules! catalog_manager_tests {
 
                 let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
                 let sq = catalog
-                    .create_saved_query("q1", &snap.id)
+                    .create_saved_query("q1", &snap.id, None, &[], "")
                     .await
                     .unwrap();
 
@@ -1122,7 +1125,7 @@ macro_rules! catalog_manager_tests {
 
                 let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
                 let sq = catalog
-                    .create_saved_query("linked", &snap.id)
+                    .create_saved_query("linked", &snap.id, None, &[], "")
                     .await
                     .unwrap();
 
@@ -1172,14 +1175,14 @@ macro_rules! catalog_manager_tests {
 
                 let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
                 let sq = catalog
-                    .create_saved_query("noop_test", &snap.id)
+                    .create_saved_query("noop_test", &snap.id, None, &[], "")
                     .await
                     .unwrap();
                 assert_eq!(sq.latest_version, 1);
 
                 // Update with the exact same SQL and no name change
                 let updated = catalog
-                    .update_saved_query(&sq.id, None, &snap.id)
+                    .update_saved_query(&sq.id, None, &snap.id, None, None, None, &Default::default())
                     .await
                     .unwrap()
                     .unwrap();
@@ -1202,14 +1205,14 @@ macro_rules! catalog_manager_tests {
 
                 let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
                 let sq = catalog
-                    .create_saved_query("original_name", &snap.id)
+                    .create_saved_query("original_name", &snap.id, None, &[], "")
                     .await
                     .unwrap();
                 assert_eq!(sq.latest_version, 1);
 
                 // Rename without changing SQL
                 let updated = catalog
-                    .update_saved_query(&sq.id, Some("new_name"), &snap.id)
+                    .update_saved_query(&sq.id, Some("new_name"), &snap.id, None, None, None, &Default::default())
                     .await
                     .unwrap()
                     .unwrap();
@@ -1240,7 +1243,7 @@ macro_rules! catalog_manager_tests {
                         .await
                         .unwrap();
                     let sq = catalog
-                        .create_saved_query("dup", &snap.id)
+                        .create_saved_query("dup", &snap.id, None, &[], "")
                         .await
                         .unwrap();
                     ids.push(sq.id);
@@ -1272,7 +1275,7 @@ macro_rules! catalog_manager_tests {
                 // Create a saved query
                 let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
                 let sq = catalog
-                    .create_saved_query("ephemeral", &snap.id)
+                    .create_saved_query("ephemeral", &snap.id, None, &[], "")
                     .await
                     .unwrap();
 
@@ -1306,7 +1309,7 @@ macro_rules! catalog_manager_tests {
 
                 let snap1 = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
                 let sq = catalog
-                    .create_saved_query("paginated", &snap1.id)
+                    .create_saved_query("paginated", &snap1.id, None, &[], "")
                     .await
                     .unwrap();
 
@@ -1317,7 +1320,7 @@ macro_rules! catalog_manager_tests {
                         .await
                         .unwrap();
                     catalog
-                        .update_saved_query(&sq.id, None, &snap.id)
+                        .update_saved_query(&sq.id, None, &snap.id, None, None, None, &Default::default())
                         .await
                         .unwrap();
                 }
@@ -1344,6 +1347,199 @@ macro_rules! catalog_manager_tests {
                 assert_eq!(page2[1].version, 1);
             }
 
+            #[tokio::test]
+            async fn saved_query_classification_roundtrip() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let cls = QueryClassificationData {
+                    category: "full_scan".to_string(),
+                    num_tables: 1,
+                    has_predicate: false,
+                    has_join: false,
+                    has_aggregation: false,
+                    has_group_by: false,
+                    has_order_by: false,
+                    has_limit: false,
+                };
+                let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+                let sq = catalog
+                    .create_saved_query("classified", &snap.id, Some(&cls), &[], "")
+                    .await
+                    .unwrap();
+
+                let version = catalog
+                    .get_saved_query_version(&sq.id, 1)
+                    .await
+                    .unwrap()
+                    .unwrap();
+
+                assert_eq!(version.category.as_deref(), Some("full_scan"));
+            }
+
+            #[tokio::test]
+            async fn saved_query_null_classification() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+                let sq = catalog
+                    .create_saved_query("unclassified", &snap.id, None, &[], "")
+                    .await
+                    .unwrap();
+
+                let version = catalog
+                    .get_saved_query_version(&sq.id, 1)
+                    .await
+                    .unwrap()
+                    .unwrap();
+
+                assert!(version.category.is_none());
+                assert!(version.num_tables.is_none());
+                assert!(version.has_predicate.is_none());
+            }
+
+            #[tokio::test]
+            async fn saved_query_tags_and_description_roundtrip() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+                let tags = vec!["analytics".to_string(), "daily".to_string()];
+                let sq = catalog
+                    .create_saved_query("tagged", &snap.id, None, &tags, "A test query")
+                    .await
+                    .unwrap();
+
+                assert_eq!(sq.tags, vec!["analytics", "daily"]);
+                assert_eq!(sq.description, "A test query");
+
+                let fetched = catalog.get_saved_query(&sq.id).await.unwrap().unwrap();
+                assert_eq!(fetched.tags, vec!["analytics", "daily"]);
+                assert_eq!(fetched.description, "A test query");
+            }
+
+            #[tokio::test]
+            async fn saved_query_tags_only_update() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+                let sq = catalog
+                    .create_saved_query("tag_update", &snap.id, None, &[], "")
+                    .await
+                    .unwrap();
+
+                let new_tags = vec!["new-tag".to_string()];
+                let updated = catalog
+                    .update_saved_query(
+                        &sq.id,
+                        None,
+                        &snap.id,
+                        None,
+                        Some(&new_tags),
+                        Some("new desc"),
+                        &Default::default(),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+
+                assert_eq!(updated.tags, vec!["new-tag"]);
+                assert_eq!(updated.description, "new desc");
+                // No new version should be created
+                assert_eq!(updated.latest_version, 1);
+            }
+
+            #[tokio::test]
+            async fn saved_query_update_classification_on_new_version() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let cls1 = QueryClassificationData {
+                    category: "full_scan".to_string(),
+                    num_tables: 1,
+                    has_predicate: false,
+                    has_join: false,
+                    has_aggregation: false,
+                    has_group_by: false,
+                    has_order_by: false,
+                    has_limit: false,
+                };
+                let snap1 = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+                let sq = catalog
+                    .create_saved_query("versioned_cat", &snap1.id, Some(&cls1), &[], "")
+                    .await
+                    .unwrap();
+
+                let cls2 = QueryClassificationData {
+                    category: "aggregation".to_string(),
+                    num_tables: 1,
+                    has_predicate: false,
+                    has_join: false,
+                    has_aggregation: true,
+                    has_group_by: true,
+                    has_order_by: false,
+                    has_limit: false,
+                };
+                let snap2 = catalog.get_or_create_snapshot("SELECT 2").await.unwrap();
+                catalog
+                    .update_saved_query(
+                        &sq.id,
+                        None,
+                        &snap2.id,
+                        Some(&cls2),
+                        None,
+                        None,
+                        &Default::default(),
+                    )
+                    .await
+                    .unwrap();
+
+                let v1 = catalog.get_saved_query_version(&sq.id, 1).await.unwrap().unwrap();
+                assert_eq!(v1.category.as_deref(), Some("full_scan"));
+
+                let v2 = catalog.get_saved_query_version(&sq.id, 2).await.unwrap().unwrap();
+                assert_eq!(v2.category.as_deref(), Some("aggregation"));
+            }
+
+            #[tokio::test]
+            async fn saved_query_classification_fields_roundtrip() {
+                let ctx = super::$setup_fn().await;
+                let catalog = ctx.manager();
+
+                let cls = QueryClassificationData {
+                    category: "aggregation".to_string(),
+                    num_tables: 2,
+                    has_predicate: true,
+                    has_join: true,
+                    has_aggregation: true,
+                    has_group_by: true,
+                    has_order_by: true,
+                    has_limit: false,
+                };
+                let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
+                let sq = catalog
+                    .create_saved_query("all_flags", &snap.id, Some(&cls), &[], "")
+                    .await
+                    .unwrap();
+
+                let version = catalog
+                    .get_saved_query_version(&sq.id, 1)
+                    .await
+                    .unwrap()
+                    .unwrap();
+
+                assert_eq!(version.category.as_deref(), Some("aggregation"));
+                assert_eq!(version.num_tables, Some(2));
+                assert_eq!(version.has_predicate, Some(true));
+                assert_eq!(version.has_join, Some(true));
+                assert_eq!(version.has_aggregation, Some(true));
+                assert_eq!(version.has_group_by, Some(true));
+                assert_eq!(version.has_order_by, Some(true));
+                assert_eq!(version.has_limit, Some(false));
+            }
+
         }
     };
 }
@@ -1361,7 +1557,7 @@ async fn sqlite_concurrent_saved_query_updates() {
 
     let snap = catalog.get_or_create_snapshot("SELECT 1").await.unwrap();
     let sq = catalog
-        .create_saved_query("concurrent-test", &snap.id)
+        .create_saved_query("concurrent-test", &snap.id, None, &[], "")
         .await
         .unwrap();
     assert_eq!(sq.latest_version, 1);
@@ -1370,9 +1566,10 @@ async fn sqlite_concurrent_saved_query_updates() {
     let snap3 = catalog.get_or_create_snapshot("SELECT 3").await.unwrap();
 
     // Launch two updates concurrently against the same saved query.
+    let no_overrides = VersionOverrides::default();
     let (r1, r2) = tokio::join!(
-        catalog.update_saved_query(&sq.id, None, &snap2.id),
-        catalog.update_saved_query(&sq.id, None, &snap3.id),
+        catalog.update_saved_query(&sq.id, None, &snap2.id, None, None, None, &no_overrides),
+        catalog.update_saved_query(&sq.id, None, &snap3.id, None, None, None, &no_overrides),
     );
 
     // Both must succeed — no PK violation.
@@ -1404,7 +1601,7 @@ async fn sqlite_version_overflow_returns_error() {
 
     let snap1 = manager.get_or_create_snapshot("SELECT 1").await.unwrap();
     let sq = manager
-        .create_saved_query("overflow-test", &snap1.id)
+        .create_saved_query("overflow-test", &snap1.id, None, &[], "")
         .await
         .unwrap();
     assert_eq!(sq.latest_version, 1);
@@ -1421,7 +1618,17 @@ async fn sqlite_version_overflow_returns_error() {
 
     // Attempt to create a new version — should fail, not overflow
     let snap2 = manager.get_or_create_snapshot("SELECT 2").await.unwrap();
-    let result = manager.update_saved_query(&sq.id, None, &snap2.id).await;
+    let result = manager
+        .update_saved_query(
+            &sq.id,
+            None,
+            &snap2.id,
+            None,
+            None,
+            None,
+            &Default::default(),
+        )
+        .await;
     assert!(result.is_err(), "Should fail on version overflow");
     let err = result.unwrap_err().to_string();
     assert!(

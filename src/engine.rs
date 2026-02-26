@@ -1129,9 +1129,24 @@ impl RuntimeEngine {
 
     // Saved query methods
 
-    pub async fn create_saved_query(&self, name: &str, sql: &str) -> Result<SavedQuery> {
+    pub async fn create_saved_query(
+        &self,
+        name: &str,
+        sql: &str,
+        tags: &[String],
+        description: &str,
+    ) -> Result<SavedQuery> {
         let snapshot = self.catalog.get_or_create_snapshot(sql).await?;
-        self.catalog.create_saved_query(name, &snapshot.id).await
+        let classification = self.classify_sql(sql).await;
+        self.catalog
+            .create_saved_query(
+                name,
+                &snapshot.id,
+                classification.as_ref(),
+                tags,
+                description,
+            )
+            .await
     }
 
     pub async fn get_saved_query(&self, id: &str) -> Result<Option<SavedQuery>> {
@@ -1151,9 +1166,16 @@ impl RuntimeEngine {
         id: &str,
         name: Option<&str>,
         sql: Option<&str>,
+        tags: Option<&[String]>,
+        description: Option<&str>,
+        overrides: &crate::catalog::VersionOverrides,
     ) -> Result<Option<SavedQuery>> {
-        let snapshot_id = match sql {
-            Some(sql) => self.catalog.get_or_create_snapshot(sql).await?.id,
+        let (snapshot_id, classification) = match sql {
+            Some(sql) => {
+                let snap = self.catalog.get_or_create_snapshot(sql).await?;
+                let cls = self.classify_sql(sql).await;
+                (snap.id, cls)
+            }
             None => {
                 // No SQL provided — resolve the current version's snapshot_id
                 let sq = self.catalog.get_saved_query(id).await?;
@@ -1172,12 +1194,55 @@ impl RuntimeEngine {
                             id
                         )
                     })?;
-                version.snapshot_id
+                (version.snapshot_id, None)
             }
         };
         self.catalog
-            .update_saved_query(id, name, &snapshot_id)
+            .update_saved_query(
+                id,
+                name,
+                &snapshot_id,
+                classification.as_ref(),
+                tags,
+                description,
+                overrides,
+            )
             .await
+    }
+
+    /// Best-effort SQL classification. Returns None if plan building fails.
+    async fn classify_sql(&self, sql: &str) -> Option<crate::catalog::QueryClassificationData> {
+        let result: Result<crate::catalog::QueryClassificationData, anyhow::Error> = async {
+            let session_state = self.df_ctx.state();
+            let dialect = session_state.config().options().sql_parser.dialect;
+            let statement = session_state.sql_to_statement(sql, &dialect)?;
+            let references = session_state.resolve_table_references(&statement)?;
+            let resolved_catalog_list = self
+                .unified_catalog_list
+                .resolve(&references, session_state.config())
+                .await?;
+            // Use a fresh SessionContext that shares the runtime env (object
+            // stores, cache, etc.) but has its own session state. This avoids
+            // racing with concurrent queries on the shared catalog list.
+            let classify_ctx = SessionContext::new_with_config_rt(
+                session_state.config().clone(),
+                self.df_ctx.runtime_env(),
+            );
+            classify_ctx.register_catalog_list(resolved_catalog_list);
+            let session_state = classify_ctx.state();
+            let plan = session_state.statement_to_plan(statement).await?;
+            let c = crate::classify::classify_plan(&plan)?;
+            Ok(crate::catalog::QueryClassificationData::from(c))
+        }
+        .await;
+
+        match result {
+            Ok(classification) => Some(classification),
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to classify SQL, storing NULL classification");
+                None
+            }
+        }
     }
 
     pub async fn delete_saved_query(&self, id: &str) -> Result<bool> {

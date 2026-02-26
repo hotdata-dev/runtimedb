@@ -1,6 +1,19 @@
 use crate::secrets::SecretMetadata;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Deserialize a field that distinguishes between absent, explicit null, and a value.
+/// - absent in JSON → `None` (field not provided)
+/// - `null` in JSON → `Some(None)` (explicitly clear)
+/// - `"value"` in JSON → `Some(Some("value"))` (set to value)
+pub fn deserialize_optional_nullable<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
+}
 
 /// Request body for POST /query
 #[derive(Debug, Deserialize)]
@@ -565,6 +578,10 @@ pub struct UpdateDatasetResponse {
 pub struct CreateSavedQueryRequest {
     pub name: String,
     pub sql: String,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// Request body for PUT /v1/queries/{id}
@@ -576,6 +593,16 @@ pub struct UpdateSavedQueryRequest {
     /// Optional new SQL. When omitted the existing SQL is preserved.
     #[serde(default)]
     pub sql: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Override the auto-detected category. Send `null` to clear (revert to auto).
+    #[serde(default, deserialize_with = "deserialize_optional_nullable")]
+    pub category_override: Option<Option<String>>,
+    /// User annotation for table size. Send `null` to clear.
+    #[serde(default, deserialize_with = "deserialize_optional_nullable")]
+    pub table_size_override: Option<Option<String>>,
 }
 
 /// Request body for POST /v1/queries/{id}/execute
@@ -597,6 +624,8 @@ pub struct SavedQuerySummary {
     pub id: String,
     pub name: String,
     pub latest_version: i32,
+    pub tags: Vec<String>,
+    pub description: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -609,6 +638,26 @@ pub struct SavedQueryDetail {
     pub latest_version: i32,
     pub sql: String,
     pub sql_hash: String,
+    pub tags: Vec<String>,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_size: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_tables: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_predicate: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_join: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_aggregation: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_group_by: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_order_by: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_limit: Option<bool>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -629,6 +678,24 @@ pub struct SavedQueryVersionInfo {
     pub version: i32,
     pub sql: String,
     pub sql_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_size: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_tables: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_predicate: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_join: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_aggregation: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_group_by: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_order_by: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_limit: Option<bool>,
     pub created_at: DateTime<Utc>,
 }
 

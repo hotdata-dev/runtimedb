@@ -5,8 +5,9 @@
 
 use super::{
     CatalogManager, ConnectionInfo, CreateQueryRun, DatasetInfo, OptimisticLock, PendingDeletion,
-    QueryResult, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus, ResultUpdate, SavedQuery,
-    SavedQueryVersion, SqlSnapshot, TableInfo, UploadInfo,
+    QueryClassificationData, QueryResult, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus,
+    ResultUpdate, SavedQuery, SavedQueryVersion, SqlSnapshot, TableInfo, UploadInfo,
+    VersionOverrides,
 };
 use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
@@ -378,7 +379,14 @@ impl CatalogManager for MockCatalog {
         Ok(snapshot)
     }
 
-    async fn create_saved_query(&self, _name: &str, _snapshot_id: &str) -> Result<SavedQuery> {
+    async fn create_saved_query(
+        &self,
+        _name: &str,
+        _snapshot_id: &str,
+        _classification: Option<&QueryClassificationData>,
+        _tags: &[String],
+        _description: &str,
+    ) -> Result<SavedQuery> {
         Err(anyhow::anyhow!("Not implemented in mock"))
     }
 
@@ -399,6 +407,10 @@ impl CatalogManager for MockCatalog {
         _id: &str,
         _name: Option<&str>,
         _snapshot_id: &str,
+        _classification: Option<&QueryClassificationData>,
+        _tags: Option<&[String]>,
+        _description: Option<&str>,
+        _overrides: &VersionOverrides,
     ) -> Result<Option<SavedQuery>> {
         Ok(None)
     }
