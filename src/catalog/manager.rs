@@ -371,6 +371,8 @@ pub struct SavedQuery {
     pub id: String,
     pub name: String,
     pub latest_version: i32,
+    pub tags: Vec<String>,
+    pub description: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -381,6 +383,8 @@ pub struct SavedQueryRow {
     pub id: String,
     pub name: String,
     pub latest_version: i32,
+    pub tags: String,
+    pub description: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -405,10 +409,21 @@ impl SavedQueryRow {
             );
             Utc::now()
         });
+        let tags: Vec<String> = serde_json::from_str(&self.tags).unwrap_or_else(|e| {
+            tracing::warn!(
+                id = %self.id,
+                raw_tags = %self.tags,
+                error = %e,
+                "Failed to parse saved query tags, falling back to empty"
+            );
+            Vec::new()
+        });
         SavedQuery {
             id: self.id,
             name: self.name,
             latest_version: self.latest_version,
+            tags,
+            description: self.description,
             created_at,
             updated_at,
         }
@@ -421,16 +436,29 @@ pub struct SavedQueryRowPg {
     pub id: String,
     pub name: String,
     pub latest_version: i32,
+    pub tags: String,
+    pub description: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 impl From<SavedQueryRowPg> for SavedQuery {
     fn from(row: SavedQueryRowPg) -> Self {
+        let tags: Vec<String> = serde_json::from_str(&row.tags).unwrap_or_else(|e| {
+            tracing::warn!(
+                id = %row.id,
+                raw_tags = %row.tags,
+                error = %e,
+                "Failed to parse saved query tags, falling back to empty"
+            );
+            Vec::new()
+        });
         Self {
             id: row.id,
             name: row.name,
             latest_version: row.latest_version,
+            tags,
+            description: row.description,
             created_at: row.created_at,
             updated_at: row.updated_at,
         }
@@ -495,6 +523,20 @@ impl From<SqlSnapshotRowPg> for SqlSnapshot {
     }
 }
 
+/// Classification data for a saved query version.
+/// Passed from the engine to catalog managers when creating/updating versions.
+#[derive(Debug, Clone)]
+pub struct QueryClassificationData {
+    pub category: String,
+    pub num_tables: i32,
+    pub has_predicate: bool,
+    pub has_join: bool,
+    pub has_aggregation: bool,
+    pub has_group_by: bool,
+    pub has_order_by: bool,
+    pub has_limit: bool,
+}
+
 /// An immutable SQL version under a saved query.
 /// The sql_text and sql_hash fields are resolved via JOIN to sql_snapshots at query time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -504,11 +546,20 @@ pub struct SavedQueryVersion {
     pub snapshot_id: String,
     pub sql_text: String,
     pub sql_hash: String,
+    pub category: Option<String>,
+    pub num_tables: Option<i32>,
+    pub has_predicate: Option<bool>,
+    pub has_join: Option<bool>,
+    pub has_aggregation: Option<bool>,
+    pub has_group_by: Option<bool>,
+    pub has_order_by: Option<bool>,
+    pub has_limit: Option<bool>,
     pub created_at: DateTime<Utc>,
 }
 
 /// Raw database row for saved query versions in SQLite (timestamps as strings).
 /// Fields sql_text and sql_hash come from JOIN to sql_snapshots.
+/// Boolean columns are stored as INTEGER in SQLite (0/1/NULL).
 #[derive(Debug, Clone, FromRow)]
 pub struct SavedQueryVersionRow {
     pub saved_query_id: String,
@@ -516,6 +567,14 @@ pub struct SavedQueryVersionRow {
     pub snapshot_id: String,
     pub sql_text: String,
     pub sql_hash: String,
+    pub category: Option<String>,
+    pub num_tables: Option<i32>,
+    pub has_predicate: Option<i32>,
+    pub has_join: Option<i32>,
+    pub has_aggregation: Option<i32>,
+    pub has_group_by: Option<i32>,
+    pub has_order_by: Option<i32>,
+    pub has_limit: Option<i32>,
     pub created_at: String,
 }
 
@@ -537,6 +596,14 @@ impl SavedQueryVersionRow {
             snapshot_id: self.snapshot_id,
             sql_text: self.sql_text,
             sql_hash: self.sql_hash,
+            category: self.category,
+            num_tables: self.num_tables,
+            has_predicate: self.has_predicate.map(|v| v != 0),
+            has_join: self.has_join.map(|v| v != 0),
+            has_aggregation: self.has_aggregation.map(|v| v != 0),
+            has_group_by: self.has_group_by.map(|v| v != 0),
+            has_order_by: self.has_order_by.map(|v| v != 0),
+            has_limit: self.has_limit.map(|v| v != 0),
             created_at,
         }
     }
@@ -551,6 +618,14 @@ pub struct SavedQueryVersionRowPg {
     pub snapshot_id: String,
     pub sql_text: String,
     pub sql_hash: String,
+    pub category: Option<String>,
+    pub num_tables: Option<i32>,
+    pub has_predicate: Option<bool>,
+    pub has_join: Option<bool>,
+    pub has_aggregation: Option<bool>,
+    pub has_group_by: Option<bool>,
+    pub has_order_by: Option<bool>,
+    pub has_limit: Option<bool>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -562,6 +637,14 @@ impl From<SavedQueryVersionRowPg> for SavedQueryVersion {
             snapshot_id: row.snapshot_id,
             sql_text: row.sql_text,
             sql_hash: row.sql_hash,
+            category: row.category,
+            num_tables: row.num_tables,
+            has_predicate: row.has_predicate,
+            has_join: row.has_join,
+            has_aggregation: row.has_aggregation,
+            has_group_by: row.has_group_by,
+            has_order_by: row.has_order_by,
+            has_limit: row.has_limit,
             created_at: row.created_at,
         }
     }
@@ -795,7 +878,14 @@ pub trait CatalogManager: Debug + Send + Sync {
 
     /// Create a new saved query with its first version.
     /// The snapshot_id should come from get_or_create_snapshot.
-    async fn create_saved_query(&self, name: &str, snapshot_id: &str) -> Result<SavedQuery>;
+    async fn create_saved_query(
+        &self,
+        name: &str,
+        snapshot_id: &str,
+        classification: Option<&QueryClassificationData>,
+        tags: &[String],
+        description: &str,
+    ) -> Result<SavedQuery>;
 
     /// Get a saved query by ID.
     async fn get_saved_query(&self, id: &str) -> Result<Option<SavedQuery>>;
@@ -816,6 +906,9 @@ pub trait CatalogManager: Debug + Send + Sync {
         id: &str,
         name: Option<&str>,
         snapshot_id: &str,
+        classification: Option<&QueryClassificationData>,
+        tags: Option<&[String]>,
+        description: Option<&str>,
     ) -> Result<Option<SavedQuery>>;
 
     /// Delete a saved query by ID. Returns true if it existed.

@@ -874,3 +874,359 @@ async fn test_list_saved_query_versions_pagination() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_with_tags_and_description() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri(PATH_SAVED_QUERIES)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&json!({
+                "name": "tagged query",
+                "sql": "SELECT 1",
+                "tags": ["analytics", "daily"],
+                "description": "A daily analytics query"
+            }))?))?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let json = response_json(response).await?;
+
+    assert_eq!(json["tags"], json!(["analytics", "daily"]));
+    assert_eq!(json["description"], "A daily analytics query");
+
+    // Verify via GET
+    let id = json["id"].as_str().unwrap();
+    let uri = PATH_SAVED_QUERY.replace("{id}", id);
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("GET")
+            .uri(&uri)
+            .body(Body::empty())?,
+    )
+    .await?;
+    let json = response_json(response).await?;
+    assert_eq!(json["tags"], json!(["analytics", "daily"]));
+    assert_eq!(json["description"], "A daily analytics query");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_default_tags_and_description_when_omitted() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let json = create_saved_query(&router, "no meta", "SELECT 1").await?;
+
+    assert_eq!(json["tags"], json!([]));
+    assert_eq!(json["description"], "");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_tags_without_new_version() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let created = create_saved_query(&router, "tag update", "SELECT 1").await?;
+    let id = created["id"].as_str().unwrap();
+
+    // Update tags only (no name or sql change)
+    let uri = PATH_SAVED_QUERY.replace("{id}", id);
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("PUT")
+            .uri(&uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(
+                &json!({ "tags": ["new-tag"] }),
+            )?))?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await?;
+
+    assert_eq!(json["tags"], json!(["new-tag"]));
+    assert_eq!(json["latest_version"], 1); // No new version
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_classification_present_for_simple_query() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let json = create_saved_query(&router, "classified", "SELECT 1").await?;
+
+    // SELECT 1 should classify as full_scan (no table scan, projection, etc.)
+    // The exact category depends on the plan, but it should be present
+    assert!(
+        json.get("category").is_some(),
+        "category field should be present"
+    );
+    // Boolean classification fields should also be present
+    assert!(
+        json.get("num_tables").is_some(),
+        "num_tables field should be present"
+    );
+    // has_predicate, has_join etc. are booleans — false values should be present
+    assert!(
+        json.get("has_predicate").is_some(),
+        "has_predicate field should be present"
+    );
+    assert!(
+        json.get("has_join").is_some(),
+        "has_join field should be present"
+    );
+    assert!(
+        json.get("has_aggregation").is_some(),
+        "has_aggregation field should be present"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_version_listing_includes_category() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let created = create_saved_query(&router, "cat versions", "SELECT 1").await?;
+    let id = created["id"].as_str().unwrap();
+
+    let versions_uri = PATH_SAVED_QUERY_VERSIONS.replace("{id}", id);
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("GET")
+            .uri(&versions_uri)
+            .body(Body::empty())?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await?;
+
+    let versions = json["versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 1);
+    // category should be present on version info
+    assert!(
+        versions[0].get("category").is_some(),
+        "version should include category"
+    );
+    // boolean fields should be present on version info
+    assert!(
+        versions[0].get("num_tables").is_some(),
+        "version should include num_tables"
+    );
+    assert!(
+        versions[0].get("has_predicate").is_some(),
+        "version should include has_predicate"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tags_in_list_response() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    send_request(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri(PATH_SAVED_QUERIES)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&json!({
+                "name": "listed",
+                "sql": "SELECT 1",
+                "tags": ["report"],
+                "description": "desc"
+            }))?))?,
+    )
+    .await?;
+
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("GET")
+            .uri(PATH_SAVED_QUERIES)
+            .body(Body::empty())?,
+    )
+    .await?;
+
+    let json = response_json(response).await?;
+    let queries = json["queries"].as_array().unwrap();
+    assert!(!queries.is_empty());
+    assert_eq!(queries[0]["tags"], json!(["report"]));
+    assert_eq!(queries[0]["description"], "desc");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_too_many_tags_rejected() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let tags: Vec<String> = (0..51).map(|i| format!("tag-{i}")).collect();
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri(PATH_SAVED_QUERIES)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&json!({
+                "name": "too many tags",
+                "sql": "SELECT 1",
+                "tags": tags,
+            }))?))?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = response_json(response).await?;
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Too many tags"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_tag_too_long_rejected() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let long_tag = "x".repeat(101);
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri(PATH_SAVED_QUERIES)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&json!({
+                "name": "long tag",
+                "sql": "SELECT 1",
+                "tags": [long_tag],
+            }))?))?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = response_json(response).await?;
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Tag exceeds maximum length"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_description_too_long_rejected() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let long_desc = "x".repeat(10_001);
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri(PATH_SAVED_QUERIES)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&json!({
+                "name": "long desc",
+                "sql": "SELECT 1",
+                "description": long_desc,
+            }))?))?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = response_json(response).await?;
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Description exceeds maximum length"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_whitespace_only_tag_rejected() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri(PATH_SAVED_QUERIES)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&json!({
+                "name": "whitespace tag",
+                "sql": "SELECT 1",
+                "tags": ["  "],
+            }))?))?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_empty_tags_array_accepted() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri(PATH_SAVED_QUERIES)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&json!({
+                "name": "empty tags",
+                "sql": "SELECT 1",
+                "tags": [],
+            }))?))?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let json = response_json(response).await?;
+    assert_eq!(json["tags"], json!([]));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tags_are_trimmed() -> Result<()> {
+    let (router, _dir) = setup_test().await?;
+
+    let response = send_request(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri(PATH_SAVED_QUERIES)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&json!({
+                "name": "trimmed tags",
+                "sql": "SELECT 1",
+                "tags": ["  analytics  ", "daily "],
+            }))?))?,
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let json = response_json(response).await?;
+    assert_eq!(json["tags"], json!(["analytics", "daily"]));
+
+    Ok(())
+}

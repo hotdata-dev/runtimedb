@@ -1,9 +1,9 @@
 use crate::catalog::backend::CatalogBackend;
 use crate::catalog::manager::{
     CatalogManager, ConnectionInfo, CreateQueryRun, DatasetInfo, OptimisticLock, PendingDeletion,
-    QueryResult, QueryResultRow, QueryRun, QueryRunCursor, QueryRunRow, QueryRunUpdate,
-    ResultStatus, ResultUpdate, SavedQuery, SavedQueryRow, SavedQueryVersion, SavedQueryVersionRow,
-    SqlSnapshot, SqlSnapshotRow, TableInfo, UploadInfo,
+    QueryClassificationData, QueryResult, QueryResultRow, QueryRun, QueryRunCursor, QueryRunRow,
+    QueryRunUpdate, ResultStatus, ResultUpdate, SavedQuery, SavedQueryRow, SavedQueryVersion,
+    SavedQueryVersionRow, SqlSnapshot, SqlSnapshotRow, TableInfo, UploadInfo,
 };
 use crate::catalog::migrations::{
     run_migrations, wrap_migration_sql, CatalogMigrations, Migration, SQLITE_MIGRATIONS,
@@ -1011,9 +1011,17 @@ impl CatalogManager for SqliteCatalogManager {
     // Saved query methods
 
     #[tracing::instrument(name = "catalog_create_saved_query", skip(self), fields(db = "sqlite"))]
-    async fn create_saved_query(&self, name: &str, snapshot_id: &str) -> Result<SavedQuery> {
+    async fn create_saved_query(
+        &self,
+        name: &str,
+        snapshot_id: &str,
+        classification: Option<&QueryClassificationData>,
+        tags: &[String],
+        description: &str,
+    ) -> Result<SavedQuery> {
         let id = crate::id::generate_saved_query_id();
         let now = Utc::now().to_rfc3339();
+        let tags_json = serde_json::to_string(tags)?;
 
         // Use BEGIN IMMEDIATE to acquire a RESERVED lock up front, preventing
         // concurrent writers from interleaving reads before locks are held.
@@ -1022,28 +1030,41 @@ impl CatalogManager for SqliteCatalogManager {
 
         let result: Result<SavedQuery> = async {
             sqlx::query(
-                "INSERT INTO saved_queries (id, name, latest_version, created_at, updated_at) \
-                 VALUES (?, ?, 1, ?, ?)",
+                "INSERT INTO saved_queries (id, name, latest_version, tags, description, created_at, updated_at) \
+                 VALUES (?, ?, 1, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(name)
+            .bind(&tags_json)
+            .bind(description)
             .bind(&now)
             .bind(&now)
             .execute(&mut *conn)
             .await?;
 
             sqlx::query(
-                "INSERT INTO saved_query_versions (saved_query_id, version, snapshot_id, created_at) \
-                 VALUES (?, 1, ?, ?)",
+                "INSERT INTO saved_query_versions \
+                 (saved_query_id, version, snapshot_id, category, \
+                  num_tables, has_predicate, has_join, has_aggregation, \
+                  has_group_by, has_order_by, has_limit, created_at) \
+                 VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(snapshot_id)
+            .bind(classification.map(|c| c.category.as_str()))
+            .bind(classification.map(|c| c.num_tables))
+            .bind(classification.map(|c| c.has_predicate as i32))
+            .bind(classification.map(|c| c.has_join as i32))
+            .bind(classification.map(|c| c.has_aggregation as i32))
+            .bind(classification.map(|c| c.has_group_by as i32))
+            .bind(classification.map(|c| c.has_order_by as i32))
+            .bind(classification.map(|c| c.has_limit as i32))
             .bind(&now)
             .execute(&mut *conn)
             .await?;
 
             let row: SavedQueryRow = sqlx::query_as(
-                "SELECT id, name, latest_version, created_at, updated_at \
+                "SELECT id, name, latest_version, tags, description, created_at, updated_at \
                  FROM saved_queries WHERE id = ?",
             )
             .bind(&id)
@@ -1073,7 +1094,7 @@ impl CatalogManager for SqliteCatalogManager {
     )]
     async fn get_saved_query(&self, id: &str) -> Result<Option<SavedQuery>> {
         let row: Option<SavedQueryRow> = sqlx::query_as(
-            "SELECT id, name, latest_version, created_at, updated_at \
+            "SELECT id, name, latest_version, tags, description, created_at, updated_at \
              FROM saved_queries WHERE id = ?",
         )
         .bind(id)
@@ -1091,7 +1112,7 @@ impl CatalogManager for SqliteCatalogManager {
     ) -> Result<(Vec<SavedQuery>, bool)> {
         let fetch_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
         let rows: Vec<SavedQueryRow> = sqlx::query_as(
-            "SELECT id, name, latest_version, created_at, updated_at \
+            "SELECT id, name, latest_version, tags, description, created_at, updated_at \
              FROM saved_queries \
              ORDER BY name ASC, id ASC \
              LIMIT ? OFFSET ?",
@@ -1120,6 +1141,9 @@ impl CatalogManager for SqliteCatalogManager {
         id: &str,
         name: Option<&str>,
         snapshot_id: &str,
+        classification: Option<&QueryClassificationData>,
+        tags: Option<&[String]>,
+        description: Option<&str>,
     ) -> Result<Option<SavedQuery>> {
         // Use BEGIN IMMEDIATE to acquire a RESERVED lock up front, so the
         // read of latest_version and subsequent insert of the next version are
@@ -1131,7 +1155,7 @@ impl CatalogManager for SqliteCatalogManager {
 
         let result: Result<Option<SavedQuery>> = async {
             let existing: Option<SavedQueryRow> = sqlx::query_as(
-                "SELECT id, name, latest_version, created_at, updated_at \
+                "SELECT id, name, latest_version, tags, description, created_at, updated_at \
                  FROM saved_queries WHERE id = ?",
             )
             .bind(id)
@@ -1160,54 +1184,71 @@ impl CatalogManager for SqliteCatalogManager {
                 .as_ref()
                 .is_some_and(|(sid,)| sid == snapshot_id);
             let name_unchanged = effective_name == existing.name;
+            let tags_unchanged = tags.is_none();
+            let description_unchanged = description.is_none();
 
-            if sql_unchanged && name_unchanged {
+            if sql_unchanged && name_unchanged && tags_unchanged && description_unchanged {
                 // Complete no-op — nothing to change
                 return Ok(Some(existing.into_saved_query()));
             }
 
             let now = Utc::now().to_rfc3339();
+            let tags_json = tags.map(|t| serde_json::to_string(t)).transpose()?;
 
-            if sql_unchanged {
-                // Name-only rename — no new version needed
-                sqlx::query(
-                    "UPDATE saved_queries SET name = ?, updated_at = ? WHERE id = ?",
-                )
-                .bind(effective_name)
-                .bind(&now)
-                .bind(id)
-                .execute(&mut *conn)
-                .await?;
-            } else {
+            let new_version = if !sql_unchanged {
                 // SQL changed — create a new version
-                let new_version = existing.latest_version.checked_add(1).ok_or_else(|| {
+                let v = existing.latest_version.checked_add(1).ok_or_else(|| {
                     anyhow::anyhow!("Version limit reached for saved query '{}'", id)
                 })?;
 
                 sqlx::query(
-                    "INSERT INTO saved_query_versions (saved_query_id, version, snapshot_id, created_at) \
-                     VALUES (?, ?, ?, ?)",
+                    "INSERT INTO saved_query_versions \
+                     (saved_query_id, version, snapshot_id, category, \
+                      num_tables, has_predicate, has_join, has_aggregation, \
+                      has_group_by, has_order_by, has_limit, created_at) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(id)
-                .bind(new_version)
+                .bind(v)
                 .bind(snapshot_id)
+                .bind(classification.map(|c| c.category.as_str()))
+                .bind(classification.map(|c| c.num_tables))
+                .bind(classification.map(|c| c.has_predicate as i32))
+                .bind(classification.map(|c| c.has_join as i32))
+                .bind(classification.map(|c| c.has_aggregation as i32))
+                .bind(classification.map(|c| c.has_group_by as i32))
+                .bind(classification.map(|c| c.has_order_by as i32))
+                .bind(classification.map(|c| c.has_limit as i32))
                 .bind(&now)
                 .execute(&mut *conn)
                 .await?;
 
-                sqlx::query(
-                    "UPDATE saved_queries SET name = ?, latest_version = ?, updated_at = ? WHERE id = ?",
-                )
-                .bind(effective_name)
-                .bind(new_version)
-                .bind(&now)
-                .bind(id)
-                .execute(&mut *conn)
-                .await?;
-            }
+                v
+            } else {
+                existing.latest_version
+            };
+
+            // Single UPDATE for all saved_queries fields. COALESCE keeps the
+            // existing value when the caller did not provide a replacement.
+            sqlx::query(
+                "UPDATE saved_queries \
+                 SET name = ?, latest_version = ?, \
+                     tags = COALESCE(?, tags), \
+                     description = COALESCE(?, description), \
+                     updated_at = ? \
+                 WHERE id = ?",
+            )
+            .bind(effective_name)
+            .bind(new_version)
+            .bind(&tags_json)
+            .bind(description)
+            .bind(&now)
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
 
             let row: SavedQueryRow = sqlx::query_as(
-                "SELECT id, name, latest_version, created_at, updated_at \
+                "SELECT id, name, latest_version, tags, description, created_at, updated_at \
                  FROM saved_queries WHERE id = ?",
             )
             .bind(id)
@@ -1282,7 +1323,10 @@ impl CatalogManager for SqliteCatalogManager {
     ) -> Result<Option<SavedQueryVersion>> {
         let row: Option<SavedQueryVersionRow> = sqlx::query_as(
             "SELECT sqv.saved_query_id, sqv.version, sqv.snapshot_id, \
-             snap.sql_text, snap.sql_hash, sqv.created_at \
+             snap.sql_text, snap.sql_hash, \
+             COALESCE(sqv.category_override, sqv.category) as category, \
+             sqv.num_tables, sqv.has_predicate, sqv.has_join, sqv.has_aggregation, \
+             sqv.has_group_by, sqv.has_order_by, sqv.has_limit, sqv.created_at \
              FROM saved_query_versions sqv \
              JOIN sql_snapshots snap ON snap.id = sqv.snapshot_id \
              WHERE sqv.saved_query_id = ? AND sqv.version = ?",
@@ -1309,7 +1353,10 @@ impl CatalogManager for SqliteCatalogManager {
         let fetch_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
         let rows: Vec<SavedQueryVersionRow> = sqlx::query_as(
             "SELECT sqv.saved_query_id, sqv.version, sqv.snapshot_id, \
-             snap.sql_text, snap.sql_hash, sqv.created_at \
+             snap.sql_text, snap.sql_hash, \
+             COALESCE(sqv.category_override, sqv.category) as category, \
+             sqv.num_tables, sqv.has_predicate, sqv.has_join, sqv.has_aggregation, \
+             sqv.has_group_by, sqv.has_order_by, sqv.has_limit, sqv.created_at \
              FROM saved_query_versions sqv \
              JOIN sql_snapshots snap ON snap.id = sqv.snapshot_id \
              WHERE sqv.saved_query_id = ? \

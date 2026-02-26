@@ -1,8 +1,8 @@
 use crate::catalog::backend::CatalogBackend;
 use crate::catalog::manager::{
     CatalogManager, ConnectionInfo, CreateQueryRun, DatasetInfo, OptimisticLock, PendingDeletion,
-    QueryResult, QueryResultRow, QueryRun, QueryRunCursor, QueryRunRowPg, QueryRunUpdate,
-    ResultStatus, ResultUpdate, SavedQuery, SavedQueryRowPg, SavedQueryVersion,
+    QueryClassificationData, QueryResult, QueryResultRow, QueryRun, QueryRunCursor, QueryRunRowPg,
+    QueryRunUpdate, ResultStatus, ResultUpdate, SavedQuery, SavedQueryRowPg, SavedQueryVersion,
     SavedQueryVersionRowPg, SqlSnapshot, SqlSnapshotRowPg, TableInfo, UploadInfo,
 };
 use crate::catalog::migrations::{
@@ -928,35 +928,56 @@ impl CatalogManager for PostgresCatalogManager {
         skip(self),
         fields(db = "postgres")
     )]
-    async fn create_saved_query(&self, name: &str, snapshot_id: &str) -> Result<SavedQuery> {
+    async fn create_saved_query(
+        &self,
+        name: &str,
+        snapshot_id: &str,
+        classification: Option<&QueryClassificationData>,
+        tags: &[String],
+        description: &str,
+    ) -> Result<SavedQuery> {
         let id = crate::id::generate_saved_query_id();
         let now = Utc::now();
+        let tags_json = serde_json::to_string(tags)?;
 
         let mut tx = self.backend.pool().begin().await?;
 
         sqlx::query(
-            "INSERT INTO saved_queries (id, name, latest_version, created_at, updated_at) \
-             VALUES ($1, $2, 1, $3, $4)",
+            "INSERT INTO saved_queries (id, name, latest_version, tags, description, created_at, updated_at) \
+             VALUES ($1, $2, 1, $3, $4, $5, $6)",
         )
         .bind(&id)
         .bind(name)
+        .bind(&tags_json)
+        .bind(description)
         .bind(now)
         .bind(now)
         .execute(&mut *tx)
         .await?;
 
         sqlx::query(
-            "INSERT INTO saved_query_versions (saved_query_id, version, snapshot_id, created_at) \
-             VALUES ($1, 1, $2, $3)",
+            "INSERT INTO saved_query_versions \
+             (saved_query_id, version, snapshot_id, category, \
+              num_tables, has_predicate, has_join, has_aggregation, \
+              has_group_by, has_order_by, has_limit, created_at) \
+             VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         )
         .bind(&id)
         .bind(snapshot_id)
+        .bind(classification.map(|c| c.category.as_str()))
+        .bind(classification.map(|c| c.num_tables))
+        .bind(classification.map(|c| c.has_predicate))
+        .bind(classification.map(|c| c.has_join))
+        .bind(classification.map(|c| c.has_aggregation))
+        .bind(classification.map(|c| c.has_group_by))
+        .bind(classification.map(|c| c.has_order_by))
+        .bind(classification.map(|c| c.has_limit))
         .bind(now)
         .execute(&mut *tx)
         .await?;
 
         let row: SavedQueryRowPg = sqlx::query_as(
-            "SELECT id, name, latest_version, created_at, updated_at \
+            "SELECT id, name, latest_version, tags, description, created_at, updated_at \
              FROM saved_queries WHERE id = $1",
         )
         .bind(&id)
@@ -975,7 +996,7 @@ impl CatalogManager for PostgresCatalogManager {
     )]
     async fn get_saved_query(&self, id: &str) -> Result<Option<SavedQuery>> {
         let row: Option<SavedQueryRowPg> = sqlx::query_as(
-            "SELECT id, name, latest_version, created_at, updated_at \
+            "SELECT id, name, latest_version, tags, description, created_at, updated_at \
              FROM saved_queries WHERE id = $1",
         )
         .bind(id)
@@ -997,7 +1018,7 @@ impl CatalogManager for PostgresCatalogManager {
     ) -> Result<(Vec<SavedQuery>, bool)> {
         let fetch_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
         let rows: Vec<SavedQueryRowPg> = sqlx::query_as(
-            "SELECT id, name, latest_version, created_at, updated_at \
+            "SELECT id, name, latest_version, tags, description, created_at, updated_at \
              FROM saved_queries \
              ORDER BY name ASC, id ASC \
              LIMIT $1 OFFSET $2",
@@ -1022,13 +1043,16 @@ impl CatalogManager for PostgresCatalogManager {
         id: &str,
         name: Option<&str>,
         snapshot_id: &str,
+        classification: Option<&QueryClassificationData>,
+        tags: Option<&[String]>,
+        description: Option<&str>,
     ) -> Result<Option<SavedQuery>> {
         let mut tx = self.backend.pool().begin().await?;
 
         // FOR UPDATE acquires a row-level lock to prevent concurrent updates
         // from reading the same latest_version and producing duplicate versions.
         let existing: Option<SavedQueryRowPg> = sqlx::query_as(
-            "SELECT id, name, latest_version, created_at, updated_at \
+            "SELECT id, name, latest_version, tags, description, created_at, updated_at \
              FROM saved_queries WHERE id = $1 FOR UPDATE",
         )
         .bind(id)
@@ -1058,54 +1082,73 @@ impl CatalogManager for PostgresCatalogManager {
             .as_ref()
             .is_some_and(|(sid,)| sid == snapshot_id);
         let name_unchanged = effective_name == existing.name;
+        let tags_unchanged = tags.is_none();
+        let description_unchanged = description.is_none();
 
-        if sql_unchanged && name_unchanged {
+        if sql_unchanged && name_unchanged && tags_unchanged && description_unchanged {
             // Complete no-op — nothing to change
             tx.commit().await?;
             return Ok(Some(SavedQuery::from(existing)));
         }
 
         let now = Utc::now();
+        let tags_json = tags.map(|t| serde_json::to_string(t)).transpose()?;
 
-        if sql_unchanged {
-            // Name-only rename — no new version needed
-            sqlx::query("UPDATE saved_queries SET name = $1, updated_at = $2 WHERE id = $3")
-                .bind(effective_name)
-                .bind(now)
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-        } else {
+        let new_version = if !sql_unchanged {
             // SQL changed — create a new version
-            let new_version = existing
+            let v = existing
                 .latest_version
                 .checked_add(1)
                 .ok_or_else(|| anyhow::anyhow!("Version limit reached for saved query '{}'", id))?;
 
             sqlx::query(
-                "INSERT INTO saved_query_versions (saved_query_id, version, snapshot_id, created_at) \
-                 VALUES ($1, $2, $3, $4)",
+                "INSERT INTO saved_query_versions \
+                 (saved_query_id, version, snapshot_id, category, \
+                  num_tables, has_predicate, has_join, has_aggregation, \
+                  has_group_by, has_order_by, has_limit, created_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
             )
             .bind(id)
-            .bind(new_version)
+            .bind(v)
             .bind(snapshot_id)
+            .bind(classification.map(|c| c.category.as_str()))
+            .bind(classification.map(|c| c.num_tables))
+            .bind(classification.map(|c| c.has_predicate))
+            .bind(classification.map(|c| c.has_join))
+            .bind(classification.map(|c| c.has_aggregation))
+            .bind(classification.map(|c| c.has_group_by))
+            .bind(classification.map(|c| c.has_order_by))
+            .bind(classification.map(|c| c.has_limit))
             .bind(now)
             .execute(&mut *tx)
             .await?;
 
-            sqlx::query(
-                "UPDATE saved_queries SET name = $1, latest_version = $2, updated_at = $3 WHERE id = $4",
-            )
-            .bind(effective_name)
-            .bind(new_version)
-            .bind(now)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        }
+            v
+        } else {
+            existing.latest_version
+        };
+
+        // Single UPDATE for all saved_queries fields. COALESCE keeps the
+        // existing value when the caller did not provide a replacement.
+        sqlx::query(
+            "UPDATE saved_queries \
+             SET name = $1, latest_version = $2, \
+                 tags = COALESCE($3, tags), \
+                 description = COALESCE($4, description), \
+                 updated_at = $5 \
+             WHERE id = $6",
+        )
+        .bind(effective_name)
+        .bind(new_version)
+        .bind(&tags_json)
+        .bind(description)
+        .bind(now)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
 
         let row: SavedQueryRowPg = sqlx::query_as(
-            "SELECT id, name, latest_version, created_at, updated_at \
+            "SELECT id, name, latest_version, tags, description, created_at, updated_at \
              FROM saved_queries WHERE id = $1",
         )
         .bind(id)
@@ -1145,7 +1188,10 @@ impl CatalogManager for PostgresCatalogManager {
     ) -> Result<Option<SavedQueryVersion>> {
         let row: Option<SavedQueryVersionRowPg> = sqlx::query_as(
             "SELECT sqv.saved_query_id, sqv.version, sqv.snapshot_id, \
-             snap.sql_text, snap.sql_hash, sqv.created_at \
+             snap.sql_text, snap.sql_hash, \
+             COALESCE(sqv.category_override, sqv.category) as category, \
+             sqv.num_tables, sqv.has_predicate, sqv.has_join, sqv.has_aggregation, \
+             sqv.has_group_by, sqv.has_order_by, sqv.has_limit, sqv.created_at \
              FROM saved_query_versions sqv \
              JOIN sql_snapshots snap ON snap.id = sqv.snapshot_id \
              WHERE sqv.saved_query_id = $1 AND sqv.version = $2",
@@ -1172,7 +1218,10 @@ impl CatalogManager for PostgresCatalogManager {
         let fetch_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
         let rows: Vec<SavedQueryVersionRowPg> = sqlx::query_as(
             "SELECT sqv.saved_query_id, sqv.version, sqv.snapshot_id, \
-             snap.sql_text, snap.sql_hash, sqv.created_at \
+             snap.sql_text, snap.sql_hash, \
+             COALESCE(sqv.category_override, sqv.category) as category, \
+             sqv.num_tables, sqv.has_predicate, sqv.has_join, sqv.has_aggregation, \
+             sqv.has_group_by, sqv.has_order_by, sqv.has_limit, sqv.created_at \
              FROM saved_query_versions sqv \
              JOIN sql_snapshots snap ON snap.id = sqv.snapshot_id \
              WHERE sqv.saved_query_id = $1 \

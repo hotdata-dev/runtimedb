@@ -6,8 +6,8 @@
 
 use super::{
     CatalogManager, ConnectionInfo, CreateQueryRun, DatasetInfo, OptimisticLock, PendingDeletion,
-    QueryResult, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus, ResultUpdate, SavedQuery,
-    SavedQueryVersion, SqlSnapshot, TableInfo, UploadInfo,
+    QueryClassificationData, QueryResult, QueryRun, QueryRunCursor, QueryRunUpdate, ResultStatus,
+    ResultUpdate, SavedQuery, SavedQueryVersion, SqlSnapshot, TableInfo, UploadInfo,
 };
 use crate::config::CacheConfig;
 use crate::secrets::{SecretMetadata, SecretStatus};
@@ -1136,8 +1136,17 @@ impl CatalogManager for CachingCatalogManager {
 
     // Saved query methods (pass-through, no caching)
 
-    async fn create_saved_query(&self, name: &str, snapshot_id: &str) -> Result<SavedQuery> {
-        self.inner().create_saved_query(name, snapshot_id).await
+    async fn create_saved_query(
+        &self,
+        name: &str,
+        snapshot_id: &str,
+        classification: Option<&QueryClassificationData>,
+        tags: &[String],
+        description: &str,
+    ) -> Result<SavedQuery> {
+        self.inner()
+            .create_saved_query(name, snapshot_id, classification, tags, description)
+            .await
     }
 
     async fn get_saved_query(&self, id: &str) -> Result<Option<SavedQuery>> {
@@ -1157,8 +1166,13 @@ impl CatalogManager for CachingCatalogManager {
         id: &str,
         name: Option<&str>,
         snapshot_id: &str,
+        classification: Option<&QueryClassificationData>,
+        tags: Option<&[String]>,
+        description: Option<&str>,
     ) -> Result<Option<SavedQuery>> {
-        self.inner().update_saved_query(id, name, snapshot_id).await
+        self.inner()
+            .update_saved_query(id, name, snapshot_id, classification, tags, description)
+            .await
     }
 
     async fn delete_saved_query(&self, id: &str) -> Result<bool> {

@@ -23,6 +23,38 @@ const MAX_SQL_LENGTH: usize = 1_000_000;
 /// extremely large whitespace payloads. Any input exceeding this cannot be
 /// valid after trimming since the post-trim limits are well below this.
 const MAX_RAW_INPUT_LENGTH: usize = 2_000_000;
+const MAX_TAGS: usize = 50;
+const MAX_TAG_LENGTH: usize = 100;
+const MAX_DESCRIPTION_LENGTH: usize = 10_000;
+
+fn validate_tags_and_description(tags: &[String], description: &str) -> Result<(), ApiError> {
+    if tags.len() > MAX_TAGS {
+        return Err(ApiError::bad_request(format!(
+            "Too many tags (max {})",
+            MAX_TAGS
+        )));
+    }
+    for tag in tags {
+        if tag.trim().is_empty() {
+            return Err(ApiError::bad_request(
+                "Tags cannot be empty or whitespace-only",
+            ));
+        }
+        if tag.len() > MAX_TAG_LENGTH {
+            return Err(ApiError::bad_request(format!(
+                "Tag exceeds maximum length of {} characters",
+                MAX_TAG_LENGTH
+            )));
+        }
+    }
+    if description.len() > MAX_DESCRIPTION_LENGTH {
+        return Err(ApiError::bad_request(format!(
+            "Description exceeds maximum length of {} characters",
+            MAX_DESCRIPTION_LENGTH
+        )));
+    }
+    Ok(())
+}
 
 fn build_saved_query_detail(sq: SavedQuery, version: SavedQueryVersion) -> SavedQueryDetail {
     SavedQueryDetail {
@@ -31,6 +63,16 @@ fn build_saved_query_detail(sq: SavedQuery, version: SavedQueryVersion) -> Saved
         latest_version: sq.latest_version,
         sql: version.sql_text,
         sql_hash: version.sql_hash,
+        tags: sq.tags,
+        description: sq.description,
+        category: version.category,
+        num_tables: version.num_tables,
+        has_predicate: version.has_predicate,
+        has_join: version.has_join,
+        has_aggregation: version.has_aggregation,
+        has_group_by: version.has_group_by,
+        has_order_by: version.has_order_by,
+        has_limit: version.has_limit,
         created_at: sq.created_at,
         updated_at: sq.updated_at,
     }
@@ -70,8 +112,17 @@ pub async fn create_saved_query(
         )));
     }
 
+    let tags: Vec<String> = request
+        .tags
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| t.trim().to_string())
+        .collect();
+    let description = request.description.unwrap_or_default();
+    validate_tags_and_description(&tags, &description)?;
+
     let saved_query = engine
-        .create_saved_query(&name, &sql)
+        .create_saved_query(&name, &sql, &tags, &description)
         .await
         .map_err(|e| -> ApiError { e.into() })?;
 
@@ -113,6 +164,8 @@ pub async fn list_saved_queries(
             id: q.id,
             name: q.name,
             latest_version: q.latest_version,
+            tags: q.tags,
+            description: q.description,
             created_at: q.created_at,
             updated_at: q.updated_at,
         })
@@ -200,14 +253,36 @@ pub async fn update_saved_query(
         }
     }
 
-    if trimmed_name.is_none() && trimmed_sql.is_none() {
+    let trimmed_tags = request.tags.map(|tags| {
+        tags.into_iter()
+            .map(|t| t.trim().to_string())
+            .collect::<Vec<_>>()
+    });
+    if let Some(ref tags) = trimmed_tags {
+        validate_tags_and_description(tags, "")?;
+    }
+    if let Some(ref desc) = request.description {
+        validate_tags_and_description(&[], desc)?;
+    }
+
+    if trimmed_name.is_none()
+        && trimmed_sql.is_none()
+        && trimmed_tags.is_none()
+        && request.description.is_none()
+    {
         return Err(ApiError::bad_request(
-            "At least one of 'name' or 'sql' must be provided",
+            "At least one of 'name', 'sql', 'tags', or 'description' must be provided",
         ));
     }
 
     let saved_query = engine
-        .update_saved_query(&id, trimmed_name, trimmed_sql)
+        .update_saved_query(
+            &id,
+            trimmed_name,
+            trimmed_sql,
+            trimmed_tags.as_deref(),
+            request.description.as_deref(),
+        )
         .await
         .map_err(|e| -> ApiError { e.into() })?
         .ok_or_else(|| ApiError::not_found(format!("Saved query '{}' not found", id)))?;
@@ -276,6 +351,14 @@ pub async fn list_saved_query_versions(
             version: v.version,
             sql: v.sql_text,
             sql_hash: v.sql_hash,
+            category: v.category,
+            num_tables: v.num_tables,
+            has_predicate: v.has_predicate,
+            has_join: v.has_join,
+            has_aggregation: v.has_aggregation,
+            has_group_by: v.has_group_by,
+            has_order_by: v.has_order_by,
+            has_limit: v.has_limit,
             created_at: v.created_at,
         })
         .collect();

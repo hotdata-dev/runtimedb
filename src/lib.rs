@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod classify;
 pub mod config;
 pub mod datafetch;
 pub mod datafusion;
