@@ -399,7 +399,15 @@ impl CatalogManager for FailingCatalog {
         overrides: &VersionOverrides,
     ) -> Result<Option<SavedQuery>> {
         self.inner
-            .update_saved_query(id, name, snapshot_id, classification, tags, description, overrides)
+            .update_saved_query(
+                id,
+                name,
+                snapshot_id,
+                classification,
+                tags,
+                description,
+                overrides,
+            )
             .await
     }
 

@@ -126,7 +126,10 @@ pub async fn create_saved_query(
         .collect::<Vec<_>>();
     // Deduplicate tags while preserving order
     let mut seen = std::collections::HashSet::new();
-    let tags: Vec<String> = tags.into_iter().filter(|t| seen.insert(t.clone())).collect();
+    let tags: Vec<String> = tags
+        .into_iter()
+        .filter(|t| seen.insert(t.clone()))
+        .collect();
     let description = request.description.unwrap_or_default();
     validate_tags(&tags)?;
     validate_description(&description)?;

@@ -1181,9 +1181,7 @@ impl CatalogManager for PostgresCatalogManager {
                     set_clauses.join(", ")
                 );
 
-                let mut q = sqlx::query(&sql)
-                    .bind(id)
-                    .bind(existing.latest_version);
+                let mut q = sqlx::query(&sql).bind(id).bind(existing.latest_version);
 
                 if let Some(ref cat) = overrides.category_override {
                     q = q.bind(cat.as_deref());

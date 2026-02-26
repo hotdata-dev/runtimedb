@@ -1258,7 +1258,10 @@ async fn test_set_category_override() -> Result<()> {
 
     // Category should now be the override value
     assert_eq!(json["category"], "join");
-    assert_ne!("join", original_category, "override should differ from auto");
+    assert_ne!(
+        "join", original_category,
+        "override should differ from auto"
+    );
     assert_eq!(json["latest_version"], 1); // No new version
 
     Ok(())

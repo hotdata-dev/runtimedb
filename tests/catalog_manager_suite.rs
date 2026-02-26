@@ -1619,7 +1619,15 @@ async fn sqlite_version_overflow_returns_error() {
     // Attempt to create a new version — should fail, not overflow
     let snap2 = manager.get_or_create_snapshot("SELECT 2").await.unwrap();
     let result = manager
-        .update_saved_query(&sq.id, None, &snap2.id, None, None, None, &Default::default())
+        .update_saved_query(
+            &sq.id,
+            None,
+            &snap2.id,
+            None,
+            None,
+            None,
+            &Default::default(),
+        )
         .await;
     assert!(result.is_err(), "Should fail on version overflow");
     let err = result.unwrap_err().to_string();
