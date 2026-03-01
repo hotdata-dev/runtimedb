@@ -13,6 +13,7 @@ use crate::http::models::{
 use crate::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
+use crate::thirdparty::LiquidCacheClientBuilder;
 use anyhow::Result;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as Base64Engine};
 use chrono::Utc;
@@ -25,7 +26,6 @@ use datafusion::execution::SessionStateBuilder;
 use datafusion::prelude::*;
 use datafusion_tracing::{instrument_with_info_spans, InstrumentationOptions};
 use instrumented_object_store::instrument_object_store;
-use liquid_cache_client::LiquidCacheClientBuilder;
 use object_store::ObjectStore;
 use opentelemetry::trace::TraceContextExt;
 use std::collections::{HashMap, HashSet};
@@ -3402,15 +3402,6 @@ type LiquidCacheConfig = (String, Vec<ObjectStoreConfig>);
 ///
 /// This function creates a SessionContext with tracing instrumentation:
 ///
-/// **Without liquid-cache:**
-/// 1. Object stores are wrapped with `instrument_object_store()` for I/O tracing
-/// 2. DataFusion operators get spans via `datafusion-tracing`
-///
-/// **With liquid-cache:**
-/// Uses `LiquidCacheClientBuilder` to create the context. Object stores are registered
-/// with the builder (for the liquid-cache server), not locally instrumented since
-/// data fetching happens on the server side.
-///
 /// ## Arguments
 ///
 /// * `object_stores` - Pre-built object stores to wrap with instrumentation (non-liquid-cache path)
@@ -3424,7 +3415,14 @@ fn build_instrumented_context(
     if let Some((server_address, store_configs)) = liquid_cache_config {
         info!(server = %server_address, "Building liquid-cache session context");
 
-        let mut liquid_cache_builder = LiquidCacheClientBuilder::new(&server_address);
+        // Object store instrumentation is skipped here: actual I/O happens on the
+        // liquid-cache server, so client-side object store wrappers see no traffic.
+        let mut liquid_cache_builder = LiquidCacheClientBuilder::new(&server_address)
+            .with_session_state_mapper(|builder| {
+                builder.with_physical_optimizer_rule(
+                    instrument_with_info_spans!(options: InstrumentationOptions::default()),
+                )
+            });
 
         // Register object stores with liquid-cache builder (server needs these configs)
         for (url, options) in store_configs {
